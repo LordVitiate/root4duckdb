@@ -13,7 +13,7 @@
   <img alt="Core language" src="https://img.shields.io/badge/core-C%2B%2B17-00599C">
   <img alt="Iceberg adapter" src="https://img.shields.io/badge/Iceberg%20adapter-C%2B%2B23-00599C">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey">
-  <img alt="License" src="https://img.shields.io/badge/license-pending-red">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
 </div>
