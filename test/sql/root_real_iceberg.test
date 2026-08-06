@@ -1,0 +1,15 @@
+require root
+
+# This sqllogictest uses the native fixture built by the integration suite.
+# It intentionally fails if the legacy current.json/_SUCCESS.json catalog appears.
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name='root_iceberg_catalog';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_settings()
+WHERE name IN ('root_max_in_flight_files','root_memory_limit');
+----
+2

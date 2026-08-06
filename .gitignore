@@ -1,0 +1,53 @@
+# Build artifacts
+/build/
+/cmake-build-*/
+/out/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.duckdb_extension
+
+# Downloaded source trees and local dependencies
+/.deps/
+/duckdb/
+/extension-ci-tools/
+
+# Build and validation logs
+*.log
+*.tmp
+*.bak
+
+# Generated datasets and local catalogs
+*.root
+*.parquet
+*.duckdb
+*.db
+*.sqlite
+*.sqlite3
+/_tmp/
+/tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*~
+
+# Internal documentation
+/docs/
+*.md
+
+# Keep the public repository README
+!/README.md

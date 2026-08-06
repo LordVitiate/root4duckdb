@@ -1,0 +1,42 @@
+name: Build ROOT4DuckDB
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: root4duckdb
+          channels: conda-forge
+
+      - name: Install ROOT and build tools
+        run: conda install -y root ninja cmake cxx-compiler
+
+      - uses: lukka/run-vcpkg@v11.5
+        with:
+          vcpkgGitCommitId: 5e5d0e1cd7785623065e77eff011afdeec1a3574
+
+      - name: Validate project
+        run: ./scripts/validate_project.py
+
+      - name: Production control-plane tests
+        run: python3 scripts/production/smoke_control_plane.py
+
+      - name: Build shared Apache Iceberg C++
+        run: ./build-iceberg.sh --jobs 4
+
+      - name: Build and test ROOT4DuckDB
+        run: ./build-root4duckdb.sh --jobs 4 --clean --tests
