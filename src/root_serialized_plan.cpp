@@ -151,8 +151,11 @@ SerializedReadPlan BuildSerializedReadPlan(TClass *root_class, const ParsedPath 
             break;
         }
         if (element->IsBase()) {
-            const std::string base_type = TrimType(
+            std::string base_type = TrimType(
                 element->GetTypeName() ? element->GetTypeName() : "");
+            if (base_type.empty() || base_type == "BASE") {
+                base_type = TrimType(element->GetName() ? element->GetName() : "");
+            }
             // TObject contributes its version marker, unique id and bits in
             // the observed member-wise representation. Per-file validation is
             // mandatory before this constant is trusted.
