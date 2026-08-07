@@ -1,0 +1,85 @@
+#include "TestEvent.hpp"
+
+#include "TFile.h"
+#include "TTree.h"
+
+#include <filesystem>
+#include <iostream>
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace fs = std::filesystem;
+
+static void WriteFixture(const fs::path &path, Int_t run_base, const std::vector<std::vector<double>> &events, Int_t split_level = 99) {
+    TFile file(path.string().c_str(), "RECREATE");
+    if (file.IsZombie()) {
+        throw std::runtime_error("Cannot create fixture ROOT file: " + path.string());
+    }
+
+    TTree tree("Events", "ROOT4DuckDB integration fixture");
+    auto *event = new TestEvent();
+    auto *branch = tree.Branch("TestEvent", "TestEvent", &event, 32000, split_level);
+    if (!branch) {
+        delete event;
+        throw std::runtime_error("Cannot create TestEvent object branch");
+    }
+    branch->SetBasketSize(256);
+
+    Int_t event_index = 0;
+    for (const auto &values : events) {
+        event->run = run_base + event_index;
+        event->flags = static_cast<UChar_t>(event_index % 3);
+        event->signed_code = static_cast<Char_t>(event_index - 1);
+        event->inherited = 9000 + event_index;
+        event->vertex[0] = static_cast<Float_t>(event_index * 10.0 + 0.0);
+        event->vertex[1] = static_cast<Float_t>(event_index * 10.0 + 1.0);
+        event->vertex[2] = static_cast<Float_t>(event_index * 10.0 + 2.0);
+        for (int row = 0; row < 2; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                event->matrix[row][col] = static_cast<Float_t>(event_index * 10.0 + row * 3 + col);
+            }
+        }
+        event->mapScore.clear();
+        event->mapScore.emplace(static_cast<Double_t>(event_index) + 0.25, static_cast<Double_t>(event->run));
+        event->mapScore.emplace(static_cast<Double_t>(event_index) + 0.75, static_cast<Double_t>(event->run) + 0.5);
+        event->setCode = {event_index, event_index + 10};
+        event->nestedPairs = {
+            {{static_cast<Double_t>(event_index) + 1.5, 100 + event_index},
+             {static_cast<Double_t>(event_index) + 2.5, 200 + event_index}},
+            {{static_cast<Double_t>(event_index) + 3.5, 300 + event_index}}
+        };
+        ++event_index;
+        event->vecHit.clear();
+        for (double value : values) {
+            event->vecHit.emplace_back(value);
+        }
+        tree.Fill();
+    }
+
+    tree.Write();
+    file.Close();
+    delete event;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        std::cerr << "usage: make_fixture <output-directory>\n";
+        return 2;
+    }
+    try {
+        const fs::path output(argv[1]);
+        fs::create_directories(output);
+        WriteFixture(output / "a.root", 100, {{5.0, 12.0, 7.0, 18.0}, {}, {11.0}});
+        WriteFixture(output / "b.root", 200, {{9.0, 20.0}, {10.0, 10.5}});
+        WriteFixture(output / "c.root", 300, {{std::numeric_limits<double>::quiet_NaN(), 0.1}});
+        WriteFixture(output / "packed.root", 400, {{1.0, 2.0}, {3.0}}, 0);
+        // split_level=1 keeps TestHit fields inside the persistent vecHit ancestor
+        // branch. This reproduces Phast layouts where no physical leaf exists for u/uv.
+        WriteFixture(output / "ancestor.root", 500, {{1.0, 2.0}, {3.0}}, 1);
+    } catch (const std::exception &ex) {
+        std::cerr << ex.what() << '\n';
+        return 1;
+    }
+    return 0;
+}

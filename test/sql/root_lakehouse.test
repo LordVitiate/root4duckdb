@@ -1,0 +1,12 @@
+# name: test/sql/root_lakehouse.test
+# description: registration smoke test for the ROOT4DuckDB API
+# group: [root]
+
+require root
+
+query I
+SELECT count(DISTINCT function_name)
+FROM duckdb_functions()
+WHERE function_name IN ('root_build_index', 'root_build_dataset_index', 'read_root_dataset', 'root_dataset_stats', 'read_root', 'create_meta')
+----
+6

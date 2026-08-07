@@ -1,0 +1,5 @@
+-- Example only. Supply credentials through Dagster secrets/connections or the
+-- process environment, not in the repository.
+INSTALL iceberg;
+LOAD iceberg;
+-- ATTACH '<warehouse-or-rest-uri>' AS compass_iceberg (TYPE ICEBERG, ...);

@@ -1,0 +1,12 @@
+[
+  "/PaEvent/vecHeader/value",
+  "/PaEvent/vecParticle/flags",
+  "/PaEvent/vecParticle/indTrack",
+  "/PaEvent/vecParticle/vecVertex/value",
+  "/PaEvent/vecVertex/x",
+  "/PaEvent/vecVertex/chi2tot",
+  "/PaEvent/vecVertex/bestprim",
+  "/PaEvent/vecTrack/xx0",
+  "/PaEvent/vecTrack/chi2tot",
+  "/PaEvent/vecTrack/vecTPar/Par"
+]

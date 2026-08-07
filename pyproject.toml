@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "root4duckdb-production"
+version = "3.8.0"
+description = "ROOT4DUCKDB production indexing, validation and Dagster orchestration"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dagster = ["dagster>=1.10", "dagster-webserver>=1.10"]
+test = ["pytest>=7"]

@@ -1,0 +1,13 @@
+-- This file is intentionally catalog-specific. Replace the statements below
+-- with the maintenance procedures supported by your writable Iceberg catalog.
+-- The production config requires a compaction SQL file so COMPACT is never
+-- silently skipped. Typical responsibilities:
+--   1. rewrite small data files to the catalog target size;
+--   2. rewrite/compact manifests;
+--   3. expire snapshots according to retention policy;
+--   4. remove catalog-known orphan files after the safety retention window.
+--
+-- Do not use DELETE+INSERT as a generic substitute: that can duplicate or
+-- temporarily expose data depending on the catalog. Use the catalog's native
+-- rewrite/expire procedures and validate them in a test namespace first.
+SELECT 'configure native catalog compaction here' AS required_action;

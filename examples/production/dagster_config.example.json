@@ -1,0 +1,38 @@
+{
+  "format": "root4duckdb-production-config-v1",
+  "project_dir": "../..",
+  "workspace": "/afs/cern.ch/work/USER/private/root_duckdb/work/2022-W08",
+  "chunks_dir": "/afs/cern.ch/work/USER/private/root_duckdb/chunks/2022-W08",
+  "inputs": [
+    "/eos/experiment/compass/data/2022/W08/slot1/mDST/*.root*"
+  ],
+  "recursive": false,
+  "tree": "PaEvent",
+  "paths_file": "paths-paevent-minimal.json",
+  "dictionary": "/afs/cern.ch/work/USER/private/COMPASS/phast/lib/libPhast.so",
+  "duckdb": "../../build/release/duckdb",
+  "execution_backend": "htcondor",
+  "attach_sql": "attach-iceberg-rest.example.sql",
+  "compaction_sql": "iceberg_compaction.sql.example",
+  "resources": {
+    "target_chunk_seconds": 21600,
+    "throughput_bytes_per_second": 35000000,
+    "request_memory_mb": 28000,
+    "threads": 4
+  },
+  "htcondor": {
+    "job_flavour": "workday"
+  },
+  "iceberg": {
+    "enabled": true,
+    "catalog": "compass_iceberg",
+    "namespace": "root4duckdb",
+    "prefix": "compass_2022_w08",
+    "require_compaction": true
+  },
+  "dagster": {
+    "retries": 3,
+    "retry_delay_seconds": 30,
+    "cleanup_orphans": false
+  }
+}
