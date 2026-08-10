@@ -205,10 +205,22 @@ FROM read_root(
     reader_mode := 'serialized',
     raw_validation_entries := 2
 );
+SELECT count(*) = 5
+       AND sum(refs) = 30
+       AND min(vecHit_idx) = 0 AND max(vecHit_idx) = 1
+       AND min(refs_idx) = 0 AND max(refs_idx) = 1
+       AS serialized_nested_primitive_vector_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/refs/value',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
 SQL
 
 DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
-if [[ "$DIRECT_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue' ]]; then
+if [[ "$DIRECT_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected direct semantic read result: $DIRECT_RESULT" >&2
     exit 1
 fi
@@ -589,6 +601,36 @@ SELECT count(DISTINCT column_id) = 1
 FROM read_parquet('$WORK_DIR/index_ancestor/warehouse/root_index/baskets/data/*.parquet', filename = true)
 WHERE filename LIKE '%' || current_root_snapshot() || '-%';
 
+CREATE TEMP TABLE ancestor_nested_status AS
+SELECT *
+FROM root_build_index(
+    '$WORK_DIR/data/ancestor.root',
+    'Events',
+    '/TestEvent/vecHit/refs/value',
+    '$WORK_DIR/index_ancestor_nested',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    catalog_mode := 'sqlite',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2,
+    index_threads := 1,
+    bloom_bytes := 64,
+    allow_partial := false
+);
+SELECT count(*) = 1 AND min(flattened_values) = 5
+FROM ancestor_nested_status
+WHERE status = 'OK';
+SELECT count(*) = 5
+       AND sum(value) = 30
+       AND min(vecHit_idx) = 0 AND max(vecHit_idx) = 1
+       AND min(refs_idx) = 0 AND max(refs_idx) = 1
+FROM read_root_dataset(
+    '$WORK_DIR/index_ancestor_nested',
+    '/TestEvent/vecHit/refs/value',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+
 -- Fixed array read from the full TestEvent object; ancestor branch is basket metadata only.
 SELECT count(*)
 FROM root_build_index(
@@ -613,7 +655,7 @@ FROM read_root_dataset(
 SQL
 
 ANCESTOR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/ancestor.sql")"
-if [[ "$ANCESTOR_RESULT" != $'true\ntrue\ntrue\n1\ntrue' ]]; then
+if [[ "$ANCESTOR_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\n1\ntrue' ]]; then
     echo "unexpected ancestor-fallback result: $ANCESTOR_RESULT" >&2
     exit 1
 fi

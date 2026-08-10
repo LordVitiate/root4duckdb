@@ -47,6 +47,7 @@ required_files = [
     "src/root_branch_projection.cpp",
     "src/root_debug.cpp",
     "src/root_serialized_codec.cpp",
+    "src/root_serialized_nested_codec.cpp",
     "src/root_serialized_plan.cpp",
     "src/root_serialized_reader.cpp",
     "src/root_bloom.cpp",
@@ -94,6 +95,7 @@ for source in [
     "src/root_branch_projection.cpp",
     "src/root_debug.cpp",
     "src/root_serialized_codec.cpp",
+    "src/root_serialized_nested_codec.cpp",
     "src/root_serialized_plan.cpp",
     "src/root_serialized_reader.cpp",
     "src/iceberg/root_iceberg_common.cpp",
@@ -181,6 +183,9 @@ feature_checks: dict[str, list[str]] = {
         "DecodeSerializedVectorEntry",
         "EqualDecodedValues",
     ],
+    "src/root_serialized_nested_codec.cpp": [
+        "DecodeSerializedNestedPrimitiveVectorColumn",
+    ],
     "src/root_lake_index.cpp": [
         "root_build_dataset_index",
         "manifest_fingerprint",
@@ -226,6 +231,7 @@ for relative in (
     "src/root_branch_projection.cpp",
     "src/root_debug.cpp",
     "src/root_serialized_codec.cpp",
+    "src/root_serialized_nested_codec.cpp",
     "src/root_serialized_plan.cpp",
     "src/root_serialized_reader.cpp",
 ):

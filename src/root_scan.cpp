@@ -2835,7 +2835,8 @@ unique_ptr<LocalTableFunctionState> RootScanInitLocal(ExecutionContext& context,
             {
                 local_state->serialized_reader.Bind(
                     physical.branch, local_state->serialized_plan,
-                    bind_data.raw_max_entry_bytes, bind_data.raw_max_values_per_entry);
+                    bind_data.raw_max_entry_bytes, bind_data.raw_max_values_per_entry,
+                    object_context.CurrentObject());
                 local_state->serialized_active = true;
                 local_state->serialized_column = col_idx;
                 local_state->serialized_context = col.branch_name;

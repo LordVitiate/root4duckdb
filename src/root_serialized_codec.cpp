@@ -101,6 +101,29 @@ bool DecodePrimitive(const uint8_t *ptr, SerializedPrimitiveKind kind, double &v
     return false;
 }
 
+bool ValidatePrimitiveLayout(const SerializedEntryLayout &layout,
+                             size_t expected_index_depth,
+                             SerializedPrimitiveKind &primitive_kind,
+                             std::string &failure_reason) {
+    if (!layout.value_bytes || !layout.fixed_array_length || !layout.index_depth) {
+        failure_reason = "serialized entry layout is incomplete";
+        return false;
+    }
+    primitive_kind = layout.primitive_kind == SerializedPrimitiveKind::UNKNOWN
+                         ? ClassifySerializedPrimitive(layout.value_type)
+                         : layout.primitive_kind;
+    if (primitive_kind == SerializedPrimitiveKind::UNKNOWN ||
+        PrimitiveKindWidth(primitive_kind) != layout.value_bytes) {
+        failure_reason = "serialized primitive type and width are inconsistent";
+        return false;
+    }
+    if (layout.index_depth != expected_index_depth) {
+        failure_reason = "serialized entry index shape is inconsistent";
+        return false;
+    }
+    return true;
+}
+
 void PushArrayCoordinates(uint64_t flat, const std::vector<uint32_t> &dimensions,
                           std::vector<int32_t> &indices) {
     if (dimensions.empty()) {
@@ -171,26 +194,13 @@ bool DecodeSerializedVectorEntry(const uint8_t *bytes, size_t entry_size,
         failure_reason = "serialized vector entry is shorter than its header";
         return false;
     }
-    if (!layout.value_bytes || !layout.fixed_array_length || !layout.index_depth) {
-        failure_reason = "serialized entry layout is incomplete";
-        return false;
-    }
-    const auto primitive_kind = layout.primitive_kind == SerializedPrimitiveKind::UNKNOWN
-                                    ? ClassifySerializedPrimitive(layout.value_type)
-                                    : layout.primitive_kind;
-    if (primitive_kind == SerializedPrimitiveKind::UNKNOWN ||
-        PrimitiveKindWidth(primitive_kind) != layout.value_bytes) {
-        failure_reason = "serialized primitive type and width are inconsistent";
-        return false;
-    }
     const size_t expected_index_depth = 1 +
         (layout.fixed_array_length > 1
              ? (layout.array_dimensions.empty() ? 1 : layout.array_dimensions.size())
              : 0);
-    if (layout.index_depth != expected_index_depth) {
-        failure_reason = "serialized entry index shape is inconsistent";
-        return false;
-    }
+    SerializedPrimitiveKind primitive_kind = SerializedPrimitiveKind::UNKNOWN;
+    if (!ValidatePrimitiveLayout(layout, expected_index_depth, primitive_kind,
+                                 failure_reason)) return false;
     uint64_t dimensions_product = 1;
     for (const auto dimension : layout.array_dimensions) {
         if (!dimension || dimension > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||

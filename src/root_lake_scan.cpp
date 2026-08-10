@@ -1850,7 +1850,8 @@ static void OpenTaskFile(const DatasetBindData &bind, DatasetGlobalState &global
 
     if (bind.reader_mode != RootReaderMode::OBJECT && serialized_rejection.empty()) {
         local.serialized_reader.Bind(local.physical_branch, local.serialized_plan,
-                                     bind.raw_max_entry_bytes, bind.raw_max_values_per_entry);
+                                     bind.raw_max_entry_bytes, bind.raw_max_values_per_entry,
+                                     local.object_context.address_slot);
         local.serialized_active = true;
         local.validation_remaining = bind.raw_validation_entries;
     } else if (bind.reader_mode != RootReaderMode::OBJECT) {

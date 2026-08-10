@@ -983,6 +983,11 @@ inline TBranch *FindPhysicalBranch(TBranch *object_branch, const std::vector<std
     CollectBranchTree(object_branch, all);
     const auto &leaf = fields.back();
     const auto dotted = JoinStrings(fields, ".");
+    // A terminal-only match is unambiguous only for a one-component path.
+    // For a nested prefix such as vecParticle/vecVertex, accepting an unrelated
+    // top-level PaEvent.vecVertex branch prevents ResolvePhysicalBranch from
+    // shortening the prefix to the actual persistent vecParticle ancestor.
+    const bool allow_terminal_only_match = fields.size() == 1;
     TBranch *best = nullptr;
     int best_score = -1;
     for (auto *candidate : all) {
@@ -992,8 +997,10 @@ inline TBranch *FindPhysicalBranch(TBranch *object_branch, const std::vector<std
         if (name == dotted) score = 500;
         else if (BranchNameEndsWithToken(name, dotted)) score = 450;
         else if (ContainsTokensInOrder(name, fields)) score = 350;
-        else if (name == leaf) score = 250;
-        else if (BranchNameEndsWithToken(name, leaf)) score = 200;
+        else if (allow_terminal_only_match && name == leaf) score = 250;
+        else if (allow_terminal_only_match && BranchNameEndsWithToken(name, leaf)) {
+            score = 200;
+        }
         if (score < 0) continue;
 
         const int basket_count = candidate->GetWriteBasket() + 1;

@@ -599,7 +599,8 @@ static BuildStatus IndexOneFile(const BuildIndexBindData &bind, const std::strin
                 continue;
             }
             path.serialized_reader.Bind(path.physical_branch, path.serialized_plan,
-                                        bind.raw_max_entry_bytes, bind.raw_max_values_per_entry);
+                                        bind.raw_max_entry_bytes, bind.raw_max_values_per_entry,
+                                        object_context.address_slot);
             path.serialized_active = true;
             path.validation_remaining = bind.raw_validation_entries;
             ++serialized_path_count;
@@ -658,6 +659,15 @@ static BuildStatus IndexOneFile(const BuildIndexBindData &bind, const std::strin
                     const bool collect_indices = path.validation_remaining > 0;
                     const bool decoded = path.serialized_reader.Decode(
                         entry, values, indices, failure_reason, collect_indices);
+                    // Locating a variable-width member-wise prefix uses the outer
+                    // vector in ObjectContext as ROOT scratch storage.  Any object
+                    // materialized before this call must therefore be reloaded
+                    // before validation or an object-reader fallback consumes it.
+                    if (path.serialized_plan.projection_kind ==
+                        SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR) {
+                        object = nullptr;
+                        object_loaded = false;
+                    }
                     SerializedBasketInfo basket_info;
                     if (path.serialized_reader.CurrentBasketInfo(basket_info)) {
                         ApplySerializedBasketMetadata(basket, basket_info);

@@ -67,3 +67,5 @@ test/fixtures/*.o
 test/fixtures/*.so
 test/fixtures/*.dylib
 test/fixtures/*.exe
+*.patch
+*.sql

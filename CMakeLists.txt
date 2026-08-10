@@ -27,8 +27,10 @@ set(EXTENSION_SOURCES
     src/root_lake_scan.cpp
     src/root_runtime_settings.cpp
     src/root_serialized_plan.cpp
+    src/root_serialized_deep.cpp
     src/root_serialized_reader.cpp
     src/root_serialized_codec.cpp
+    src/root_serialized_nested_codec.cpp
     ${ROOT4DUCKDB_ICEBERG_SOURCES}
 )
 
