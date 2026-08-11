@@ -2,10 +2,6 @@
 
 #include "root_debug.hpp"
 
-#include "TBranch.h"
-#include "TClass.h"
-#include "TStreamerElement.h"
-
 #include <algorithm>
 #include <cctype>
 #include <cstdio>

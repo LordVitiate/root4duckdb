@@ -22,9 +22,13 @@ set(EXTENSION_SOURCES
     src/root_file_opener.cpp
     src/root_direct_scheduler.cpp
     src/root_debug.cpp
+    src/root_dictionary.cpp
+    src/root_dataset_catalog.cpp
     src/root_bloom.cpp
     src/root_branch_projection.cpp
     src/root_filter.cpp
+    src/root_semantic_reader.cpp
+    src/root_index_builder.cpp
     src/root_index_metadata.cpp
     src/root_lake_index.cpp
     src/root_lake_scan.cpp

@@ -1,7 +1,5 @@
 #include "include/root_file_opener.hpp"
 
-#include "TTree.h"
-
 #include "duckdb/common/exception.hpp"
 
 #include <algorithm>

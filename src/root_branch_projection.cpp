@@ -1,7 +1,6 @@
-#include "root_branch_projection.hpp"
+#include "root_headers.hpp"
 
-#include "TBranch.h"
-#include "TTree.h"
+#include "root_branch_projection.hpp"
 
 #include <algorithm>
 #include <limits>

@@ -69,3 +69,4 @@ test/fixtures/*.dylib
 test/fixtures/*.exe
 *.patch
 *.sql
+*.pre-

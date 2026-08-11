@@ -1,17 +1,6 @@
-// TBufferFile declares kStreamedMemberWise with ROOT's BIT macro. Include it
-// before root_lake_common.hpp intentionally undefines BIT for DuckDB headers.
-#include "TBufferFile.h"
-
 #include "root_serialized_reader.hpp"
 
 #include "root_debug.hpp"
-
-#include "TBranch.h"
-#include "TBasket.h"
-#include "TBuffer.h"
-#include "TClass.h"
-#include "TFile.h"
-#include "TTree.h"
 
 #include <algorithm>
 #include <limits>

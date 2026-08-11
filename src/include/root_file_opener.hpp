@@ -1,6 +1,5 @@
 #pragma once
-
-#include "TFile.h"
+#include "root_headers.hpp"
 
 #include <cstdint>
 #include <memory>
