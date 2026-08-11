@@ -3,6 +3,7 @@
 #include "include/root_bloom.hpp"
 #include "include/root_branch_projection.hpp"
 #include "include/root_index_metadata.hpp"
+#include "include/root_input_resolver.hpp"
 #include "include/root_lake_common.hpp"
 #include "include/root_serialized_reader.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
@@ -177,104 +178,6 @@ static std::vector<std::string> ParseLogicalPaths(const std::string &raw) {
 static std::string LogicalPathsJSON(const std::vector<std::string> &paths) {
     nlohmann::json json = paths;
     return json.dump();
-}
-
-static std::string Trim(std::string value) {
-    const auto begin = value.find_first_not_of(" \t\r\n");
-    if (begin == std::string::npos) return {};
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return value.substr(begin, end - begin + 1);
-}
-
-static bool LooksLikeRootInput(const std::string &path) {
-    const auto slash = path.find_last_of("/\\");
-    const auto name = path.substr(slash == std::string::npos ? 0 : slash + 1);
-    const auto root = name.rfind(".root");
-    if (root == std::string::npos) return false;
-    const auto suffix = name.substr(root + 5);
-    if (suffix.empty()) return true;
-    if (suffix.front() != '.' || suffix.size() == 1) return false;
-    return std::all_of(suffix.begin() + 1, suffix.end(),
-                       [](unsigned char c) { return std::isdigit(c); });
-}
-
-static std::vector<std::string> ReadInputList(const std::string &path) {
-    std::ifstream input(path);
-    if (!input) throw IOException("Cannot open ROOT URI list: " + path);
-    std::vector<std::string> result;
-    std::string line;
-    while (std::getline(input, line)) {
-        line = Trim(line);
-        if (!line.empty() && line.front() != '#') result.push_back(line);
-    }
-    return result;
-}
-
-static std::vector<std::string> ParseInputSpecifications(const std::string &raw) {
-    const auto trimmed = Trim(raw);
-    if (trimmed.empty()) return {};
-    if (trimmed.front() == '[') {
-        auto json = nlohmann::json::parse(trimmed);
-        if (!json.is_array()) throw InvalidInputException("ROOT inputs JSON must be an array");
-        std::vector<std::string> result;
-        for (const auto &item : json) {
-            if (!item.is_string()) throw InvalidInputException("ROOT inputs JSON entries must be strings");
-            result.push_back(Trim(item.get<std::string>()));
-        }
-        return result;
-    }
-    std::vector<std::string> result;
-    std::stringstream stream(trimmed);
-    std::string item;
-    while (std::getline(stream, item, ',')) {
-        item = Trim(item);
-        if (!item.empty()) result.push_back(item);
-    }
-    return result;
-}
-
-static std::vector<std::string> ExpandRootInputs(ClientContext &context, const std::string &raw) {
-    auto &file_system = FileSystem::GetFileSystem(context);
-    std::deque<std::string> pending;
-    for (const auto &spec : ParseInputSpecifications(raw)) pending.push_back(spec);
-    std::vector<std::string> files;
-    idx_t expansions = 0;
-    while (!pending.empty()) {
-        if (++expansions > 1000000) throw InvalidInputException("ROOT input expansion is unreasonably large");
-        auto spec = Trim(std::move(pending.front()));
-        pending.pop_front();
-        if (spec.empty()) continue;
-
-        std::string list_path;
-        if (spec.front() == '@') list_path = spec.substr(1);
-        else {
-            const fs::path local(spec);
-            const auto extension = local.extension().string();
-            if (fs::is_regular_file(local) &&
-                (extension == ".txt" || extension == ".list" || extension == ".manifest" || extension == ".uris")) {
-                list_path = spec;
-            }
-        }
-        if (!list_path.empty()) {
-            const auto nested = ReadInputList(list_path);
-            for (auto it = nested.rbegin(); it != nested.rend(); ++it) pending.push_front(*it);
-            continue;
-        }
-
-        std::string pattern = spec;
-        std::error_code ec;
-        if (fs::is_directory(fs::path(spec), ec)) {
-            pattern = (fs::path(spec) / "*.root*").string();
-        }
-        auto matches = file_system.Glob(pattern);
-        for (auto &entry : matches) {
-            if (LooksLikeRootInput(entry.path)) files.push_back(entry.path);
-        }
-    }
-    std::sort(files.begin(), files.end());
-    files.erase(std::unique(files.begin(), files.end()), files.end());
-    if (files.empty()) throw IOException("No ROOT files matched input specification: " + raw);
-    return files;
 }
 
 static std::string FileContentFingerprint(const std::string &path) {
@@ -1152,7 +1055,7 @@ static unique_ptr<GlobalTableFunctionState> BuildIndexInit(ClientContext &contex
     state->dictionary_fingerprint = bind.dictionary_fingerprint;
 
     LoadDictionary(bind.dictionary);
-    const auto files = ExpandRootInputs(context, bind.root_glob);
+    const auto files = ResolveRootInputs(context, bind.root_glob);
     const auto root_runtime = RootRuntimeSettings::From(context, files.size());
     if (!bind.has_index_threads) {
         bind.index_threads = static_cast<uint32_t>(root_runtime.threads);

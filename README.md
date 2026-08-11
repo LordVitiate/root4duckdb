@@ -47,6 +47,26 @@ rebuilds, and dynamic-link verification.
 - `root_dataset_stats(...)` — metadata aggregates.
 - `root_iceberg_catalog(...)` — inspection of the local Iceberg SQL catalog.
 
+`read_root(...)` also accepts a directory, shell-style glob, comma-separated
+list, JSON string array, or `@file` list. Multi-file scans bind the SQL schema
+from one readable representative file and open the remaining files lazily on a
+bounded worker pool. No scan-policy flags are required: concurrency is derived
+from `SET threads`, DuckDB's memory limit, and automatic memory admission.
+
+```sql
+SELECT count(*), sum(value)
+FROM read_root(
+    '/data/run*.root*',
+    dictionary := '/data/libExperiment.so',
+    path_prefix := '/Event/records/value'
+);
+```
+
+Multi-file results add `source_id` and `source_path`; `event_id` remains the
+entry number inside each source. See
+[Direct multi-file scans](docs/direct-multifile-scan.md) for execution,
+failure, profiling, and regression-test details.
+
 The canonical row identity is `source_id + entry_id + nested indices`. Version
 3.8 adds a guarded serialized-basket reader for supported
 `std::vector<object>/primitive-member` layouts. It reads only the physical

@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -52,8 +53,12 @@
 #include "include/root_meta.hpp"
 #include "include/root_branch_projection.hpp"
 #include "include/root_debug.hpp"
+#include "include/root_direct_scheduler.hpp"
+#include "include/root_file_opener.hpp"
 #include "include/root_filter.hpp"
+#include "include/root_input_resolver.hpp"
 #include "include/root_lake_common.hpp"
+#include "include/root_runtime_settings.hpp"
 #include "include/root_serialized_reader.hpp"
 
 namespace duckdb {
@@ -1012,7 +1017,8 @@ static LogicalType RootTypeToDuckDB(const std::string& root_type, bool is_string
     if (t == "Short_t" || t == "short") return LogicalType::SMALLINT;
     if (t == "UShort_t" || t == "unsigned short") return LogicalType::USMALLINT;
     if (t == "UInt_t" || t == "unsigned int") return LogicalType::UINTEGER;
-    if (t == "ULong_t" || t == "unsigned long") return LogicalType::UBIGINT;
+    if (t == "ULong_t" || t == "unsigned long" ||
+        t == "ULong64_t" || t == "unsigned long long") return LogicalType::UBIGINT;
 
     return LogicalType::VARCHAR;
 }
@@ -1326,76 +1332,6 @@ public:
 };
 
 // ============================================================
-// RootFileHandle (обёртка для открытия файла)
-// ============================================================
-class RootFileHandle
-{
-    std::unique_ptr<TFile> file_;
-    TTree* tree_ = nullptr;
-    std::string tree_name_;
-
-public:
-    RootFileHandle() = default;
-
-    void Open(const std::string& file_path, const std::string& tree_name, std::mutex* sync_mutex = nullptr)
-    {
-        tree_name_ = tree_name;
-
-        if (sync_mutex)
-        {
-            std::lock_guard<std::mutex> lock(*sync_mutex);
-            file_.reset(TFile::Open(file_path.c_str(), "READ"));
-        }
-        else
-        {
-            file_.reset(TFile::Open(file_path.c_str(), "READ"));
-        }
-
-        if (!file_ || file_->IsZombie())
-        {
-            throw IOException("Failed to open ROOT file: " + file_path);
-        }
-
-        file_->GetObject(tree_name_.c_str(), tree_);
-        if (!tree_)
-        {
-            throw IOException("TTree not found: " + tree_name_);
-        }
-    }
-
-    [[nodiscard]] TFile* GetTFile() const { return file_.get(); }
-    [[nodiscard]] TTree* GetTTree() const { return tree_; }
-
-    void DisableAllBranches()
-    {
-        if (tree_)
-        {
-            tree_->SetBranchStatus("*", 0);
-        }
-    }
-
-    void EnableAndBindBranch(const std::string& branch_name, void* buffer, MetaColumnType /*type*/)
-    {
-        if (!tree_)
-        {
-            return;
-        }
-        tree_->SetBranchStatus(branch_name.c_str(), 1);
-        tree_->SetBranchAddress(branch_name.c_str(), buffer);
-    }
-
-    Long64_t ReadEntry(Long64_t entry_id)
-    {
-        return tree_ ? tree_->GetEntry(entry_id) : 0;
-    }
-
-    [[nodiscard]] bool IsValid() const
-    {
-        return file_ && tree_ && !file_->IsZombie();
-    }
-};
-
-// ============================================================
 // RootLakeFilterEngine (для pushdown фильтров)
 // Do not call this duckdb::FilterEngine: DuckDB has an internal class with that name.
 // ============================================================
@@ -1460,6 +1396,10 @@ struct FastRootBindData : public TableFunctionData
 {
     RootDebugLifetimeSentinel lifetime_sentinel {"FastRootBindData"};
     std::string root_path;
+    std::string input_specification;
+    std::vector<std::string> root_paths;
+    idx_t representative_source_id = 0;
+    uint64_t bind_open_us = 0;
     std::string meta_path;
     std::string tree_name;
     uint64_t total_rows = 0;
@@ -1479,6 +1419,10 @@ struct FastRootBindData : public TableFunctionData
     uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
     uint64_t raw_max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
     uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
+    idx_t source_id_column = DConstants::INVALID_INDEX;
+    idx_t source_path_column = DConstants::INVALID_INDEX;
+
+    bool IsMultiFile() const { return root_paths.size() > 1; }
 
     ~FastRootBindData()
     {
@@ -1509,9 +1453,14 @@ struct FastRootGlobalState : public GlobalTableFunctionState
     std::atomic<uint64_t> serialized_entry_bytes {0};
     std::atomic<uint64_t> object_validation_entries {0};
     std::atomic<uint64_t> object_fallback_entries {0};
+    unique_ptr<rootlake::RootDirectFileScheduler> file_scheduler;
+    uint64_t event_lower = 0;
+    uint64_t event_upper = std::numeric_limits<uint64_t>::max();
+    bool event_range_impossible = false;
 
     idx_t MaxThreads() const override
     {
+        if (file_scheduler) return file_scheduler->MaxThreads();
         return WorkScheduler::EstimateOptimalThreads(scheduled_rows);
     }
 };
@@ -1569,7 +1518,7 @@ struct ReadResult
 // ============================================================
 struct FastRootLocalState : public LocalTableFunctionState
 {
-    RootFileHandle root_file;
+    rootlake::RootFileHandle root_file;
     TypedBufferPool buffer_pool;
 
     std::unordered_map<std::string, ObjectContext> root_contexts;
@@ -1600,6 +1549,10 @@ struct FastRootLocalState : public LocalTableFunctionState
     // Для режима прямой работы с веткой
     TBranch* direct_branch = nullptr;
     TLeaf* direct_leaf = nullptr;
+
+    bool file_active = false;
+    rootlake::RootDirectFileTask file_task;
+    std::chrono::steady_clock::time_point file_started;
 
     ~FastRootLocalState() = default;
 };
@@ -2338,6 +2291,62 @@ static bool BindSemanticPathWithoutMetadata(
 // ============================================================
 // RootScanBind
 // ============================================================
+static std::unique_ptr<TFile> OpenRepresentativeFile(FastRootBindData& bind_data)
+{
+    std::vector<std::string> failures;
+    for (idx_t source_id = 0; source_id < bind_data.root_paths.size(); ++source_id)
+    {
+        RootDebug("FILE.BEFORE_OPEN",
+                  "mode=representative source_id=" + std::to_string(source_id) +
+                  " path=" + bind_data.root_paths[source_id]);
+        auto result = rootlake::OpenRootFile(bind_data.root_paths[source_id]);
+        bind_data.bind_open_us += result.elapsed_us;
+        RootDebug("FILE.AFTER_OPEN",
+                  "mode=representative source_id=" + std::to_string(source_id) +
+                  " attempts=" + std::to_string(result.attempts) +
+                  " elapsed_us=" + std::to_string(result.elapsed_us) +
+                  " zombie=" + std::to_string(result.file && result.file->IsZombie() ? 1 : 0));
+        if (result)
+        {
+            bind_data.representative_source_id = source_id;
+            bind_data.root_path = bind_data.root_paths[source_id];
+            return std::move(result.file);
+        }
+        failures.push_back(bind_data.root_paths[source_id] + ": " + result.error);
+    }
+    std::ostringstream message;
+    message << "Failed to open every ROOT input while selecting a representative file";
+    const auto limit = std::min<size_t>(failures.size(), 4);
+    for (size_t index = 0; index < limit; ++index) message << "; " << failures[index];
+    if (failures.size() > limit) message << "; ...";
+    throw IOException(message.str());
+}
+
+static void AddMultiFileIdentityColumns(FastRootBindData& bind_data,
+                                        vector<string>& return_names,
+                                        vector<LogicalType>& return_types)
+{
+    if (!bind_data.IsMultiFile() || bind_data.is_browse_mode ||
+        bind_data.source_id_column != DConstants::INVALID_INDEX) return;
+
+    bind_data.source_id_column = bind_data.columns.size();
+    RootLakeColumnInfo source_id;
+    source_id.name = "source_id";
+    source_id.root_type = "ULong64_t";
+    bind_data.columns.push_back(std::move(source_id));
+    return_names.emplace_back("source_id");
+    return_types.emplace_back(LogicalTypeId::UBIGINT);
+
+    bind_data.source_path_column = bind_data.columns.size();
+    RootLakeColumnInfo source_path;
+    source_path.name = "source_path";
+    source_path.root_type = "string";
+    source_path.is_string = true;
+    bind_data.columns.push_back(std::move(source_path));
+    return_names.emplace_back("source_path");
+    return_types.emplace_back(LogicalTypeId::VARCHAR);
+}
+
 unique_ptr<FunctionData> RootScanBind(
     ClientContext& context,
     TableFunctionBindInput& input,
@@ -2347,7 +2356,9 @@ unique_ptr<FunctionData> RootScanBind(
     RootDebugOperationScope debug_operation("RootScanBind");
     auto bind_data = make_uniq<FastRootBindData>();
 
-    bind_data->root_path = input.inputs[0].ToString();
+    bind_data->input_specification = input.inputs[0].ToString();
+    bind_data->root_paths = rootlake::ResolveRootInputs(context, bind_data->input_specification);
+    bind_data->root_path = bind_data->root_paths.front();
     auto reader_mode = input.named_parameters.find("reader_mode");
     if (reader_mode != input.named_parameters.end()) {
         bind_data->reader_mode = rootlake::ParseRootReaderMode(reader_mode->second.ToString());
@@ -2375,11 +2386,12 @@ unique_ptr<FunctionData> RootScanBind(
         throw InvalidInputException("raw_max_values_per_entry must be positive");
     }
     RootDebug("BIND.BEGIN",
-              "root_path=" + bind_data->root_path +
+              "root_input=" + bind_data->input_specification +
+              " resolved_files=" + std::to_string(bind_data->root_paths.size()) +
               " inputs=" + std::to_string(input.inputs.size()) +
               " named_parameters=" + std::to_string(input.named_parameters.size()));
-    bind_data->meta_path = bind_data->root_path + ".json";
-    if (input.inputs.size() > 1)
+    bind_data->meta_path = bind_data->IsMultiFile() ? std::string() : bind_data->root_path + ".json";
+    if (!bind_data->IsMultiFile() && input.inputs.size() > 1)
     {
         auto& fs = FileSystem::GetFileSystem(context);
         bind_data->meta_path = input.inputs[1].ToString() + "/" + fs.ExtractBaseName(bind_data->root_path) + ".json";
@@ -2397,7 +2409,7 @@ unique_ptr<FunctionData> RootScanBind(
     {
         // Без path_prefix — browse mode на корневом уровне (список веток)
         RootDebug("FILE.BEFORE_OPEN", "mode=root_browse path=" + bind_data->root_path);
-        std::unique_ptr<TFile> file(TFile::Open(bind_data->root_path.c_str(), "READ"));
+        auto file = OpenRepresentativeFile(*bind_data);
         RootDebug("FILE.AFTER_OPEN",
                   "mode=root_browse file_ptr=" + RootPointer(file.get()) +
                   " zombie=" + std::to_string(file && file->IsZombie() ? 1 : 0));
@@ -2474,13 +2486,13 @@ unique_ptr<FunctionData> RootScanBind(
 
     // Проверяем наличие индекса
     auto& fs = FileSystem::GetFileSystem(context);
-    bool index_exists = fs.FileExists(bind_data->meta_path);
+    bool index_exists = !bind_data->meta_path.empty() && fs.FileExists(bind_data->meta_path);
 
     if (!index_exists)
     {
         // Работаем без индекса: ищем простую ветку по имени
         RootDebug("FILE.BEFORE_OPEN", "mode=path_bind path=" + bind_data->root_path);
-        std::unique_ptr<TFile> file(TFile::Open(bind_data->root_path.c_str(), "READ"));
+        auto file = OpenRepresentativeFile(*bind_data);
         RootDebug("FILE.AFTER_OPEN",
                   "mode=path_bind file_ptr=" + RootPointer(file.get()) +
                   " zombie=" + std::to_string(file && file->IsZombie() ? 1 : 0));
@@ -2500,6 +2512,7 @@ unique_ptr<FunctionData> RootScanBind(
         if (BindSemanticPathWithoutMetadata(*bind_data, file.get(), path_prefix_raw, path_prefix,
                                             return_names, return_types))
         {
+            AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
             RootDebug("BIND.AFTER_SEMANTIC", "result=success path=" + path_prefix_raw);
             RootDebug("FILE.BEFORE_CLOSE", "mode=semantic_success file_ptr=" + RootPointer(file.get()));
             file.reset();
@@ -2583,6 +2596,7 @@ unique_ptr<FunctionData> RootScanBind(
                 bind_data->columns.push_back(std::move(col));
                 return_names.emplace_back(info.name);
                 return_types.emplace_back(RootTypeToDuckDB(info.type_name, false, true));
+                AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
                 RootDebug("FILE.BEFORE_CLOSE", "mode=direct_branch file_ptr=" + RootPointer(file.get()));
                 file.reset();
                 RootDebug("FILE.AFTER_CLOSE", "mode=direct_branch");
@@ -2593,6 +2607,7 @@ unique_ptr<FunctionData> RootScanBind(
 
         // Если ничего не нашли — пустой результат
         BindEmptyResult(*bind_data, path_prefix_raw, return_names, return_types);
+        AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
         RootDebug("FILE.BEFORE_CLOSE", "mode=empty file_ptr=" + RootPointer(file.get()));
         file.reset();
         RootDebug("FILE.AFTER_CLOSE", "mode=empty");
@@ -2610,18 +2625,20 @@ unique_ptr<FunctionData> RootScanBind(
     // resolver.  Basket metadata affects scheduling only; it never changes how
     // a semantic value is bound or materialized.
     {
-        RootFileHandle inspector;
+        rootlake::RootFileHandle inspector;
         inspector.Open(bind_data->root_path, bind_data->tree_name, nullptr);
         if (inspector.IsValid() &&
             BindSemanticPathWithoutMetadata(
                 *bind_data, inspector.GetTFile(), path_prefix_raw, path_prefix,
                 return_names, return_types))
         {
+            AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
             return std::move(bind_data);
         }
     }
 
     BindEmptyResult(*bind_data, path_prefix_raw, return_names, return_types);
+    AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
     return std::move(bind_data);
 }
 
@@ -2649,21 +2666,45 @@ unique_ptr<GlobalTableFunctionState> RootScanInit(ClientContext& context, TableF
     }
     global_state->total_rows = bind_data.total_rows;
     global_state->next_row = 0;
+    if (bind_data.IsMultiFile() && !bind_data.is_browse_mode && !bind_data.is_empty_mode) {
+        const auto runtime = rootlake::RootRuntimeSettings::From(context, bind_data.root_paths.size());
+        global_state->file_scheduler = make_uniq<rootlake::RootDirectFileScheduler>(
+            bind_data.root_paths, runtime.threads);
+    }
     if (!bind_data.is_browse_mode && global_state->filters) {
         for (const auto &entry : global_state->filters->filters) {
             if (entry.first >= global_state->scan_column_ids.size()) continue;
             const auto full_column = global_state->scan_column_ids[entry.first];
+            if (full_column == bind_data.source_id_column && global_state->file_scheduler) {
+                const auto source_range = rootlake::ExtractRootUnsignedRange(*entry.second);
+                if (!source_range.known) continue;
+                if (source_range.impossible) {
+                    global_state->event_range_impossible = true;
+                    break;
+                }
+                global_state->file_scheduler->SetSourceRange(source_range.lower, source_range.upper);
+                continue;
+            }
             if (full_column != 0 && full_column != COLUMN_IDENTIFIER_ROW_ID) continue;
             const auto range = rootlake::ExtractRootUnsignedRange(*entry.second);
             if (!range.known) continue;
             if (range.impossible) {
-                global_state->next_row = bind_data.total_rows;
-                global_state->total_rows = bind_data.total_rows;
+                global_state->event_range_impossible = true;
+                if (!bind_data.IsMultiFile()) {
+                    global_state->next_row = bind_data.total_rows;
+                    global_state->total_rows = bind_data.total_rows;
+                }
                 break;
             }
-            global_state->next_row = std::max(global_state->next_row, range.lower);
+            global_state->event_lower = std::max(global_state->event_lower, range.lower);
             if (range.upper != std::numeric_limits<uint64_t>::max()) {
-                global_state->total_rows = std::min(global_state->total_rows, range.upper + 1);
+                global_state->event_upper = std::min(global_state->event_upper, range.upper);
+            }
+            if (!bind_data.IsMultiFile()) {
+                global_state->next_row = std::max(global_state->next_row, range.lower);
+                if (range.upper != std::numeric_limits<uint64_t>::max()) {
+                    global_state->total_rows = std::min(global_state->total_rows, range.upper + 1);
+                }
             }
         }
     }
@@ -2673,37 +2714,32 @@ unique_ptr<GlobalTableFunctionState> RootScanInit(ClientContext& context, TableF
 }
 
 // ============================================================
-// RootScanInitLocal
+// Per-file local binding. Multi-file scans call this lazily after a worker
+// claims a file; the single-file fast path calls it once during local init.
 // ============================================================
-unique_ptr<LocalTableFunctionState> RootScanInitLocal(ExecutionContext& context,
-                                                      TableFunctionInitInput& input,
-                                                      GlobalTableFunctionState* global_state_p)
+static void InitializeRootLocalFile(const FastRootBindData& bind_data,
+                                    FastRootGlobalState& gstate,
+                                    FastRootLocalState& target,
+                                    const std::string& file_path,
+                                    bool synchronize_open)
 {
     RootDebugOperationScope debug_operation("RootScanInitLocal");
-    auto& bind_data = input.bind_data->Cast<FastRootBindData>();
-    auto& gstate = global_state_p->Cast<FastRootGlobalState>();
     RootDebug("INIT_LOCAL.BEGIN",
-              "root_path=" + bind_data.root_path +
+              "root_path=" + file_path +
               " tree=" + bind_data.tree_name +
               " columns=" + std::to_string(bind_data.columns.size()));
 
-    auto local_state = make_uniq<FastRootLocalState>();
-
-    if (bind_data.is_empty_mode)
-    {
-        return std::move(local_state);
-    }
-
-    // Если browse mode — сразу возвращаем
-    if (bind_data.is_browse_mode)
-    {
-        return std::move(local_state);
-    }
+    auto* local_state = &target;
+    auto* open_mutex = synchronize_open ? &gstate.coordination_mutex : nullptr;
 
     // Режим прямой ветки
     if (bind_data.is_direct_branch_mode)
     {
-        local_state->root_file.Open(bind_data.root_path, bind_data.tree_name, &gstate.coordination_mutex);
+        const auto open_result = local_state->root_file.Open(file_path, bind_data.tree_name, open_mutex);
+        if (gstate.file_scheduler) {
+            gstate.file_scheduler->RecordOpen(local_state->file_task,
+                                              open_result.attempts, open_result.elapsed_us);
+        }
         auto* tree = local_state->root_file.GetTTree();
         if (tree)
         {
@@ -2725,17 +2761,36 @@ unique_ptr<LocalTableFunctionState> RootScanInitLocal(ExecutionContext& context,
                 }
             }
         }
-        return std::move(local_state);
+        if (!local_state->direct_branch || !local_state->direct_leaf) {
+            throw IOException("ROOT schema mismatch in " + file_path +
+                              ": primitive branch '" + bind_data.direct_branch_info.name + "' is absent");
+        }
+        if (gstate.file_scheduler) {
+            const auto entries = static_cast<uint64_t>(std::max<Long64_t>(0, tree->GetEntries()));
+            local_state->local_current_row = gstate.event_range_impossible
+                ? entries : std::min(entries, gstate.event_lower);
+            local_state->local_end_row = entries;
+            if (gstate.event_upper != std::numeric_limits<uint64_t>::max()) {
+                local_state->local_end_row = std::min(entries, gstate.event_upper + 1);
+            }
+            local_state->file_active = true;
+            gstate.file_scheduler->ObserveSchema("primitive:" + bind_data.direct_branch_info.type_name);
+        }
+        return;
     }
 
     // Обычный режим с индексом
-    local_state->root_file.Open(bind_data.root_path, bind_data.tree_name, &gstate.coordination_mutex);
+    const auto open_result = local_state->root_file.Open(file_path, bind_data.tree_name, open_mutex);
+    if (gstate.file_scheduler) {
+        gstate.file_scheduler->RecordOpen(local_state->file_task,
+                                          open_result.attempts, open_result.elapsed_us);
+    }
     local_state->buffer_pool.Resize(bind_data.columns.size());
 
     auto* file = local_state->root_file.GetTFile();
     if (!file || file->IsZombie())
     {
-        throw IOException("Invalid ROOT file: " + bind_data.root_path);
+        throw IOException("Invalid ROOT file: " + file_path);
     }
 
     std::set<std::string> unique_root_classes;
@@ -2768,18 +2823,29 @@ unique_ptr<LocalTableFunctionState> RootScanInitLocal(ExecutionContext& context,
         auto* tree = find_tree(file, root_class_name);
         if (!tree)
         {
+            if (gstate.file_scheduler) {
+                throw IOException("ROOT schema mismatch in " + file_path +
+                                  ": tree for class '" + root_class_name + "' is absent");
+            }
             continue;
         }
 
         auto* branch = find_branch(tree, root_class_name);
         if (!branch)
         {
+            if (gstate.file_scheduler) {
+                throw IOException("ROOT schema mismatch in " + file_path +
+                                  ": object branch for class '" + root_class_name + "' is absent");
+            }
             continue;
         }
 
         auto* rc = TClass::GetClass(root_class_name.c_str());
         if (!rc || !rc->HasDictionary())
         {
+            if (gstate.file_scheduler) {
+                throw IOException("ROOT dictionary is unavailable for class '" + root_class_name + "'");
+            }
             continue;
         }
 
@@ -2881,7 +2947,111 @@ unique_ptr<LocalTableFunctionState> RootScanInitLocal(ExecutionContext& context,
         }
     }
 
+    if (gstate.file_scheduler) {
+        uint64_t entries = 0;
+        if (!local_state->root_contexts.empty()) {
+            entries = static_cast<uint64_t>(std::max<Long64_t>(
+                0, local_state->root_contexts.begin()->second.tree->GetEntries()));
+        }
+        local_state->local_current_row = gstate.event_range_impossible
+            ? entries : std::min(entries, gstate.event_lower);
+        local_state->local_end_row = entries;
+        if (gstate.event_upper != std::numeric_limits<uint64_t>::max()) {
+            local_state->local_end_row = std::min(entries, gstate.event_upper + 1);
+        }
+        local_state->file_active = true;
+        const auto fingerprint = local_state->serialized_plan.schema_fingerprint.empty()
+            ? std::string("object:") + bind_data.tree_name
+            : local_state->serialized_plan.schema_fingerprint;
+        gstate.file_scheduler->ObserveSchema(fingerprint);
+    }
+}
+
+unique_ptr<LocalTableFunctionState> RootScanInitLocal(ExecutionContext& context,
+                                                      TableFunctionInitInput& input,
+                                                      GlobalTableFunctionState* global_state_p)
+{
+    auto& bind_data = input.bind_data->Cast<FastRootBindData>();
+    auto& gstate = global_state_p->Cast<FastRootGlobalState>();
+    auto local_state = make_uniq<FastRootLocalState>();
+    if (!bind_data.is_empty_mode && !bind_data.is_browse_mode && !bind_data.IsMultiFile()) {
+        InitializeRootLocalFile(bind_data, gstate, *local_state, bind_data.root_path, true);
+    }
     return std::move(local_state);
+}
+
+static void ResetRootLocalFile(FastRootGlobalState& gstate,
+                               FastRootLocalState& local_state,
+                               bool completed)
+{
+    if (completed && local_state.file_active && gstate.file_scheduler) {
+        const auto elapsed = std::chrono::steady_clock::now() - local_state.file_started;
+        gstate.file_scheduler->RecordComplete(
+            local_state.file_task,
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
+    }
+    local_state.serialized_reader.Bind(nullptr, rootlake::SerializedReadPlan {});
+    local_state.serialized_active = false;
+    local_state.serialized_column = DConstants::INVALID_INDEX;
+    local_state.serialized_context.clear();
+    local_state.serialized_plan = {};
+    local_state.validation_remaining = 0;
+    local_state.serialized_values.clear();
+    local_state.serialized_indices.clear();
+    local_state.reported_serialized_baskets = 0;
+    local_state.reported_serialized_compressed_bytes = 0;
+    local_state.reported_serialized_entry_bytes = 0;
+    local_state.cached_results.clear();
+    local_state.has_cached_entry = false;
+    local_state.current_entry = std::numeric_limits<uint64_t>::max();
+    local_state.current_elem_idx = 0;
+    local_state.root_contexts.clear();
+    local_state.direct_branch = nullptr;
+    local_state.direct_leaf = nullptr;
+    local_state.root_file.Close();
+    local_state.local_current_row = 0;
+    local_state.local_end_row = 0;
+    local_state.has_container_columns = false;
+    local_state.file_active = false;
+}
+
+static bool EnsureMultiFileReady(const FastRootBindData& bind_data,
+                                 FastRootGlobalState& gstate,
+                                 FastRootLocalState& local_state)
+{
+    if (!gstate.file_scheduler) throw InternalException("multi-file ROOT scheduler is unavailable");
+    while (true) {
+        if (local_state.file_active &&
+            (local_state.has_cached_entry || local_state.local_current_row < local_state.local_end_row)) {
+            return true;
+        }
+        if (local_state.file_active) ResetRootLocalFile(gstate, local_state, true);
+
+        rootlake::RootDirectFileTask task;
+        if (!gstate.file_scheduler->Claim(task)) {
+            if (gstate.file_scheduler->AllFilesFinished()) {
+                const auto failures = gstate.file_scheduler->FailureSummary();
+                if (!failures.empty()) throw IOException(failures);
+            }
+            return false;
+        }
+
+        local_state.file_task = std::move(task);
+        local_state.file_started = std::chrono::steady_clock::now();
+        try {
+            InitializeRootLocalFile(bind_data, gstate, local_state,
+                                    local_state.file_task.path, false);
+        } catch (const std::exception &exception) {
+            gstate.file_scheduler->RecordFailure(local_state.file_task, exception.what());
+            ResetRootLocalFile(gstate, local_state, false);
+            continue;
+        } catch (...) {
+            gstate.file_scheduler->RecordFailure(local_state.file_task, "unknown ROOT reader error");
+            ResetRootLocalFile(gstate, local_state, false);
+            continue;
+        }
+    }
 }
 
 // ============================================================
@@ -3023,6 +3193,12 @@ static rootlake::RootScalarActual CachedScalar(const FastRootBindData& bind_data
     if (column.name == "event_id" && column.levels.empty()) {
         return rootlake::RootScalarActual::Signed(entry);
     }
+    if (col_idx == bind_data.source_id_column) {
+        return rootlake::RootScalarActual::Event(lstate.file_task.source_id);
+    }
+    if (col_idx == bind_data.source_path_column) {
+        return rootlake::RootScalarActual::String(lstate.file_task.path);
+    }
     if (column.is_virtual_index) return rootlake::RootScalarActual::Index(
         ResolveCachedIndexValue(bind_data, lstate, col_idx, elem_idx));
     const auto logical_type = RootTypeToDuckDB(column.root_type, column.is_string, true);
@@ -3057,10 +3233,18 @@ static bool PassesDirectBranchFilters(ClientContext& context, const FastRootBind
     {
         if (filter.first >= gstate.scan_column_ids.size()) continue;
         const auto column = gstate.scan_column_ids[filter.first];
-        auto actual = column == 0 || column == COLUMN_IDENTIFIER_ROW_ID
-            ? rootlake::RootScalarActual::Signed(entry)
-            : (column == 1 ? rootlake::RootScalarActual::Numeric(value_type, value)
-                           : rootlake::RootScalarActual::Null(LogicalType::SQLNULL));
+        auto actual = rootlake::RootScalarActual::Null(LogicalType::SQLNULL);
+        if (column == 0 || column == COLUMN_IDENTIFIER_ROW_ID) {
+            actual = rootlake::RootScalarActual::Signed(entry);
+        } else if (column == 1) {
+            actual = rootlake::RootScalarActual::Numeric(value_type, value);
+        } else if (column == bind_data.source_id_column) {
+            actual = rootlake::RootScalarActual::Event(lstate.file_task.source_id);
+        } else if (column == bind_data.source_path_column) {
+            actual = rootlake::RootScalarActual::String(lstate.file_task.path);
+        } else {
+            actual = rootlake::RootScalarActual::Null(LogicalType::SQLNULL);
+        }
         if (!lstate.filter_evaluator.Evaluate(context, *filter.second, actual)) return false;
     }
     return true;
@@ -3088,6 +3272,7 @@ static void ProcessDirectBranch(
     {
         if (lstate.local_current_row >= lstate.local_end_row)
         {
+            if (gstate.file_scheduler) break;
             WorkScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
             auto batch = scheduler.ClaimWork(100000);
             if (!batch.HasWork()) break;
@@ -3119,6 +3304,17 @@ static void ProcessDirectBranch(
             else if (column == 1)
             {
                 WriteNumericValue(vector, out_count, val);
+            }
+            else if (column == bind_data.source_id_column)
+            {
+                FlatVector::GetData<uint64_t>(vector)[out_count] = lstate.file_task.source_id;
+                FlatVector::Validity(vector).SetValid(out_count);
+            }
+            else if (column == bind_data.source_path_column)
+            {
+                FlatVector::GetData<string_t>(vector)[out_count] =
+                    StringVector::AddString(vector, lstate.file_task.path);
+                FlatVector::Validity(vector).SetValid(out_count);
             }
             else
             {
@@ -3186,6 +3382,21 @@ static void ProcessCachedEntry(
             if (col.name == "event_id" && col.levels.empty())
             {
                 FlatVector::GetData<int64_t>(vec)[out_count] = static_cast<int64_t>(entry);
+                FlatVector::Validity(vec).SetValid(out_count);
+                continue;
+            }
+
+            if (col_idx == bind_data.source_id_column)
+            {
+                FlatVector::GetData<uint64_t>(vec)[out_count] = lstate.file_task.source_id;
+                FlatVector::Validity(vec).SetValid(out_count);
+                continue;
+            }
+
+            if (col_idx == bind_data.source_path_column)
+            {
+                FlatVector::GetData<string_t>(vec)[out_count] =
+                    StringVector::AddString(vec, lstate.file_task.path);
                 FlatVector::Validity(vec).SetValid(out_count);
                 continue;
             }
@@ -3618,6 +3829,11 @@ void RootScanFunction(ClientContext& context, TableFunctionInput& data_p, DataCh
         output.SetCardinality(0);
         return;
     }
+    if (gstate.event_range_impossible)
+    {
+        output.SetCardinality(0);
+        return;
+    }
 
     // 1. Browse mode
     if (bind_data.is_browse_mode)
@@ -3629,43 +3845,65 @@ void RootScanFunction(ClientContext& context, TableFunctionInput& data_p, DataCh
     // 2. Режим прямой ветки (без индекса)
     if (bind_data.is_direct_branch_mode)
     {
-        ProcessDirectBranch(context, bind_data, gstate, lstate, output);
-        return;
+        while (true) {
+            if (gstate.file_scheduler && !EnsureMultiFileReady(bind_data, gstate, lstate)) {
+                output.SetCardinality(0);
+                return;
+            }
+            ProcessDirectBranch(context, bind_data, gstate, lstate, output);
+            if (output.size() > 0) {
+                if (gstate.file_scheduler) gstate.file_scheduler->RecordFirstRow();
+                return;
+            }
+            if (!gstate.file_scheduler) return;
+        }
     }
 
     // 3. Обычный режим с индексом (сложные объекты)
-    idx_t out_count = 0;
+    while (true) {
+        if (gstate.file_scheduler && !EnsureMultiFileReady(bind_data, gstate, lstate)) {
+            output.SetCardinality(0);
+            return;
+        }
 
-    while (out_count < STANDARD_VECTOR_SIZE)
-    {
-        if (lstate.has_cached_entry)
+        idx_t out_count = 0;
+        while (out_count < STANDARD_VECTOR_SIZE)
         {
-            ProcessCachedEntry(context, bind_data, gstate, lstate, output, out_count);
+            if (lstate.has_cached_entry)
+            {
+                ProcessCachedEntry(context, bind_data, gstate, lstate, output, out_count);
+            }
+            else
+            {
+                if (lstate.local_current_row >= lstate.local_end_row)
+                {
+                    if (gstate.file_scheduler) break;
+                    WorkScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
+                    auto batch = scheduler.ClaimWork(100000);
+                    if (!batch.HasWork()) break;
+                    lstate.local_current_row = batch.start;
+                    lstate.local_end_row = batch.end;
+                }
+                CacheResult res = ReadAndCacheEntry(bind_data, gstate, lstate, output, out_count);
+                if (res == CacheResult::CONTINUE_LOOP)
+                {
+                    continue;
+                }
+                if (res == CacheResult::BREAK_LOOP)
+                {
+                    lstate.local_current_row = lstate.local_end_row;
+                    continue;
+                }
+            }
         }
-        else
-        {
-            if (lstate.local_current_row >= lstate.local_end_row)
-            {
-                WorkScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
-                auto batch = scheduler.ClaimWork(100000);
-                if (!batch.HasWork()) break;
-                lstate.local_current_row = batch.start;
-                lstate.local_end_row = batch.end;
-            }
-            CacheResult res = ReadAndCacheEntry(bind_data, gstate, lstate, output, out_count);
-            if (res == CacheResult::CONTINUE_LOOP)
-            {
-                continue;
-            }
-            if (res == CacheResult::BREAK_LOOP)
-            {
-                lstate.local_current_row = lstate.local_end_row;
-                continue;
-            }
+
+        output.SetCardinality(out_count);
+        if (out_count > 0) {
+            if (gstate.file_scheduler) gstate.file_scheduler->RecordFirstRow();
+            return;
         }
+        if (!gstate.file_scheduler) return;
     }
-
-    output.SetCardinality(out_count);
 }
 
 // ============================================================
@@ -3676,7 +3914,10 @@ static InsertionOrderPreservingMap<string> RootScanToString(TableFunctionToStrin
     InsertionOrderPreservingMap<string> result;
     if (!input.bind_data) return result;
     const auto& bind = input.bind_data->Cast<FastRootBindData>();
-    result["ROOT File"] = bind.root_path;
+    result["ROOT Input"] = bind.input_specification;
+    result["ROOT Files"] = std::to_string(bind.root_paths.size());
+    result["ROOT Representative"] = bind.root_path;
+    result["ROOT Bind Open Time (us)"] = std::to_string(bind.bind_open_us);
     result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.reader_mode);
     result["Serialized Validation Entries"] = std::to_string(bind.raw_validation_entries);
     return result;
@@ -3688,6 +3929,9 @@ static InsertionOrderPreservingMap<string> RootScanDynamicToString(TableFunction
     if (input.bind_data) {
         const auto& bind = input.bind_data->Cast<FastRootBindData>();
         result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.reader_mode);
+        result["ROOT Input Files"] = std::to_string(bind.root_paths.size());
+        result["ROOT Representative"] = bind.root_path;
+        result["ROOT Bind Open Time (us)"] = std::to_string(bind.bind_open_us);
     }
     if (!input.global_state) return result;
     const auto& global = input.global_state->Cast<FastRootGlobalState>();
@@ -3698,6 +3942,19 @@ static InsertionOrderPreservingMap<string> RootScanDynamicToString(TableFunction
     result["Serialized Entry Bytes"] = std::to_string(global.serialized_entry_bytes.load());
     result["Object Validation Entries"] = std::to_string(global.object_validation_entries.load());
     result["Object Fallback Entries"] = std::to_string(global.object_fallback_entries.load());
+    if (global.file_scheduler) {
+        result["ROOT Opened Files"] = std::to_string(global.file_scheduler->OpenedFiles());
+        result["ROOT Completed Files"] = std::to_string(global.file_scheduler->CompletedFiles());
+        result["ROOT Skipped Files"] = std::to_string(global.file_scheduler->SkippedFiles());
+        result["ROOT Failed Files"] = std::to_string(global.file_scheduler->FailedFiles());
+        result["ROOT Retried Opens"] = std::to_string(global.file_scheduler->RetriedOpens());
+        result["ROOT Open Time (us)"] = std::to_string(global.file_scheduler->OpenTimeUs());
+        result["ROOT Schema Variants"] = std::to_string(global.file_scheduler->SchemaVariants());
+        result["ROOT Schema Plan Reuses"] = std::to_string(global.file_scheduler->SchemaPlanReuses());
+        result["ROOT Time To First Row (us)"] = std::to_string(global.file_scheduler->FirstRowUs());
+        result["ROOT Slowest File"] = global.file_scheduler->SlowestFile();
+        result["ROOT Slowest File Time (us)"] = std::to_string(global.file_scheduler->SlowestFileUs());
+    }
     return result;
 }
 

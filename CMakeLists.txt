@@ -18,6 +18,9 @@ set(EXTENSION_SOURCES
     src/root_extension.cpp
     src/root_meta_generator.cpp
     src/root_scan.cpp
+    src/root_input_resolver.cpp
+    src/root_file_opener.cpp
+    src/root_direct_scheduler.cpp
     src/root_debug.cpp
     src/root_bloom.cpp
     src/root_branch_projection.cpp

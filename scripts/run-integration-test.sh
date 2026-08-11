@@ -73,6 +73,7 @@ rootcling \
     $ROOT_LIBS
 
 "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
+printf '%s\n' "$WORK_DIR/data/a.root" "$WORK_DIR/data/b.root" > "$WORK_DIR/data/two-files.list"
 
 # Bind-only regression: EXPLAIN invokes table-function bind but must not
 # materialize a ROOT entry or recursively discover the complete schema.
@@ -106,6 +107,42 @@ FROM read_root(
     dictionary := '$WORK_DIR/build/libTestEvent.so',
     path_prefix := '/TestEvent/vecHit/u'
 );
+SELECT count(*) = 5
+       AND sum(run) = 704
+       AND count(DISTINCT source_id) = 2
+       AND count(DISTINCT source_path) = 2
+       AND min(event_id) = 0 AND max(event_id) = 2 AS direct_glob_scalar_ok
+FROM read_root(
+    '$WORK_DIR/data/[ab].root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/run'
+);
+SELECT count(*) = 9
+       AND abs(sum(u) - 102.5) < 0.00001
+       AND sum(event_id) = 4
+       AND sum(source_id) = 4 AS direct_glob_nested_ok
+FROM read_root(
+    '$WORK_DIR/data/[ab].root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/u'
+);
+SELECT count(*) = 5
+       AND sum(run) = 704
+       AND count(DISTINCT source_id) = 2 AS direct_uri_list_ok
+FROM read_root(
+    '@$WORK_DIR/data/two-files.list',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/run'
+);
+SELECT count(*) = 2
+       AND sum(run) = 401
+       AND min(source_id) = 1 AND max(source_id) = 1 AS direct_source_pruning_ok
+FROM read_root(
+    '$WORK_DIR/data/[ab].root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/run'
+)
+WHERE source_id = 1;
 SELECT count(*) = 0 AS missing_path_is_safe
 FROM read_root(
     '$WORK_DIR/data/a.root',
@@ -220,8 +257,28 @@ FROM read_root(
 SQL
 
 DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
-if [[ "$DIRECT_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue' ]]; then
+if [[ "$DIRECT_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected direct semantic read result: $DIRECT_RESULT" >&2
+    exit 1
+fi
+
+printf '%s\n' "$WORK_DIR/data/a.root" "$WORK_DIR/data/missing.root" > "$WORK_DIR/data/with-missing.list"
+cat > "$WORK_DIR/direct-missing-input.sql" <<SQL
+SELECT sum(run)
+FROM read_root(
+    '@$WORK_DIR/data/with-missing.list',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/run'
+);
+SQL
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+    < "$WORK_DIR/direct-missing-input.sql" > "$WORK_DIR/direct-missing-input.log" 2>&1; then
+    echo "multi-file direct scan silently accepted a missing input" >&2
+    exit 1
+fi
+if ! grep -q "ROOT input(s) failed" "$WORK_DIR/direct-missing-input.log"; then
+    echo "multi-file missing-input error did not contain the file failure summary" >&2
+    cat "$WORK_DIR/direct-missing-input.log" >&2
     exit 1
 fi
 
