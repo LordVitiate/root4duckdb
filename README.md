@@ -1,9 +1,10 @@
-![Footer](assets/images/IMG_20260806_215451.jpg)
 <div align="center">
+
+<img src="assets/images/IMG_20260806_215451.jpg" alt="ROOT to SQL" width="100%">
 
 # root4duckdb
 
-**A query-planning and SQL execution layer for large-scale ROOT datasets.**
+**Selective SQL over large ROOT datasets — without converting the event data.**
 
 <p>
   <img alt="Release" src="https://img.shields.io/badge/release-3.8.0-2f6fdb">
@@ -16,19 +17,71 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
+<p>
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-root4duckdb-reads-a-root-file">How it works</a> ·
+  <a href="#sql-interface">SQL interface</a> ·
+  <a href="docs/direct-multifile-scan.md">Performance</a> ·
+  <a href="#project-status-and-roadmap">Roadmap</a>
+</p>
+
 </div>
 
 > *“I owe much of my work to my own laziness. I disliked writing programs, so when I was working on the IBM 701, I began developing a system that would make programs easier to write.”*  
 > — **John Backus**
 
+<a id="latest-news"></a>
+
+## Latest news 🔥
+
+<!-- SECTION:latest_news -->
+- **2026-08-11 — 10.7 billion nested values scanned on one node.** A direct SQL query decoded **10,696,574,044 values from 117 remote ROOT files in 10 min 44 s**, sustaining **16.6 million values/s** with approximately **1.3 GiB peak resident memory**. Three transient remote-open timeouts were recovered automatically and all 117 files contributed to the final checksum. See the [methodology, reproducible query and interpretation](docs/direct-multifile-scan.md#measured-performance).
+<!-- /SECTION:latest_news -->
+
+## Quick start
+
+Build the project using the instructions in [Building from source](#building-from-source), then start the bundled DuckDB CLI directly:
+
+```bash
+./build/release/duckdb
+```
+
+The bundled CLI already contains root4duckdb. To use the loadable extension from another ABI-compatible DuckDB build instead:
+
+```sql
+LOAD './build/release/extension/root/root.duckdb_extension';
+```
+
+On CERN lxplus, `./run-duckdb.sh` is a convenience workaround that restores the CVMFS compiler, ROOT and shared Iceberg runtime paths before starting the same bundled CLI.
+
+One SQL call can scan a file, a glob or an explicit file list:
+
+```sql
+SET threads = 10;
+
+SELECT
+    count(*) AS decoded_values,
+    sum(CAST(value AS HUGEINT)) AS checksum
+FROM read_root(
+    '/data/run*.root*',
+    dictionary := '/data/libExperiment.so',
+    path_prefix := '/EventRecord/records/value'
+);
+```
+
+ROOT files remain the source of truth. The query returns ordinary DuckDB rows with the ROOT entry number, nested collection indices and the selected primitive value.
+
 ## Contents
 
+- [Latest news](#latest-news)
+- [Quick start](#quick-start)
 - [Data-reading and execution optimizations](#data-reading-and-execution-optimizations)
 - [How root4duckdb reads a ROOT file](#how-root4duckdb-reads-a-root-file)
   - [Fully split layout](#fully-split-layout)
   - [Partially split layout](#partially-split-layout)
   - [Unsplit object](#unsplit-object)
 - [Validation on real experimental data](#validation-on-real-experimental-data)
+- [Direct multi-file scans and performance](docs/direct-multifile-scan.md)
 - [SQL interface](#sql-interface)
   - [read_root(...)](#read-root)
   - [root_build_index(...)](#root-build-index)
@@ -38,18 +91,6 @@
 - [Building from source](#building-from-source)
 - [Project status and roadmap](#project-status-and-roadmap)
 - [Developer and contributing](#developer-and-contributing)
-
-To keep these links stable, place the following anchors immediately before the corresponding headings:
-
-<a id="fully-split-layout"></a>
-<a id="partially-split-layout"></a>
-<a id="unsplit-object"></a>
-<a id="sql-interface"></a>
-<a id="read-root"></a>
-<a id="root-build-index"></a>
-<a id="read-root-dataset"></a>
-<a id="root-dataset-stats"></a>
-<a id="root-iceberg-catalog"></a>
 
 ROOT TTree is an early columnar storage format. Split branches and compressed baskets already provide the physical basis for selective reading.
 
@@ -95,6 +136,8 @@ In this sense, root4duckdb brings **Parquet-like query planning** to existing RO
 
 The same logical value may be stored using different ROOT layouts. root4duckdb always selects the narrowest safe read path allowed by the file.
 
+<a id="fully-split-layout"></a>
+
 ### 🟨⬜⬜ Fully split: physical branch to SQL column
 
 This is the simplest case.
@@ -102,12 +145,12 @@ This is the simplest case.
 ROOT has already decomposed the object into a physical primitive branch:
 
 ```text
-PaEvent
-└── vecTrack
-    └── chi2tot
+EventRecord
+└── tracks
+    └── quality
 ```
 
-The branch contains one variable-length sequence of `chi2tot` values for every `TTree` entry.
+The branch contains one variable-length sequence of `quality` values for every `TTree` entry.
 
 Each event already has a stable ROOT entry number:
 
@@ -115,11 +158,11 @@ Each event already has a stable ROOT entry number:
 GetEntry(entry_id)
 ```
 
-Each value inside `vecTrack` also has a natural position in that event:
+Each value inside `tracks` also has a natural position in that event:
 
 ```text
 entry_id = 929
-vecTrack_idx = 2
+tracks_idx = 2
 ```
 
 root4duckdb maps these components directly into a relational result:
@@ -127,13 +170,13 @@ root4duckdb maps these components directly into a relational result:
 | ROOT representation | SQL column |
 |---|---|
 | `TTree` entry number | `entry_id` |
-| Position inside `vecTrack` | `vecTrack_idx` |
-| `chi2tot` branch value | `chi2tot` |
+| Position inside `tracks` | `tracks_idx` |
+| `quality` branch value | `quality` |
 
 The physical hierarchy therefore becomes an ordinary SQL relation:
 
 ```text
-entry_id | vecTrack_idx | chi2tot
+entry_id | tracks_idx | quality
 ---------|--------------|---------
 929      | 0            | 1.84
 929      | 1            | 3.12
@@ -229,11 +272,11 @@ Iceberg does not replace ROOT and does not store the event values. It provides t
 Consider a query requesting one track value:
 
 ```sql
-SELECT chi2tot
+SELECT quality
 FROM read_root_dataset(...)
 WHERE source_id = 'file-A'
   AND entry_id = 929
-  AND vecTrack_idx = 2;
+  AND tracks_idx = 2;
 ```
 
 For a fully split ROOT file, the read plan is almost direct:
@@ -247,11 +290,11 @@ select file-A
     ↓
 locate the basket containing entry 929
     ↓
-read only the chi2tot branch
+read only the quality branch
     ↓
 GetEntry(929)
     ↓
-select vecTrack_idx = 2
+select tracks_idx = 2
     ↓
 return the SQL value
 ```
@@ -260,7 +303,7 @@ No unrelated ROOT files are opened.
 
 No unrelated branches are materialized.
 
-No complete `PaEvent` or `PaTrack` object needs to be reconstructed.
+No complete `EventRecord` or `TrackRecord` object needs to be reconstructed.
 
 No join is required to recover the track identity.
 
@@ -290,26 +333,26 @@ int main() {
     }
 
     tree->SetBranchStatus("*", false);
-    tree->SetBranchStatus("PaEvent.vecTrack.chi2tot", true);
+    tree->SetBranchStatus("EventRecord.tracks.quality", true);
 
     TTreeReader reader(tree);
-    TTreeReaderArray<float> chi2tot(
+    TTreeReaderArray<float> quality(
         reader,
-        "PaEvent.vecTrack.chi2tot"
+        "EventRecord.tracks.quality"
     );
 
     constexpr Long64_t entry_id = 929;
-    constexpr std::size_t vecTrack_idx = 2;
+    constexpr std::size_t tracks_idx = 2;
 
     if (reader.SetEntry(entry_id) != TTreeReader::kEntryValid) {
         throw std::runtime_error("Cannot read requested entry");
     }
 
-    if (vecTrack_idx >= chi2tot.GetSize()) {
+    if (tracks_idx >= quality.GetSize()) {
         throw std::out_of_range("Track index is outside the collection");
     }
 
-    const float value = chi2tot[vecTrack_idx];
+    const float value = quality[tracks_idx];
     std::cout << value << '\n';
 }
 ```
@@ -318,7 +361,7 @@ ROOT already provides the essential physical operation:
 
 ```cpp
 reader.SetEntry(929);
-value = chi2tot[2];
+value = quality[2];
 ```
 
 root4duckdb does not replace that mechanism. It adds everything required to derive the same operation automatically from SQL across an entire dataset.
@@ -330,11 +373,13 @@ root4duckdb does not replace that mechanism. It adds everything required to deri
 | Select the branch | `SetBranchStatus()` | Projection pushdown |
 | Locate the basket | ROOT or custom logic | Sidecar planning |
 | Select the event | `SetEntry(929)` | `entry_id = 929` |
-| Select the track | `chi2tot[2]` | `vecTrack_idx = 2` |
+| Select the track | `quality[2]` | `tracks_idx = 2` |
 | Skip impossible regions | Custom implementation | Min/max and Bloom pruning |
 | Return the value | C++ code | SQL result |
 
 > **For a fully split file, ROOT already provides efficient column access. root4duckdb turns that local mechanism into automatic, dataset-wide SQL planning.**
+
+<a id="partially-split-layout"></a>
 
 ### 🟨🟨⬜ Partially split: extract a logical field from its physical parent
 
@@ -343,29 +388,29 @@ In the second case, the requested primitive value exists in the ROOT object mode
 For example:
 
 ```text
-PaEvent
-└── vecTrack                 physical branch
-    ├── chi2tot              logical field
+EventRecord
+└── tracks                 physical branch
+    ├── quality              logical field
     ├── ndf                  logical field
     └── momentum             logical field
 ```
 
-ROOT stores and reads `vecTrack` as one physical unit. The logical field `chi2tot` is described by the class dictionary and `TStreamerInfo`, but it cannot be selected as an independent branch.
+ROOT stores and reads `tracks` as one physical unit. The logical field `quality` is described by the class dictionary and `TStreamerInfo`, but it cannot be selected as an independent branch.
 
 The physical and logical read units are therefore different:
 
 ```text
 physical read unit
-    = vecTrack branch
+    = tracks branch
 
 requested logical value
-    = vecTrack[i].chi2tot
+    = tracks[i].quality
 ```
 
 root4duckdb discovers the member path through the ROOT dictionary and exposes it through exactly the same SQL relation as a fully split branch:
 
 ```text
-entry_id | vecTrack_idx | chi2tot
+entry_id | tracks_idx | quality
 ---------|--------------|---------
 929      | 0            | 1.84
 929      | 1            | 3.12
@@ -378,27 +423,27 @@ The SQL representation does not depend on how deeply ROOT physically split the o
 | ROOT representation | SQL column |
 |---|---|
 | `TTree` entry number | `entry_id` |
-| Position inside `vecTrack` | `vecTrack_idx` |
-| `PaTrack::chi2tot` member | `chi2tot` |
+| Position inside `tracks` | `tracks_idx` |
+| `TrackRecord::quality` member | `quality` |
 
 The difference appears only in the physical read plan.
 
 For a fully split file:
 
 ```text
-chi2tot SQL column
+quality SQL column
         ↓
-chi2tot physical branch
+quality physical branch
 ```
 
 For a partially split file:
 
 ```text
-chi2tot SQL column
+quality SQL column
         ↓
-PaTrack::chi2tot logical member
+TrackRecord::quality logical member
         ↓
-vecTrack physical branch
+tracks physical branch
 ```
 
 > **The SQL column remains the same. Only the smallest physical ROOT object required to recover it changes.**
@@ -411,37 +456,37 @@ A sidecar entry may therefore describe both:
 
 ```text
 logical path
-    /PaEvent/vecTrack/chi2tot
+    /EventRecord/tracks/quality
 
 physical branch
-    PaEvent.vecTrack
+    EventRecord.tracks
 ```
 
 For each physical basket, the sidecar can record statistics for the extracted logical values:
 
 ```text
-vecTrack basket 42
+tracks basket 42
 ├── entries: 900–949
-├── chi2tot values: 287
-├── chi2tot min: 0.02
-├── chi2tot max: 18.74
-└── chi2tot Bloom filter
+├── quality values: 287
+├── quality min: 0.02
+├── quality max: 18.74
+└── quality Bloom filter
 ```
 
-The basket still belongs to the physical `vecTrack` branch. The min/max and Bloom metadata describe only the logical `chi2tot` values contained inside it.
+The basket still belongs to the physical `tracks` branch. The min/max and Bloom metadata describe only the logical `quality` values contained inside it.
 
 This allows root4duckdb to prune using the logical SQL predicate before reading the wider physical parent:
 
 ```sql
-WHERE chi2tot > 100
+WHERE quality > 100
 ```
 
 ```text
-chi2tot predicate
+quality predicate
         ↓
 logical min/max statistics
         ↓
-reject impossible vecTrack baskets
+reject impossible tracks baskets
         ↓
 read only surviving physical baskets
 ```
@@ -450,12 +495,12 @@ The event data remain exclusively in ROOT:
 
 ```text
 ROOT file
-└── vecTrack baskets
-    └── serialized PaTrack objects
+└── tracks baskets
+    └── serialized TrackRecord objects
 
 sidecar
-└── chi2tot statistics
-    └── mappings to vecTrack baskets
+└── quality statistics
+    └── mappings to tracks baskets
 ```
 
 ### Publishing through Iceberg
@@ -465,14 +510,14 @@ The sidecars are published through the same Iceberg dataset model:
 ```text
 Iceberg snapshot
 ├── ROOT file A
-│   ├── physical vecTrack branch
-│   └── chi2tot sidecar metadata
+│   ├── physical tracks branch
+│   └── quality sidecar metadata
 ├── ROOT file B
-│   ├── physical vecTrack branch
-│   └── chi2tot sidecar metadata
+│   ├── physical tracks branch
+│   └── quality sidecar metadata
 └── ROOT file C
-    ├── physical vecTrack branch
-    └── chi2tot sidecar metadata
+    ├── physical tracks branch
+    └── quality sidecar metadata
 ```
 
 Iceberg identifies the active dataset version and its files. The sidecars provide logical statistics and physical basket mappings. ROOT remains responsible for storing the event objects.
@@ -482,11 +527,11 @@ Iceberg identifies the active dataset version and its files. The sidecars provid
 Consider the same SQL lookup:
 
 ```sql
-SELECT chi2tot
+SELECT quality
 FROM read_root_dataset(...)
 WHERE source_id = 'file-A'
   AND entry_id = 929
-  AND vecTrack_idx = 2;
+  AND tracks_idx = 2;
 ```
 
 For a partially split file, the reverse read plan becomes:
@@ -498,19 +543,19 @@ resolve the Iceberg snapshot
     ↓
 select file-A
     ↓
-resolve /PaEvent/vecTrack/chi2tot
+resolve /EventRecord/tracks/quality
     ↓
-find the physical ancestor: PaEvent.vecTrack
+find the physical ancestor: EventRecord.tracks
     ↓
 locate the basket containing entry 929
     ↓
-read the vecTrack basket
+read the tracks basket
     ↓
 GetEntry(929)
     ↓
-select vecTrack[2]
+select tracks[2]
     ↓
-extract chi2tot
+extract quality
     ↓
 return one SQL value
 ```
@@ -519,7 +564,7 @@ No unrelated ROOT files are opened.
 
 No unrelated physical branches are read.
 
-The `vecTrack` parent must still be read because the ROOT layout stores `chi2tot` inside it. However, only the requested logical value is emitted and materialized as an SQL column.
+The `tracks` parent must still be read because the ROOT layout stores `quality` inside it. However, only the requested logical value is emitted and materialized as an SQL column.
 
 > **root4duckdb does not claim to read four isolated bytes when ROOT stores a complete object. It reads the smallest self-contained physical ancestor and returns only the requested logical value.**
 
@@ -529,11 +574,11 @@ After the physical basket has been selected, root4duckdb can recover the logical
 
 ```text
 Object extraction
-    vecTrack object
+    tracks object
         ↓
-    PaTrack element
+    TrackRecord element
         ↓
-    chi2tot member
+    quality member
 ```
 
 This uses ROOT dictionaries, `TStreamerInfo`, collection proxies and normal object reconstruction.
@@ -541,12 +586,21 @@ This uses ROOT dictionaries, `TStreamerInfo`, collection proxies and normal obje
 For supported and validated layouts, root4duckdb may instead extract the primitive member directly from the serialized entry payload:
 
 ```text
-Serialized vecTrack entry
+Serialized tracks entry
         ↓
 validated member layout
         ↓
-chi2tot value
+quality value
 ```
+
+The serialized reader also supports validated nested collection plans such as:
+
+```text
+/EventRecord/particles/vertex_ids/value
+/EventRecord/hits/digits/samples/value
+```
+
+For these layouts, streamer actions skip preceding bases, objects and variable-width members; each nested primitive vector is decoded from its framed length and dense payload. One SQL index column is emitted for every collection level. The implementation follows the streamer schema rather than hard-coding class or member names.
 
 Both methods produce the same SQL rows and indexes.
 
@@ -567,7 +621,7 @@ The exact class and accessor names depend on the experiment dictionary, but the 
 #include <stdexcept>
 #include <vector>
 
-#include "PaTrack.h"
+#include "TrackRecord.h"
 
 int main() {
     TFile file("file-A.root", "READ");
@@ -580,25 +634,25 @@ int main() {
         throw std::runtime_error("Cannot find TTree");
     }
 
-    std::vector<PaTrack> *vecTrack = nullptr;
+    std::vector<TrackRecord> *tracks = nullptr;
 
     tree->SetBranchStatus("*", false);
-    tree->SetBranchStatus("PaEvent.vecTrack", true);
-    tree->SetBranchAddress("PaEvent.vecTrack", &vecTrack);
+    tree->SetBranchStatus("EventRecord.tracks", true);
+    tree->SetBranchAddress("EventRecord.tracks", &tracks);
 
     constexpr Long64_t entry_id = 929;
-    constexpr std::size_t vecTrack_idx = 2;
+    constexpr std::size_t tracks_idx = 2;
 
     if (tree->GetEntry(entry_id) <= 0) {
         throw std::runtime_error("Cannot read requested entry");
     }
 
-    if (!vecTrack || vecTrack_idx >= vecTrack->size()) {
+    if (!tracks || tracks_idx >= tracks->size()) {
         throw std::out_of_range("Track index is outside the collection");
     }
 
-    const PaTrack &track = vecTrack->at(vecTrack_idx);
-    const float value = track.chi2tot;
+    const TrackRecord &track = tracks->at(tracks_idx);
+    const float value = track.quality;
 
     std::cout << value << '\n';
 }
@@ -608,7 +662,7 @@ The essential operation is:
 
 ```cpp
 tree->GetEntry(929);
-value = vecTrack->at(2).chi2tot;
+value = tracks->at(2).quality;
 ```
 
 The application must already know:
@@ -628,34 +682,36 @@ root4duckdb derives these operations from the logical SQL path and its sidecar m
 | Select the file | Application logic | Iceberg and file pruning |
 | Select the basket | ROOT or custom logic | Sidecar planning |
 | Read the parent object | `GetEntry()` | Automatic |
-| Select the collection element | `vecTrack.at(i)` | `vecTrack_idx = i` |
-| Extract the primitive member | `track.chi2tot` | SQL value column |
+| Select the collection element | `tracks.at(i)` | `tracks_idx = i` |
+| Extract the primitive member | `track.quality` | SQL value column |
 | Prune by member statistics | Custom implementation | Min/max and Bloom pruning |
 | Handle unsupported layouts | Custom implementation | Automatic object fallback |
 
 > **For a partially split file, root4duckdb separates the logical SQL column from its wider physical ROOT container, adds statistics for that logical value, and reads the smallest physical ancestor required to recover it.**
+
+<a id="unsplit-object"></a>
 
 ### 🟨🟨🟨 Unsplit object: one SQL model, two decoding paths
 
 In the third case, ROOT stores the requested value inside a complete self-contained object.
 
 ```text
-PaEvent                         physical branch
-└── vecTrack                    object member
-    └── chi2tot                 requested logical value
+EventRecord                         physical branch
+└── tracks                    object member
+    └── quality                 requested logical value
 ```
 
-Neither `vecTrack` nor `chi2tot` has an independent physical branch. The smallest self-contained physical unit is the complete `PaEvent` entry.
+Neither `tracks` nor `quality` has an independent physical branch. The smallest self-contained physical unit is the complete `EventRecord` entry.
 
 ```text
 physical read unit
-    = PaEvent
+    = EventRecord
 
 requested logical value
-    = PaEvent.vecTrack[i].chi2tot
+    = EventRecord.tracks[i].quality
 ```
 
-ROOT therefore cannot select `chi2tot` as an independent physical column.
+ROOT therefore cannot select `quality` as an independent physical column.
 
 ### Mapping the object to SQL
 
@@ -664,11 +720,11 @@ The physical layout changes, but the SQL representation remains the same:
 | ROOT object model | SQL column |
 |---|---|
 | `TTree` entry number | `entry_id` |
-| Position inside `vecTrack` | `vecTrack_idx` |
-| `PaTrack::chi2tot` | `chi2tot` |
+| Position inside `tracks` | `tracks_idx` |
+| `TrackRecord::quality` | `quality` |
 
 ```text
-entry_id | vecTrack_idx | chi2tot
+entry_id | tracks_idx | quality
 ---------|--------------|---------
 929      | 0            | 1.84
 929      | 1            | 3.12
@@ -679,7 +735,7 @@ entry_id | vecTrack_idx | chi2tot
 The logical identity of every value is still:
 
 ```text
-(entry_id, vecTrack_idx)
+(entry_id, tracks_idx)
 ```
 
 For deeper collections, one SQL index column is added for every variable-size level:
@@ -694,43 +750,43 @@ entry_id | outer_idx | inner_idx | value
 
 The event data remain inside the ROOT file.
 
-root4duckdb builds sidecar metadata for the requested logical field and maps those statistics back to the physical `PaEvent` baskets that contain it.
+root4duckdb builds sidecar metadata for the requested logical field and maps those statistics back to the physical `EventRecord` baskets that contain it.
 
 ```text
 logical path
-    /PaEvent/vecTrack/chi2tot
+    /EventRecord/tracks/quality
 
 physical ancestor
-    PaEvent
+    EventRecord
 ```
 
 A sidecar may describe a physical basket like this:
 
 ```text
-PaEvent basket 42
+EventRecord basket 42
 ├── entries: 900–949
-├── chi2tot values: 287
-├── chi2tot min: 0.02
-├── chi2tot max: 18.74
-└── chi2tot Bloom filter
+├── quality values: 287
+├── quality min: 0.02
+├── quality max: 18.74
+└── quality Bloom filter
 ```
 
-The basket belongs to the physical `PaEvent` branch. The statistics describe only the logical `chi2tot` values found inside it.
+The basket belongs to the physical `EventRecord` branch. The statistics describe only the logical `quality` values found inside it.
 
 This allows a predicate such as:
 
 ```sql
-WHERE chi2tot > 100
+WHERE quality > 100
 ```
 
-to reject impossible physical regions before any `PaEvent` object is decoded:
+to reject impossible physical regions before any `EventRecord` object is decoded:
 
 ```text
-chi2tot predicate
+quality predicate
         ↓
 logical min/max statistics
         ↓
-reject impossible PaEvent baskets
+reject impossible EventRecord baskets
         ↓
 decode only surviving entries
 ```
@@ -744,14 +800,14 @@ The ROOT files and their sidecars are published as one versioned dataset:
 ```text
 Iceberg snapshot
 ├── ROOT file A
-│   ├── PaEvent baskets
-│   └── chi2tot sidecar
+│   ├── EventRecord baskets
+│   └── quality sidecar
 ├── ROOT file B
-│   ├── PaEvent baskets
-│   └── chi2tot sidecar
+│   ├── EventRecord baskets
+│   └── quality sidecar
 └── ROOT file C
-    ├── PaEvent baskets
-    └── chi2tot sidecar
+    ├── EventRecord baskets
+    └── quality sidecar
 ```
 
 Iceberg provides:
@@ -768,11 +824,11 @@ ROOT remains the authoritative event store. Iceberg provides dataset-wide visibi
 Consider the same SQL request:
 
 ```sql
-SELECT chi2tot
+SELECT quality
 FROM read_root_dataset(...)
 WHERE source_id = 'file-A'
   AND entry_id = 929
-  AND vecTrack_idx = 2;
+  AND tracks_idx = 2;
 ```
 
 The common part of the read plan is:
@@ -784,13 +840,13 @@ resolve the Iceberg snapshot
     ↓
 select file-A
     ↓
-resolve /PaEvent/vecTrack/chi2tot
+resolve /EventRecord/tracks/quality
     ↓
-identify PaEvent as the physical ancestor
+identify EventRecord as the physical ancestor
     ↓
 locate the basket containing entry 929
     ↓
-read the selected PaEvent entry
+read the selected EventRecord entry
 ```
 
 At this point, root4duckdb has two possible decoding paths.
@@ -802,7 +858,7 @@ At this point, root4duckdb has two possible decoding paths.
 For a supported and validated layout, root4duckdb extracts the requested values directly from the serialized entry payload.
 
 ```text
-selected PaEvent basket
+selected EventRecord basket
         ↓
 decompress the basket
         ↓
@@ -810,21 +866,21 @@ locate serialized entry 929
         ↓
 follow the validated layout plan
         ↓
-locate vecTrack element 2
+locate tracks element 2
         ↓
-decode chi2tot
+decode quality
         ↓
 emit one SQL value
 ```
 
-Complete `PaEvent` and `PaTrack` C++ objects are not constructed.
+Complete `EventRecord` and `TrackRecord` C++ objects are not constructed.
 
 ```text
 physical input
-    = complete serialized PaEvent entry
+    = complete serialized EventRecord entry
 
 decoded output
-    = requested chi2tot values
+    = requested quality values
 ```
 
 root4duckdb still reads the physical bytes required by the ROOT layout, but it avoids full object reconstruction and emits only the requested logical SQL columns.
@@ -844,11 +900,11 @@ basket pruning
     ↓
 entry-range selection
     ↓
-serialized PaEvent payload
+serialized EventRecord payload
     ↓
-vecTrack_idx
+tracks_idx
     ↓
-chi2tot
+quality
     ↓
 SQL result
 ```
@@ -869,8 +925,8 @@ auto tracks = locate_collection(
 );
 
 float value = decode_primitive<float>(
-    tracks[vecTrack_idx],
-    chi2tot_plan
+    tracks[tracks_idx],
+    quality_plan
 );
 ```
 
@@ -883,17 +939,17 @@ The real decoder uses a plan derived from ROOT streamer metadata and accepts onl
 If direct serialized decoding is unsupported or fails validation, root4duckdb uses ROOT's universal object mechanism.
 
 ```text
-selected PaEvent basket
+selected EventRecord basket
         ↓
 TTree::GetEntry(929)
         ↓
-ROOT reconstructs PaEvent
+ROOT reconstructs EventRecord
         ↓
-traverse vecTrack
+traverse tracks
         ↓
 select element 2
         ↓
-read chi2tot
+read quality
         ↓
 emit one SQL value
 ```
@@ -913,13 +969,13 @@ The operation is conceptually equivalent to:
 tree->GetEntry(entry_id);
 
 const auto &track =
-    event->vecTrack.at(vecTrack_idx);
+    event->tracks.at(tracks_idx);
 
 const float value =
-    track.chi2tot;
+    track.quality;
 ```
 
-The actual universal reader does not hard-code `PaEvent`, `vecTrack` or `chi2tot`. It builds the traversal dynamically from the loaded ROOT dictionary.
+The actual universal reader does not hard-code `EventRecord`, `tracks` or `quality`. It builds the traversal dynamically from the loaded ROOT dictionary.
 
 ```text
 TClass
@@ -963,9 +1019,9 @@ Object fallback does not disable the sidecar index. It changes only the final me
 | File pruning | Same | Same |
 | Basket pruning | Same | Same |
 | Entry-range pruning | Same | Same |
-| Physical ROOT input | `PaEvent` payload | `PaEvent` payload |
-| Complete `PaEvent` construction | No | Yes |
-| Complete `PaTrack` construction | No | Usually yes |
+| Physical ROOT input | `EventRecord` payload | `EventRecord` payload |
+| Complete `EventRecord` construction | No | Yes |
+| Complete `TrackRecord` construction | No | Usually yes |
 | Requested SQL columns emitted | Only requested | Only requested |
 | Layout support | Conservative | Universal reference |
 | Correctness role | Validated optimization | Semantic reference |
@@ -1044,6 +1100,26 @@ The larger gains appear on selective queries, where metadata prevents most ROOT 
 25 decoded values
 ```
 
+### Large direct multi-file scan
+
+The native multi-file RootScan was also exercised against a homogeneous set of remote experimental ROOT files. The query performed a complete checksum aggregate over one deeply nested primitive column.
+
+| Metric | Measured result |
+|---|---:|
+| Remote ROOT files | **117 / 117** |
+| Decoded primitive values | **10,696,574,044** |
+| Wall time | **644.478 s** |
+| Sustained value rate | **16.6 million values/s** |
+| Observed remote-read throughput | **412–471 MiB/s** |
+| Average CPU consumption | **4.49 cores** |
+| Peak resident memory | **approximately 1.3 GiB** |
+| Transient remote-open timeouts | **3, all recovered** |
+| Final checksum | `2784253092475411033` |
+
+The scan ran on one shared compute node with `threads = 14` and an 8 GiB DuckDB memory limit. It opened files lazily, reused one compatible schema plan, and returned one aggregate row; no intermediate event dataset was produced.
+
+This is one measured scan, not a fixed speed for every ROOT file. Different layouts, compression and remote-storage load can change the result, and paths that require object fallback may be slower. The complete query and correctness checks are documented in [Direct multi-file scans and performance](docs/direct-multifile-scan.md#measured-performance).
+
 The sidecar layer is small compared with the event data it describes. It does not duplicate ROOT payloads; it stores compact ranges, counts, statistics and optional Bloom filters. Even under a deliberately pessimistic estimate, a **230 TB** dataset would require only **hundreds of gigabytes of metadata**—well below **1%** of the original data volume—and most of that worst-case footprint would come from Bloom filters. Without aggressive Bloom indexing, the core file, basket, range and min/max metadata are considerably smaller.
 
 > **Speed comes first from pruning, then from reading only the required physical data, and finally from avoiding unnecessary object reconstruction.**
@@ -1052,26 +1128,33 @@ The integration suite also covers split and unsplit objects, nested collections,
 
 Timings describe the measured validation workload and environment; performance on other systems may differ.
 
+<a id="sql-interface"></a>
+
+## SQL interface
+
+<a id="read-root"></a>
+
 ### `read_root(...)`
 
-`read_root(...)` exposes one ROOT file as a DuckDB relation.
+`read_root(...)` exposes one ROOT file or an ad-hoc group of ROOT files as a DuckDB relation.
 
 It reads logical fields through ROOT dictionaries and `TStreamerInfo`. A prebuilt sidecar index or Iceberg catalog is not required.
 
 ```sql
 read_root(
-    root_file,
+    root_inputs,
     dictionary := '...',
-    path_prefix := '...',
-    reader_mode := 'auto'
+    path_prefix := '...'
 )
 ```
+
+The common call needs no reader-policy arguments. Optional safety and diagnostic controls are listed below for validation and development work.
 
 ### Interface
 
 | Argument | Default | Effect |
 |---|---:|---|
-| `root_file` | required | ROOT file to open |
+| `root_inputs` | required | ROOT file, directory, shell-style glob, comma list, JSON string array or `@file` list |
 | `dictionary` | — | Loads the C++ dictionaries required for semantic object traversal |
 | `path_prefix` | — | Selects the logical object, collection or primitive field |
 | `reader_mode` | `auto` | Chooses serialized decoding or universal object reconstruction |
@@ -1094,16 +1177,42 @@ dictionary := '/data/libExperiment.so'
 | Object or collection path | Lists its immediate logical children |
 | Primitive field path | Returns `event_id`, nested collection indices and the requested value |
 
+For multiple inputs, the schema is bound once from the first readable representative file. Files are then opened lazily by a bounded worker pool; one slow or unavailable input does not serialize all other opens. Compatible files reuse the bound access plan, while an actual per-file schema or decoder mismatch remains an execution error.
+
+Multi-file results add two identity columns:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `source_id` | `UBIGINT` | Stable zero-based position after input expansion |
+| `source_path` | `VARCHAR` | Resolved ROOT input path |
+
+`event_id` remains the entry number inside one source, so the stable row identity is `(source_id, event_id, nested indices...)`. A predicate on `source_id` is pushed into the scheduler and prevents unrelated files from being opened.
+
+```sql
+SELECT count(*), sum(value)
+FROM read_root(
+    '/data/run*.root*',
+    dictionary := '/data/libExperiment.so',
+    path_prefix := '/EventRecord/records/value'
+);
+```
+
+The same call also accepts `'/data/run1.root'`, `'@/data/input.list'`, a directory, a comma-separated list, or a JSON string array. No multi-file policy flags are required: `SET threads`, DuckDB's memory limit and the extension's automatic admission control determine safe concurrency.
+
+Remote opens use a bounded retry budget. If a multi-file input is still unavailable, root4duckdb emits an explicit `ROOT_FILE_UNAVAILABLE` warning, records the file in profiling counters, and continues with the remaining sources. A single exact input remains strict and fails the query when it cannot be opened. This exception applies only to file availability; schema and decoding failures are never silently ignored.
+
+See [Direct multi-file scans and performance](docs/direct-multifile-scan.md) for the execution model, failure semantics, profiling fields, regression procedure and measured benchmark.
+
 For example:
 
 ```text
-/Event/vecTrack/chi2
+/EventRecord/tracks/quality
 ```
 
 becomes:
 
 ```text
-event_id | vecTrack_idx | chi2
+event_id | tracks_idx | quality
 ```
 
 ### Reader modes
@@ -1121,13 +1230,12 @@ The serialized mode currently requires exactly one materialized logical value co
 ```sql
 SELECT
     event_id,
-    vecTrack_idx,
-    chi2
+    tracks_idx,
+    quality
 FROM read_root(
     '/data/events.root',
     dictionary := '/data/libExperiment.so',
-    path_prefix := '/Event/vecTrack/chi2',
-    reader_mode := 'auto'
+    path_prefix := '/EventRecord/tracks/quality'
 )
 WHERE event_id >= 929
   AND event_id < 934;
@@ -1137,7 +1245,9 @@ Projection pushdown prevents unused logical columns from being materialized and 
 
 Value predicates are evaluated during the direct scan, but `read_root(...)` has no dataset sidecar statistics for file or basket pruning.
 
-> **Use `read_root(...)` for direct single-file access, schema exploration and reader validation. Use `read_root_dataset(...)` when reusable metadata-driven pruning is required.**
+> **Use `read_root(...)` for direct file/glob access, schema exploration and reader validation. Use `read_root_dataset(...)` when reusable metadata-driven pruning is required.**
+
+<a id="root-build-index"></a>
 
 ## `root_build_index(...)`
 
@@ -1202,15 +1312,12 @@ FROM root_build_index(
     '/data/events/*.root',
     'Events',
     '[
-        "/Event/vecTrack/chi2",
-        "/Event/vecTrack/nHits"
+        "/Event/tracks/chi2",
+        "/Event/tracks/nHits"
     ]',
     '/data/root-index',
     dictionary := '/data/libExperiment.so',
-    reader_mode := 'auto',
-    index_threads := 4,
-    catalog_mode := 'sqlite',
-    allow_partial := false
+    catalog_mode := 'sqlite'
 );
 ```
 
@@ -1223,6 +1330,8 @@ file_path | entries | flattened_values | baskets | status | snapshot_id
 The generated metadata contains logical schemas, object traversal plans, file statistics, basket ranges, value counts, min/max statistics and optional Bloom filters.
 
 > **`root_build_index(...)` performs the expensive ROOT traversal once so that later queries can eliminate irrelevant files and baskets before decoding begins.**
+
+<a id="read-root-dataset"></a>
 
 ## `read_root_dataset(...)`
 
@@ -1282,13 +1391,12 @@ source_id + entry_id + nested indices
 SELECT
     source_id,
     entry_id,
-    vecTrack_idx,
+    tracks_idx,
     value AS chi2
 FROM read_root_dataset(
     '/data/root-index',
-    '/Event/vecTrack/chi2',
-    dictionary := '/data/libExperiment.so',
-    reader_mode := 'auto'
+    '/Event/tracks/chi2',
+    dictionary := '/data/libExperiment.so'
 )
 WHERE event_fk >= 929
   AND event_fk < 934
@@ -1314,6 +1422,8 @@ evaluate the exact predicate in DuckDB
 Projection pushdown avoids materializing unused output columns. An unfiltered `COUNT(*)` can be answered directly from metadata without opening ROOT files.
 
 > **`read_root_dataset(...)` is the primary analytical reader: SQL predicates determine not only which rows are returned, but which ROOT data are read at all.**
+
+<a id="root-dataset-stats"></a>
 
 ## `root_dataset_stats(...)`
 
@@ -1357,7 +1467,7 @@ root_dataset_stats(
 SELECT *
 FROM root_dataset_stats(
     '/data/root-index',
-    '/Event/vecTrack/chi2'
+    '/Event/tracks/chi2'
 );
 ```
 
@@ -1373,6 +1483,8 @@ compressed_bytes   4,825,018,773
 > **Use `root_dataset_stats(...)` when the answer already exists in metadata and reading ROOT data would be unnecessary.**
 
 ---
+
+<a id="root-iceberg-catalog"></a>
 
 ## `root_iceberg_catalog(...)`
 
@@ -1526,11 +1638,25 @@ build/release/extension/root/root.duckdb_extension
 
 ### Run
 
+Run the bundled CLI directly:
+
+```bash
+./build/release/duckdb
+```
+
+The root4duckdb extension is already registered in this binary. To load the extension into another ABI-compatible DuckDB build, use the produced loadable artifact:
+
+```sql
+LOAD './build/release/extension/root/root.duckdb_extension';
+```
+
+On CERN lxplus, the compiler and shared-library paths may disappear between shell sessions. In that environment, use:
+
 ```bash
 ./run-duckdb.sh
 ```
 
-Use the wrapper instead of launching `build/release/duckdb` directly. It restores the compiler, ROOT and shared Iceberg runtime paths required by the built binary.
+This wrapper is an lxplus/CVMFS environment fix. It restores the compiler, ROOT and shared Iceberg runtime paths, then executes the same `build/release/duckdb` binary.
 
 ### Rebuild after source changes
 
@@ -1561,40 +1687,9 @@ CC=/path/to/gcc CXX=/path/to/g++ \
 
 root4duckdb is currently a **research prototype**, not a production-ready data platform.
 
-The main architectural ideas are implemented and validated: universal ROOT object traversal, relational flattening, reusable basket metadata, selective decoding, SQL execution and Iceberg-backed dataset snapshots. However, the project still requires substantial engineering before it can be considered safe for general production use.
+The main architectural ideas are implemented and validated: universal ROOT object traversal, relational flattening, selective serialized decoding, native multi-file execution, reusable basket metadata, SQL execution and Iceberg-backed dataset snapshots. However, the project still requires substantial engineering before it can be considered safe for general production use.
 
-### Priorities
-
-- [ ] **Simplify the build**  
-  Reduce the compiler, ROOT, DuckDB and Iceberg integration complexity and provide reproducible binary packages.
-
-- [ ] **Validate the full ROOT type system**  
-  Extend integration tests across primitive types, arrays, inheritance, pointers, nested STL containers, split levels and schema variations.
-
-- [ ] **Refactor the reader and planner**  
-  Separate semantic traversal, physical layout discovery, serialized decoding, indexing and query planning into stable internal components.
-
-- [ ] **Complete query optimizations**  
-  Improve projection pushdown, multi-column predicate planning, Bloom-filter selection, basket scheduling, aggregate pushdown and early termination.
-
-- [ ] **Support additional ROOT structures**  
-  Add first-class SQL access to objects such as `TH1`, `TH2`, `TGraph`, `RNTuple` and other common ROOT data structures.
-
-- [ ] **Improve catalog integration**  
-  Harden Iceberg publication, snapshot updates, schema evolution, recovery and interoperability with external catalogs.
-
-- [ ] **Add distributed execution**  
-  Distribute indexing and query tasks across multiple machines while preserving deterministic snapshots, bounded memory usage and exact row identity.
-
-- [ ] **Run larger production-scale validation**  
-  Test complete experimental datasets, heterogeneous file generations, remote storage, failures, retries and concurrent readers.
-
-- [ ] **Build a DAG-based execution layer**  
-  Represent indexing and query work as an explicit dependency graph that can be distributed across multiple nodes, resumed after failures and inspected at every stage. The DAG must preserve deterministic snapshots, exact lineage, bounded resource usage, retries and validation before publication.
-
-Contributions are particularly valuable in ROOT layout coverage, DuckDB optimization, Iceberg interoperability, packaging and distributed execution.
-
-> **The current release demonstrates the architecture and its performance potential. The next stage is turning that working prototype into a maintainable production system.**
+The [direct multi-file performance notes](docs/direct-multifile-scan.md#development-directions) connect these directions to the bottlenecks observed in the measured scan.
 
 ## Developer and contributing
 
