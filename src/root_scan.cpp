@@ -3042,6 +3042,11 @@ static bool EnsureMultiFileReady(const FastRootBindData& bind_data,
         try {
             InitializeRootLocalFile(bind_data, gstate, local_state,
                                     local_state.file_task.path, false);
+        } catch (const rootlake::RootFileUnavailableException &exception) {
+            gstate.file_scheduler->RecordUnavailable(
+                local_state.file_task, exception.attempts, exception.elapsed_us);
+            ResetRootLocalFile(gstate, local_state, false);
+            continue;
         } catch (const std::exception &exception) {
             gstate.file_scheduler->RecordFailure(local_state.file_task, exception.what());
             ResetRootLocalFile(gstate, local_state, false);
@@ -3946,6 +3951,7 @@ static InsertionOrderPreservingMap<string> RootScanDynamicToString(TableFunction
         result["ROOT Opened Files"] = std::to_string(global.file_scheduler->OpenedFiles());
         result["ROOT Completed Files"] = std::to_string(global.file_scheduler->CompletedFiles());
         result["ROOT Skipped Files"] = std::to_string(global.file_scheduler->SkippedFiles());
+        result["ROOT Unavailable Files"] = std::to_string(global.file_scheduler->UnavailableFiles());
         result["ROOT Failed Files"] = std::to_string(global.file_scheduler->FailedFiles());
         result["ROOT Retried Opens"] = std::to_string(global.file_scheduler->RetriedOpens());
         result["ROOT Open Time (us)"] = std::to_string(global.file_scheduler->OpenTimeUs());

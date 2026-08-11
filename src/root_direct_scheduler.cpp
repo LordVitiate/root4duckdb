@@ -39,6 +39,13 @@ void RootDirectFileScheduler::RecordOpen(const RootDirectFileTask &, uint32_t at
     if (attempts > 1) retried_opens_.fetch_add(attempts - 1);
 }
 
+void RootDirectFileScheduler::RecordUnavailable(const RootDirectFileTask &, uint32_t attempts,
+                                                uint64_t elapsed_us) {
+    unavailable_files_.fetch_add(1);
+    open_time_us_.fetch_add(elapsed_us);
+    if (attempts > 1) retried_opens_.fetch_add(attempts - 1);
+}
+
 void RootDirectFileScheduler::RecordFailure(const RootDirectFileTask &task,
                                             const std::string &message) {
     failed_files_.fetch_add(1);
@@ -72,7 +79,8 @@ void RootDirectFileScheduler::RecordFirstRow() {
 }
 
 bool RootDirectFileScheduler::AllFilesFinished() const {
-    return completed_files_.load() + failed_files_.load() + skipped_files_.load() >= files_.size();
+    return completed_files_.load() + failed_files_.load() + unavailable_files_.load() +
+               skipped_files_.load() >= files_.size();
 }
 
 uint64_t RootDirectFileScheduler::SchemaVariants() const {

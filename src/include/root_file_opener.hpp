@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 class TTree;
 
@@ -18,6 +20,18 @@ struct RootFileOpenResult {
     std::string error;
 
     explicit operator bool() const { return file && !file->IsZombie(); }
+};
+
+class RootFileUnavailableException : public std::runtime_error {
+public:
+    RootFileUnavailableException(std::string message, uint32_t attempts_p,
+                                 uint64_t elapsed_us_p)
+        : std::runtime_error(std::move(message)), attempts(attempts_p),
+          elapsed_us(elapsed_us_p) {
+    }
+
+    uint32_t attempts;
+    uint64_t elapsed_us;
 };
 
 // A deliberately small automatic retry budget protects transient remote

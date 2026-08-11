@@ -271,13 +271,20 @@ FROM read_root(
     path_prefix := '/TestEvent/run'
 );
 SQL
-if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if ! MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
     < "$WORK_DIR/direct-missing-input.sql" > "$WORK_DIR/direct-missing-input.log" 2>&1; then
-    echo "multi-file direct scan silently accepted a missing input" >&2
+    echo "multi-file direct scan failed instead of skipping an unavailable input" >&2
+    cat "$WORK_DIR/direct-missing-input.log" >&2
     exit 1
 fi
-if ! grep -q "ROOT input(s) failed" "$WORK_DIR/direct-missing-input.log"; then
-    echo "multi-file missing-input error did not contain the file failure summary" >&2
+if ! grep -q "\[ROOT4DUCKDB\]\[WARN\]\[ROOT_FILE_UNAVAILABLE\].*missing.root" \
+    "$WORK_DIR/direct-missing-input.log"; then
+    echo "multi-file missing-input warning was not emitted" >&2
+    cat "$WORK_DIR/direct-missing-input.log" >&2
+    exit 1
+fi
+if ! grep -q '^303$' "$WORK_DIR/direct-missing-input.log"; then
+    echo "multi-file missing-input scan did not preserve the readable-file result" >&2
     cat "$WORK_DIR/direct-missing-input.log" >&2
     exit 1
 fi

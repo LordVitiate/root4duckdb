@@ -27,6 +27,8 @@ public:
     idx_t MaxThreads() const { return worker_limit_; }
 
     void RecordOpen(const RootDirectFileTask &task, uint32_t attempts, uint64_t elapsed_us);
+    void RecordUnavailable(const RootDirectFileTask &task, uint32_t attempts,
+                           uint64_t elapsed_us);
     void RecordFailure(const RootDirectFileTask &task, const std::string &message);
     void RecordComplete(const RootDirectFileTask &task, uint64_t elapsed_us);
     void ObserveSchema(const std::string &fingerprint);
@@ -34,6 +36,7 @@ public:
 
     uint64_t OpenedFiles() const { return opened_files_.load(); }
     uint64_t FailedFiles() const { return failed_files_.load(); }
+    uint64_t UnavailableFiles() const { return unavailable_files_.load(); }
     uint64_t RetriedOpens() const { return retried_opens_.load(); }
     uint64_t OpenTimeUs() const { return open_time_us_.load(); }
     uint64_t CompletedFiles() const { return completed_files_.load(); }
@@ -52,6 +55,7 @@ private:
     std::atomic<idx_t> next_file_ {0};
     std::atomic<uint64_t> opened_files_ {0};
     std::atomic<uint64_t> failed_files_ {0};
+    std::atomic<uint64_t> unavailable_files_ {0};
     std::atomic<uint64_t> retried_opens_ {0};
     std::atomic<uint64_t> open_time_us_ {0};
     std::atomic<uint64_t> completed_files_ {0};
