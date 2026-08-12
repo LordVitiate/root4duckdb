@@ -51,8 +51,21 @@ static void WriteFixture(const fs::path &path, Int_t run_base, const std::vector
         };
         ++event_index;
         event->vecHit.clear();
+        size_t hit_index = 0;
         for (double value : values) {
             event->vecHit.emplace_back(value);
+            auto &hit = event->vecHit.back();
+            if (value == value) {
+                hit.weights = {static_cast<Float_t>(value + 0.25),
+                               static_cast<Float_t>(value + 0.75)};
+                if ((hit_index % 2) == 0) {
+                    hit.refs = {static_cast<Short_t>(value),
+                                static_cast<Short_t>(value + 10.0)};
+                } else {
+                    hit.refs = {static_cast<Short_t>(value)};
+                }
+            }
+            ++hit_index;
         }
         tree.Fill();
     }

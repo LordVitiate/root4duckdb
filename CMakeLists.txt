@@ -16,19 +16,29 @@ set(ROOT4DUCKDB_ICEBERG_SOURCES
 
 set(EXTENSION_SOURCES
     src/root_extension.cpp
-    src/root_meta_generator.cpp
     src/root_scan.cpp
+    src/root_input_resolver.cpp
+    src/root_file_opener.cpp
+    src/root_direct_scheduler.cpp
     src/root_debug.cpp
+    src/root_dictionary.cpp
+    src/root_dataset_catalog.cpp
+    src/root_lake_common.cpp
     src/root_bloom.cpp
     src/root_branch_projection.cpp
     src/root_filter.cpp
+    src/root_semantic_reader.cpp
+    src/root_path_reader.cpp
+    src/root_index_builder.cpp
     src/root_index_metadata.cpp
     src/root_lake_index.cpp
     src/root_lake_scan.cpp
     src/root_runtime_settings.cpp
     src/root_serialized_plan.cpp
+    src/root_serialized_deep.cpp
     src/root_serialized_reader.cpp
     src/root_serialized_codec.cpp
+    src/root_serialized_nested_codec.cpp
     ${ROOT4DUCKDB_ICEBERG_SOURCES}
 )
 

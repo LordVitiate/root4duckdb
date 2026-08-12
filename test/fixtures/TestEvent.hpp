@@ -17,6 +17,9 @@ class TestHit {
 public:
     Float_t u = 0.0F;
     Float_t uv[2] = {0.0F, 0.0F};
+    // Variable-width member before refs exercises member-wise prefix handling.
+    std::vector<Float_t> weights;
+    std::vector<Short_t> refs;
 
     TestHit() = default;
     explicit TestHit(Double_t value) : u(static_cast<Float_t>(value)) {
@@ -24,7 +27,7 @@ public:
         uv[1] = static_cast<Float_t>(value + 0.5);
     }
 
-    ClassDef(TestHit, 2);
+    ClassDef(TestHit, 3);
 };
 
 class TestEvent : public TestBase {

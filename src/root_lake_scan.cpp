@@ -4,9 +4,12 @@
 #include "root_iceberg_catalog.hpp"
 #include "include/root_bloom.hpp"
 #include "include/root_branch_projection.hpp"
+#include "include/root_dataset_catalog.hpp"
+#include "include/root_dictionary.hpp"
 #include "include/root_filter.hpp"
 #include "include/root_lake_common.hpp"
-#include "include/root_serialized_reader.hpp"
+#include "include/root_path_reader.hpp"
+#include "include/root_headers.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/operator/comparison_operators.hpp"
@@ -44,28 +47,6 @@
 namespace duckdb::rootlake {
 
 namespace fs = std::filesystem;
-
-struct CatalogSources {
-    std::string files;
-    std::string schemas;
-    std::string access;
-    std::string baskets;
-    std::string snapshots;
-    std::string commits;
-    std::string catalog_prefix;
-    std::string snapshot_id;
-    bool sql_tables = false;
-};
-
-struct SchemaBinding {
-    std::string schema_id;
-    std::string column_id;
-    std::string root_class;
-    std::string root_type;
-    std::string access_plan_id;
-    std::string index_signature;
-    std::vector<PathLevel> expected_levels;
-};
 
 enum class PathPredicateOp {
     EQ,
@@ -212,19 +193,11 @@ struct DatasetGlobalState final : public GlobalTableFunctionState {
 
 struct DatasetLocalState final : public LocalTableFunctionState {
     std::unique_ptr<TFile> file;
-    TTree *tree = nullptr;
-    TBranch *branch = nullptr;
-    RootObjectContext object_context;
-    TBranch *physical_branch = nullptr;
-    SerializedReadPlan serialized_plan;
-    SerializedBasketReader serialized_reader;
-    bool serialized_active = false;
-    bool fallback_recorded = false;
-    uint32_t validation_remaining = 0;
+    RootObjectReader object_reader;
+    RootPathReader path_reader;
     uint64_t reported_serialized_baskets = 0;
     uint64_t reported_serialized_compressed_bytes = 0;
     uint64_t reported_serialized_entry_bytes = 0;
-    std::vector<PathLevel> levels;
     std::vector<std::vector<PathLevel>> predicate_levels;
     std::string open_uri;
     std::string open_schema;
@@ -234,7 +207,6 @@ struct DatasetLocalState final : public LocalTableFunctionState {
     uint64_t current_entry = 0;
     std::vector<double> values;
     std::vector<int32_t> flat_indices;
-    idx_t index_depth = 0;
     idx_t value_offset = 0;
     uint64_t value_event_fk = 0;
     uint64_t value_entry_id = 0;
@@ -244,241 +216,80 @@ struct DatasetLocalState final : public LocalTableFunctionState {
     RootFilterEvaluator filter_evaluator;
 };
 
-static bool IsSafeQualifiedName(const std::string &name) {
-    if (name.empty()) return false;
-    for (char c : name) {
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.')) return false;
-    }
-    return true;
-}
+class DatasetTaskPlanner final {
+public:
+    void Plan(ClientContext &context, const DatasetBindData &bind,
+              DatasetGlobalState &global,
+              optional_ptr<TableFilterSet> filters);
+    void PlanMetadataCount(ClientContext &context,
+                           const DatasetBindData &bind,
+                           DatasetGlobalState &global);
 
-static bool IsInternalIcebergRelation(const std::string &source) {
-    if (source.rfind("read_parquet([", 0) == 0) {
-        return source.size() >= 2 && source.back() == ')';
-    }
-    return source.rfind("(SELECT ", 0) == 0 &&
-           source.find(" FROM read_parquet([") != std::string::npos &&
-           source.size() >= 2 && source.back() == ')';
-}
+private:
+    void BuildFileTaskGroups(DatasetGlobalState &global);
+};
 
-static std::string RelationSQL(const std::string &source, bool sql_tables) {
-    if (sql_tables) {
-        if (IsInternalIcebergRelation(source)) {
-            return source;
-        }
-        if (!IsSafeQualifiedName(source)) {
-            throw InvalidInputException("Unsafe metadata table name: " + source);
-        }
-        return source;
-    }
-    return "read_parquet(" + SqlLiteral(source) + ")";
-}
+class DatasetScanBinder final {
+public:
+    unique_ptr<FunctionData> Bind(
+        ClientContext &context, TableFunctionBindInput &input,
+        vector<LogicalType> &return_types, vector<string> &return_names);
+};
 
-static CatalogSources ResolveCatalogSources(const std::string &catalog_path, const named_parameter_map_t &named) {
-    CatalogSources sources;
-    if (IsRootIcebergCatalog(catalog_path)) {
-        sources.files = RootIcebergRelation(catalog_path, "files");
-        sources.schemas = RootIcebergRelation(catalog_path, "schemas");
-        sources.access = RootIcebergRelation(catalog_path, "access");
-        sources.baskets = RootIcebergRelation(catalog_path, "baskets");
-        sources.snapshots = RootIcebergCommittedSnapshotsRelation(catalog_path, ROOT_LAKE_INDEX_VERSION);
-        sources.commits = RootIcebergRelation(catalog_path, "commits");
-        sources.sql_tables = true;
-        return sources;
-    }
-    auto get_named = [&](const char *name) -> std::string {
-        auto it = named.find(name);
-        return it == named.end() ? std::string() : it->second.ToString();
-    };
-    sources.catalog_prefix = get_named("catalog_prefix");
-    sources.files = get_named("files_table");
-    sources.schemas = get_named("schemas_table");
-    sources.access = get_named("access_table");
-    sources.baskets = get_named("baskets_table");
-    sources.snapshots = get_named("snapshots_table");
-    sources.commits = get_named("commits_table");
-    sources.snapshot_id = get_named("snapshot_id");
+class DatasetScanStateFactory final {
+public:
+    unique_ptr<NodeStatistics> Cardinality(const FunctionData *bind_data);
+    unique_ptr<GlobalTableFunctionState> CreateGlobal(
+        ClientContext &context, TableFunctionInitInput &input);
+    unique_ptr<LocalTableFunctionState> CreateLocal();
+};
 
-    if (sources.catalog_prefix.empty() && !catalog_path.empty() && IsSafeQualifiedName(catalog_path)) {
-        std::error_code ec;
-        if (!fs::exists(catalog_path, ec)) sources.catalog_prefix = catalog_path;
-    }
-    if (!sources.catalog_prefix.empty()) {
-        if (!IsSafeQualifiedName(sources.catalog_prefix)) {
-            throw InvalidInputException("Unsafe ROOT metadata catalog prefix: " + sources.catalog_prefix);
-        }
-        sources.files = sources.catalog_prefix + "_files";
-        sources.schemas = sources.catalog_prefix + "_schemas";
-        sources.access = sources.catalog_prefix + "_access";
-        sources.baskets = sources.catalog_prefix + "_baskets";
-        sources.snapshots = sources.catalog_prefix + "_snapshots";
-        sources.commits = sources.catalog_prefix + "_commits";
-        sources.sql_tables = true;
-        return sources;
-    }
+class DatasetScanExecutor final {
+public:
+    void Scan(ClientContext &context, TableFunctionInput &input,
+              DataChunk &output);
+    double Progress(const GlobalTableFunctionState *state) const;
 
-    const bool any_override = !sources.files.empty() || !sources.schemas.empty() || !sources.access.empty() ||
-                              !sources.baskets.empty() || !sources.snapshots.empty();
-    if (any_override) {
-        if (sources.files.empty() || sources.schemas.empty() || sources.access.empty() || sources.baskets.empty()) {
-            throw InvalidInputException("files_table, schemas_table, access_table and baskets_table must be supplied together");
-        }
-        sources.sql_tables = true;
-        return sources;
-    }
+private:
+    void ValidateAccessPlan(const SchemaBinding &schema,
+                            const std::vector<PathLevel> &actual) const;
+    void SyncSerializedCounters(DatasetLocalState &local,
+                                DatasetGlobalState &global) const;
+    void OpenTaskFile(const DatasetBindData &bind,
+                      DatasetGlobalState &global,
+                      DatasetLocalState &local,
+                      const RootBasketTask &task);
+    void PrefetchPhysicalRange(TFile *file, uint64_t offset,
+                               uint64_t size) const;
+    bool ClaimTask(const DatasetBindData &bind, DatasetGlobalState &global,
+                   DatasetLocalState &local);
+    bool PassesPathPredicates(const DatasetBindData &bind,
+                              DatasetLocalState &local,
+                              void *object) const;
+    bool LoadNextEntry(const DatasetBindData &bind, DatasetLocalState &local,
+                       DatasetGlobalState &global);
+    void SetDoubleAsType(Vector &vector, idx_t row,
+                         const LogicalType &type, double value) const;
+    void EmitProjectedRow(const DatasetBindData &bind,
+                          const DatasetGlobalState &global,
+                          DataChunk &output, idx_t output_row,
+                          uint64_t event_fk,
+                          const std::string &source_id,
+                          uint64_t entry_id, double value,
+                          const int32_t *indices,
+                          idx_t index_count) const;
+    idx_t ReserveOutputRows(DatasetGlobalState &global,
+                            idx_t requested) const;
+};
 
-    fs::path manifest = catalog_path;
-    if (fs::is_directory(manifest)) manifest /= "current.json";
-    std::ifstream in(manifest, std::ios::binary);
-    if (!in) throw IOException("Cannot open ROOT lake catalog manifest: " + manifest.string());
-    nlohmann::json json;
-    in >> json;
-    if (json.value("format", "") != "root4duckdb-lakehouse") {
-        throw InvalidInputException("Unsupported ROOT lake catalog format in " + manifest.string());
-    }
-    const auto manifest_version = json.value("index_version", 0U);
-    if (manifest_version != ROOT_LAKE_INDEX_VERSION) {
-        throw InvalidInputException("ROOT lake index version " + std::to_string(manifest_version) +
-                                    " is incompatible with reader version " +
-                                    std::to_string(ROOT_LAKE_INDEX_VERSION) + "; rebuild the index");
-    }
-    sources.snapshot_id = json.value("snapshot_id", "");
-    auto resolve_table = [&](const char *name) {
-        fs::path table_path(json["tables"][name].get<std::string>());
-        if (table_path.is_relative()) table_path = manifest.parent_path() / table_path;
-        return table_path.lexically_normal().string();
-    };
-    sources.files = resolve_table("files");
-    sources.schemas = resolve_table("schemas");
-    sources.access = resolve_table("access_levels");
-    sources.baskets = resolve_table("baskets");
-    return sources;
-}
+class DatasetScanExplain final {
+public:
+    InsertionOrderPreservingMap<string> Bound(
+        TableFunctionToStringInput &input) const;
+    InsertionOrderPreservingMap<string> Running(
+        TableFunctionDynamicToStringInput &input) const;
+};
 
-static void ResolveCommittedSnapshot(ClientContext &context, CatalogSources &sources) {
-    if (!sources.sql_tables || sources.snapshots.empty() || !sources.snapshot_id.empty()) return;
-    Connection connection(*context.db);
-    if (!sources.commits.empty()) {
-        try {
-            auto committed = connection.Query(
-                "SELECT s.snapshot_id FROM " + sources.snapshots + " s JOIN " + sources.commits +
-                " c ON c.snapshot_id=s.snapshot_id WHERE s.state='COMMITTED' AND c.state='COMMITTED' "
-                "AND s.index_version=" + std::to_string(ROOT_LAKE_INDEX_VERSION) +
-                " ORDER BY c.committed_at_ns DESC LIMIT 1");
-            EnsureQueryOK(*committed, "resolve committed ROOT dataset generation");
-            if (committed->RowCount()) {
-                sources.snapshot_id = committed->GetValue(0, 0).ToString();
-                return;
-            }
-            throw InvalidInputException("No fully committed ROOT dataset generation in " + sources.commits);
-        } catch (const InvalidInputException &) {
-            throw;
-        } catch (...) {
-            // Backward compatibility for a local catalog that predates root_commits.
-        }
-    }
-    auto result = connection.Query(
-        "SELECT snapshot_id FROM " + sources.snapshots +
-        " WHERE state='COMMITTED' AND index_version=" + std::to_string(ROOT_LAKE_INDEX_VERSION) +
-        " ORDER BY created_at_ns DESC LIMIT 1");
-    EnsureQueryOK(*result, "resolve committed ROOT dataset snapshot");
-    if (!result->RowCount()) {
-        throw InvalidInputException("No committed ROOT dataset snapshot in " + sources.snapshots);
-    }
-    sources.snapshot_id = result->GetValue(0, 0).ToString();
-}
-
-static std::vector<std::string> SplitIndexNames(const std::string &signature) {
-    std::vector<std::string> result;
-    std::stringstream ss(signature);
-    std::string name;
-    while (std::getline(ss, name, ',')) {
-        if (!name.empty()) result.push_back(name);
-    }
-    return result;
-}
-
-static void LoadSchemaBindings(ClientContext &context, DatasetBindData &bind) {
-    Connection connection(*context.db);
-    const auto schema_relation = RelationSQL(bind.sources.schemas, bind.sources.sql_tables);
-    const auto access_relation = RelationSQL(bind.sources.access, bind.sources.sql_tables);
-    auto schema_result = connection.Query(
-        "SELECT DISTINCT schema_id, column_id, root_class, root_type, access_plan_id, "
-        "COALESCE(index_signature, '') AS index_signature "
-        "FROM " + schema_relation + " WHERE logical_path = " + SqlLiteral(bind.logical_path) + " ORDER BY schema_id");
-    EnsureQueryOK(*schema_result, "load ROOT schema metadata");
-    if (schema_result->RowCount() == 0) {
-        throw InvalidInputException("Logical path is absent from catalog: " + bind.logical_path);
-    }
-
-    std::optional<std::string> common_root_type;
-    std::optional<std::string> common_signature;
-    for (idx_t row = 0; row < schema_result->RowCount(); ++row) {
-        SchemaBinding schema;
-        schema.schema_id = schema_result->GetValue(0, row).GetValue<std::string>();
-        schema.column_id = schema_result->GetValue(1, row).GetValue<std::string>();
-        schema.root_class = schema_result->GetValue(2, row).GetValue<std::string>();
-        schema.root_type = schema_result->GetValue(3, row).GetValue<std::string>();
-        schema.access_plan_id = schema_result->GetValue(4, row).GetValue<std::string>();
-        schema.index_signature = schema_result->GetValue(5, row).GetValue<std::string>();
-
-        auto access_result = connection.Query(
-            "SELECT DISTINCT field_name, root_type, offset_in_parent, cumulative_offset, is_pointer, is_container, "
-            "is_primitive, is_string, is_fixed_array, array_length, COALESCE(array_dimensions, ''), element_size FROM " + access_relation +
-                " WHERE access_plan_id = " + SqlLiteral(schema.access_plan_id) + " ORDER BY level_no");
-        EnsureQueryOK(*access_result, "load ROOT access plan");
-        for (idx_t level_row = 0; level_row < access_result->RowCount(); ++level_row) {
-            PathLevel level;
-            level.name = access_result->GetValue(0, level_row).GetValue<std::string>();
-            level.type = access_result->GetValue(1, level_row).GetValue<std::string>();
-            level.offset_in_parent = access_result->GetValue(2, level_row).GetValue<int64_t>();
-            level.cumulative_offset = access_result->GetValue(3, level_row).GetValue<int64_t>();
-            level.is_pointer = access_result->GetValue(4, level_row).GetValue<bool>();
-            level.is_container = access_result->GetValue(5, level_row).GetValue<bool>();
-            level.is_primitive = access_result->GetValue(6, level_row).GetValue<bool>();
-            level.is_string = access_result->GetValue(7, level_row).GetValue<bool>();
-            level.is_fixed_array = access_result->GetValue(8, level_row).GetValue<bool>();
-            level.fixed_array_length = access_result->GetValue(9, level_row).GetValue<uint64_t>();
-            const auto dimensions = access_result->GetValue(10, level_row).GetValue<std::string>();
-            if (!dimensions.empty()) {
-                std::stringstream dim_stream(dimensions);
-                std::string dim;
-                while (std::getline(dim_stream, dim, 'x')) {
-                    if (!dim.empty()) level.array_dimensions.push_back(static_cast<uint32_t>(std::stoul(dim)));
-                }
-            }
-            level.element_size = access_result->GetValue(11, level_row).GetValue<uint32_t>();
-            schema.expected_levels.push_back(std::move(level));
-        }
-        if (schema.expected_levels.empty()) throw InvalidInputException("Empty access plan for schema " + schema.schema_id);
-
-        const auto canonical_signature = IndexSignature(schema.expected_levels);
-        if (!schema.index_signature.empty() && schema.index_signature != canonical_signature) {
-            throw InvalidInputException("Catalog index signature disagrees with access levels for schema " +
-                                        schema.schema_id);
-        }
-        schema.index_signature = canonical_signature;
-
-        if (!common_root_type) common_root_type = schema.root_type;
-        if (!common_signature) common_signature = schema.index_signature;
-        if (*common_root_type != schema.root_type) {
-            throw InvalidInputException("Catalog contains incompatible ROOT leaf types for " + bind.logical_path);
-        }
-        if (*common_signature != schema.index_signature) {
-            throw InvalidInputException("Catalog contains incompatible vector nesting for " + bind.logical_path);
-        }
-        bind.schema_lookup[schema.schema_id] = bind.schemas.size();
-        bind.schemas.push_back(std::move(schema));
-    }
-    bind.index_names = SplitIndexNames(*common_signature);
-    if (!IsLosslessDoubleBackedType(*common_root_type)) {
-        throw NotImplementedException(
-            "The indexed lakehouse path currently supports numeric leaves up to 32-bit integers plus FLOAT/DOUBLE; "
-            "unsupported leaf type: " + *common_root_type);
-    }
-    bind.value_type = RootTypeToLogicalType(*common_root_type);
-    bind.value_column = 1 + bind.index_names.size();
-}
 
 static PathPredicateOp ParsePathPredicateOp(std::string op) {
     std::transform(op.begin(), op.end(), op.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -493,74 +304,10 @@ static PathPredicateOp ParsePathPredicateOp(std::string op) {
     throw InvalidInputException("Unsupported path predicate operator: " + op);
 }
 
-static std::vector<SchemaBinding> LoadPathSchemas(ClientContext &context, const CatalogSources &sources,
-                                                  const std::string &logical_path, LogicalType &value_type,
-                                                  std::unordered_map<std::string, idx_t> &lookup) {
-    Connection connection(*context.db);
-    const auto schema_relation = RelationSQL(sources.schemas, sources.sql_tables);
-    const auto access_relation = RelationSQL(sources.access, sources.sql_tables);
-    auto schema_result = connection.Query(
-        "SELECT DISTINCT schema_id, column_id, root_class, root_type, access_plan_id, "
-        "COALESCE(index_signature, '') AS index_signature FROM " + schema_relation +
-        " WHERE logical_path=" + SqlLiteral(logical_path) + " ORDER BY schema_id");
-    EnsureQueryOK(*schema_result, "load predicate ROOT schema metadata");
-    if (!schema_result->RowCount()) {
-        throw InvalidInputException("Predicate path is absent from the catalog snapshot: " + logical_path);
-    }
-    std::optional<std::string> common_type;
-    std::vector<SchemaBinding> schemas;
-    for (idx_t row = 0; row < schema_result->RowCount(); ++row) {
-        SchemaBinding schema;
-        schema.schema_id = schema_result->GetValue(0, row).ToString();
-        schema.column_id = schema_result->GetValue(1, row).ToString();
-        schema.root_class = schema_result->GetValue(2, row).ToString();
-        schema.root_type = schema_result->GetValue(3, row).ToString();
-        schema.access_plan_id = schema_result->GetValue(4, row).ToString();
-        schema.index_signature = schema_result->GetValue(5, row).ToString();
-        auto access_result = connection.Query(
-            "SELECT DISTINCT field_name, root_type, offset_in_parent, cumulative_offset, is_pointer, is_container, "
-            "is_primitive, is_string, is_fixed_array, array_length, COALESCE(array_dimensions, ''), element_size "
-            "FROM " + access_relation + " WHERE access_plan_id=" + SqlLiteral(schema.access_plan_id) +
-            " ORDER BY level_no");
-        EnsureQueryOK(*access_result, "load predicate ROOT access plan");
-        for (idx_t level_row = 0; level_row < access_result->RowCount(); ++level_row) {
-            PathLevel level;
-            level.name = access_result->GetValue(0, level_row).ToString();
-            level.type = access_result->GetValue(1, level_row).ToString();
-            level.offset_in_parent = access_result->GetValue(2, level_row).GetValue<int64_t>();
-            level.cumulative_offset = access_result->GetValue(3, level_row).GetValue<int64_t>();
-            level.is_pointer = access_result->GetValue(4, level_row).GetValue<bool>();
-            level.is_container = access_result->GetValue(5, level_row).GetValue<bool>();
-            level.is_primitive = access_result->GetValue(6, level_row).GetValue<bool>();
-            level.is_string = access_result->GetValue(7, level_row).GetValue<bool>();
-            level.is_fixed_array = access_result->GetValue(8, level_row).GetValue<bool>();
-            level.fixed_array_length = access_result->GetValue(9, level_row).GetValue<uint64_t>();
-            const auto dimensions = access_result->GetValue(10, level_row).ToString();
-            if (!dimensions.empty()) {
-                std::stringstream dim_stream(dimensions);
-                std::string dim;
-                while (std::getline(dim_stream, dim, 'x')) {
-                    if (!dim.empty()) level.array_dimensions.push_back(static_cast<uint32_t>(std::stoul(dim)));
-                }
-            }
-            level.element_size = access_result->GetValue(11, level_row).GetValue<uint32_t>();
-            schema.expected_levels.push_back(std::move(level));
-        }
-        if (!common_type) common_type = schema.root_type;
-        if (*common_type != schema.root_type) {
-            throw InvalidInputException("Predicate path has incompatible ROOT leaf types: " + logical_path);
-        }
-        lookup[schema.schema_id] = schemas.size();
-        schemas.push_back(std::move(schema));
-    }
-    if (!common_type || !IsLosslessDoubleBackedType(*common_type)) {
-        throw NotImplementedException("Path predicates currently require numeric indexed leaves: " + logical_path);
-    }
-    value_type = RootTypeToLogicalType(*common_type);
-    return schemas;
-}
 
-static void ParsePathPredicates(ClientContext &context, DatasetBindData &bind, const std::string &raw_json) {
+static void ParsePathPredicates(
+    RootDatasetCatalog &catalog, DatasetBindData &bind,
+    const std::string &raw_json) {
     if (raw_json.empty()) return;
     auto json = nlohmann::json::parse(raw_json);
     if (!json.is_array()) throw InvalidInputException("path_predicates must be a JSON array");
@@ -597,8 +344,9 @@ static void ParsePathPredicates(ClientContext &context, DatasetBindData &bind, c
             predicate.values.push_back(item.at("value").get<double>());
         }
         if (predicate.values.empty()) throw InvalidInputException("Path predicate has no constants");
-        predicate.schemas = LoadPathSchemas(context, bind.sources, predicate.path, predicate.value_type,
-                                            predicate.schema_lookup);
+        predicate.schemas = catalog.LoadPathSchemas(
+            predicate.path, predicate.value_type,
+            predicate.schema_lookup);
         bind.path_predicates.push_back(std::move(predicate));
     }
 }
@@ -1257,8 +1005,8 @@ static std::vector<EntryInterval> IntersectIntervals(const std::vector<EntryInte
 static std::unordered_map<std::string, std::vector<EntryInterval>> LoadPredicateIntervals(
     ClientContext &context, const DatasetBindData &bind, const PathPredicateBinding &predicate,
     uint64_t &basket_counter, uint64_t &bloom_bytes) {
-    const auto files_relation = RelationSQL(bind.sources.files, bind.sources.sql_tables);
-    const auto baskets_relation = RelationSQL(bind.sources.baskets, bind.sources.sql_tables);
+    const auto files_relation = CatalogRelationSQL(bind.sources.files, bind.sources.sql_tables);
+    const auto baskets_relation = CatalogRelationSQL(bind.sources.baskets, bind.sources.sql_tables);
     std::string snapshot_clause;
     if (!bind.sources.snapshot_id.empty()) {
         snapshot_clause = " AND f.snapshot_id=" + SqlLiteral(bind.sources.snapshot_id) +
@@ -1340,7 +1088,7 @@ private:
     std::chrono::steady_clock::time_point started;
 };
 
-static void BuildFileTaskGroups(DatasetGlobalState &global) {
+void DatasetTaskPlanner::BuildFileTaskGroups(DatasetGlobalState &global) {
     global.task_groups.clear();
     idx_t begin = 0;
     while (begin < global.tasks.size()) {
@@ -1351,8 +1099,9 @@ static void BuildFileTaskGroups(DatasetGlobalState &global) {
     }
 }
 
-static void PlanTasks(ClientContext &context, const DatasetBindData &bind, DatasetGlobalState &global,
-                      optional_ptr<TableFilterSet> filters) {
+void DatasetTaskPlanner::Plan(
+    ClientContext &context, const DatasetBindData &bind,
+    DatasetGlobalState &global, optional_ptr<TableFilterSet> filters) {
     DatasetPlanningTimer planning_timer(global.planning_time_us);
     if (filters) global.filters = filters->Copy();
     // event_fk is the first public output column. Both event_fk and entry_id
@@ -1374,8 +1123,8 @@ static void PlanTasks(ClientContext &context, const DatasetBindData &bind, Datas
     BuildPredicateIntersection(context, bind, global);
     const bool interval_filter_active = bind.entry_selection_active || !bind.path_predicates.empty();
     if (interval_filter_active && global.candidate_intervals.empty()) return;
-    const auto files_relation = RelationSQL(bind.sources.files, bind.sources.sql_tables);
-    const auto baskets_relation = RelationSQL(bind.sources.baskets, bind.sources.sql_tables);
+    const auto files_relation = CatalogRelationSQL(bind.sources.files, bind.sources.sql_tables);
+    const auto baskets_relation = CatalogRelationSQL(bind.sources.baskets, bind.sources.sql_tables);
     {
         Connection metrics(*context.db);
         std::string totals_filter = " WHERE f.column_id IN " + IdListSQL(bind.schemas, true) +
@@ -1549,13 +1298,15 @@ static void PlanTasks(ClientContext &context, const DatasetBindData &bind, Datas
     BuildFileTaskGroups(global);
 }
 
-static unique_ptr<FunctionData> DatasetBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &return_names) {
+unique_ptr<FunctionData> DatasetScanBinder::Bind(
+    ClientContext &context, TableFunctionBindInput &input,
+    vector<LogicalType> &return_types, vector<string> &return_names) {
     auto bind = make_uniq<DatasetBindData>();
     bind->catalog_path = input.inputs[0].ToString();
     bind->logical_path = NormalizePath(input.inputs[1].ToString());
-    bind->sources = ResolveCatalogSources(bind->catalog_path, input.named_parameters);
-    ResolveCommittedSnapshot(context, bind->sources);
+    RootDatasetCatalog catalog(
+        context, bind->catalog_path, input.named_parameters);
+    bind->sources = catalog.Sources();
 
     auto it = input.named_parameters.find("dictionary");
     if (it != input.named_parameters.end()) bind->dictionary = it->second.ToString();
@@ -1563,7 +1314,7 @@ static unique_ptr<FunctionData> DatasetBind(ClientContext &context, TableFunctio
     it = input.named_parameters.find("dictionary_cleanup");
     if (it != input.named_parameters.end()) dictionary_cleanup = it->second.ToString();
     bind->dictionary_cleanup_mode =
-        ParseDictionaryCleanupMode(dictionary_cleanup, !bind->dictionary.empty());
+        ParseDictionaryCleanupMode(dictionary_cleanup);
     it = input.named_parameters.find("tree_cache_bytes");
     if (it != input.named_parameters.end()) bind->tree_cache_bytes = it->second.GetValue<uint64_t>();
     it = input.named_parameters.find("reader_mode");
@@ -1598,13 +1349,16 @@ static unique_ptr<FunctionData> DatasetBind(ClientContext &context, TableFunctio
     if (it != input.named_parameters.end()) bind->row_limit = it->second.GetValue<uint64_t>();
     if (bind->estimated_reader_bytes == 0) throw InvalidInputException("estimated_reader_bytes must be positive");
 
-    if (!bind->dictionary.empty() && gSystem->Load(bind->dictionary.c_str()) < 0) {
-        throw IOException("Failed to load ROOT dictionary: " + bind->dictionary);
-    }
-    LoadSchemaBindings(context, *bind);
+    LoadRootDictionary(bind->dictionary);
+    auto schema_set = catalog.LoadSchemas(bind->logical_path);
+    bind->schemas = std::move(schema_set.schemas);
+    bind->schema_lookup = std::move(schema_set.lookup);
+    bind->index_names = std::move(schema_set.index_names);
+    bind->value_type = schema_set.value_type;
+    bind->value_column = 1 + bind->index_names.size();
     it = input.named_parameters.find("path_predicates");
     if (it != input.named_parameters.end()) {
-        ParsePathPredicates(context, *bind, it->second.ToString());
+        ParsePathPredicates(catalog, *bind, it->second.ToString());
     }
     it = input.named_parameters.find("entry_selection");
     if (it != input.named_parameters.end()) {
@@ -1621,7 +1375,7 @@ static unique_ptr<FunctionData> DatasetBind(ClientContext &context, TableFunctio
     }
 
     {
-        const auto files_relation = RelationSQL(bind->sources.files, bind->sources.sql_tables);
+        const auto files_relation = CatalogRelationSQL(bind->sources.files, bind->sources.sql_tables);
         std::string sql = "SELECT CAST(COALESCE(sum(value_count), 0) AS UBIGINT) FROM " + files_relation +
                           " WHERE column_id IN " + IdListSQL(bind->schemas, true);
         if (!bind->sources.snapshot_id.empty()) {
@@ -1652,16 +1406,18 @@ static unique_ptr<FunctionData> DatasetBind(ClientContext &context, TableFunctio
     return std::move(bind);
 }
 
-static unique_ptr<NodeStatistics> DatasetCardinality(ClientContext &, const FunctionData *bind_data) {
+unique_ptr<NodeStatistics> DatasetScanStateFactory::Cardinality(
+    const FunctionData *bind_data) {
     if (!bind_data) return nullptr;
     const auto &bind = bind_data->Cast<DatasetBindData>();
     return make_uniq<NodeStatistics>(bind.estimated_cardinality, bind.estimated_cardinality);
 }
 
-static void PlanMetadataCount(ClientContext &context, const DatasetBindData &bind,
-                              DatasetGlobalState &global) {
+void DatasetTaskPlanner::PlanMetadataCount(
+    ClientContext &context, const DatasetBindData &bind,
+    DatasetGlobalState &global) {
     DatasetPlanningTimer planning_timer(global.planning_time_us);
-    const auto files_relation = RelationSQL(bind.sources.files, bind.sources.sql_tables);
+    const auto files_relation = CatalogRelationSQL(bind.sources.files, bind.sources.sql_tables);
     std::string predicate = " WHERE f.column_id IN " + IdListSQL(bind.schemas, true) +
                             " AND f.schema_id IN " + IdListSQL(bind.schemas, false);
     if (!bind.sources.snapshot_id.empty()) {
@@ -1679,7 +1435,8 @@ static void PlanMetadataCount(ClientContext &context, const DatasetBindData &bin
     global.skipped_baskets = global.catalog_baskets;
 }
 
-static unique_ptr<GlobalTableFunctionState> DatasetInit(ClientContext &context, TableFunctionInitInput &input) {
+unique_ptr<GlobalTableFunctionState> DatasetScanStateFactory::CreateGlobal(
+    ClientContext &context, TableFunctionInitInput &input) {
     auto &bind = input.bind_data->Cast<DatasetBindData>();
     auto global = make_uniq<DatasetGlobalState>();
     global->scan_column_ids = input.column_ids;
@@ -1707,9 +1464,9 @@ static unique_ptr<GlobalTableFunctionState> DatasetInit(ClientContext &context, 
     global->metadata_count_only = !has_materialized_filters && bind.path_predicates.empty() &&
                                   !bind.entry_selection_active && no_materialized_projection;
     if (global->metadata_count_only) {
-        PlanMetadataCount(context, bind, *global);
+        DatasetTaskPlanner().PlanMetadataCount(context, bind, *global);
     } else {
-        PlanTasks(context, bind, *global, input.filters);
+        DatasetTaskPlanner().Plan(context, bind, *global, input.filters);
     }
     const auto root_runtime = RootRuntimeSettings::From(
         context, std::max<idx_t>(1, global->catalog_files), global->catalog_baskets);
@@ -1726,7 +1483,9 @@ static unique_ptr<GlobalTableFunctionState> DatasetInit(ClientContext &context, 
     return std::move(global);
 }
 
-static void ValidateAccessPlan(const SchemaBinding &schema, const std::vector<PathLevel> &actual) {
+void DatasetScanExecutor::ValidateAccessPlan(
+    const SchemaBinding &schema,
+    const std::vector<PathLevel> &actual) const {
     if (actual.size() != schema.expected_levels.size()) {
         throw IOException("ROOT access plan depth differs from indexed schema " + schema.schema_id);
     }
@@ -1743,8 +1502,9 @@ static void ValidateAccessPlan(const SchemaBinding &schema, const std::vector<Pa
     }
 }
 
-static void SyncSerializedCounters(DatasetLocalState &local, DatasetGlobalState &global) {
-    const auto &counters = local.serialized_reader.Counters();
+void DatasetScanExecutor::SyncSerializedCounters(
+    DatasetLocalState &local, DatasetGlobalState &global) const {
+    const auto &counters = local.path_reader.SerializedCounters();
     if (counters.baskets >= local.reported_serialized_baskets) {
         global.serialized_baskets.fetch_add(counters.baskets - local.reported_serialized_baskets);
     }
@@ -1761,55 +1521,34 @@ static void SyncSerializedCounters(DatasetLocalState &local, DatasetGlobalState 
     local.reported_serialized_entry_bytes = counters.serialized_bytes;
 }
 
-static void RecordDatasetFallback(const DatasetBindData &bind, DatasetGlobalState &global,
-                                  DatasetLocalState &local, const std::string &reason) {
-    if (bind.reader_mode == RootReaderMode::SERIALIZED) {
-        throw IOException("reader_mode='serialized' cannot read " + bind.logical_path + ": " + reason);
-    }
-    local.serialized_active = false;
-    EnableAllBranches(local.tree, bind.tree_cache_bytes);
-    if (!local.fallback_recorded) {
-        global.fallback_files.fetch_add(1);
-        local.fallback_recorded = true;
-    }
-    WarnRootFallbackOnce(bind.logical_path, local.serialized_plan.schema_fingerprint, reason);
-}
-
-static void OpenTaskFile(const DatasetBindData &bind, DatasetGlobalState &global, DatasetLocalState &local, const RootBasketTask &task) {
+void DatasetScanExecutor::OpenTaskFile(
+    const DatasetBindData &bind, DatasetGlobalState &global,
+    DatasetLocalState &local, const RootBasketTask &task) {
     if (local.open_uri == task.root_uri && local.open_schema == task.schema_id && local.file) {
         global.reused_open_files.fetch_add(1);
         return;
     }
     SyncSerializedCounters(local, global);
-    local.serialized_reader.Bind(nullptr, SerializedReadPlan {});
-    local.serialized_active = false;
-    local.fallback_recorded = false;
-    local.physical_branch = nullptr;
-    local.serialized_plan = {};
-    local.validation_remaining = 0;
+    local.path_reader.Reset();
+    local.object_reader.Reset();
     local.reported_serialized_baskets = 0;
     local.reported_serialized_compressed_bytes = 0;
     local.reported_serialized_entry_bytes = 0;
-    local.object_context = RootObjectContext();
     local.file.reset(TFile::Open(task.root_uri.c_str(), "READ"));
     global.opened_files.fetch_add(1);
     if (!local.file || local.file->IsZombie()) throw IOException("Failed to open ROOT file: " + task.root_uri);
     auto schema_it = bind.schema_lookup.find(task.schema_id);
     if (schema_it == bind.schema_lookup.end()) throw IOException("Unknown schema_id in task: " + task.schema_id);
     const auto &schema = bind.schemas[schema_it->second];
+    local.object_reader.Bind(local.file.get(), task.tree_name, schema.root_class,
+                             bind.dictionary_cleanup_mode);
     auto parsed = ParsePath(bind.logical_path);
-    auto *root_class = TClass::GetClass(schema.root_class.c_str());
-    if (!root_class || !root_class->HasDictionary()) {
-        throw IOException("ROOT dictionary unavailable for " + schema.root_class);
-    }
-    local.tree = FindTree(local.file.get(), task.tree_name, schema.root_class);
-    auto *object_branch = FindObjectBranch(local.tree, schema.root_class);
-    if (!local.tree || !object_branch) throw IOException("Indexed ROOT tree/object branch is absent in " + task.root_uri);
+    auto *root_class = local.object_reader.RootClass();
+    auto *tree = local.object_reader.Tree();
+    auto *object_branch = local.object_reader.ObjectBranch();
     auto full_levels = PathResolver::Resolve(root_class, parsed.fields);
     ValidateAccessPlan(schema, full_levels);
 
-    local.branch = object_branch;
-    local.levels = full_levels;
     local.predicate_levels.clear();
     local.predicate_levels.reserve(bind.path_predicates.size());
     for (const auto &predicate : bind.path_predicates) {
@@ -1826,55 +1565,46 @@ static void OpenTaskFile(const DatasetBindData &bind, DatasetGlobalState &global
         ValidateAccessPlan(predicate.schemas[predicate_schema_it->second], predicate_levels);
         local.predicate_levels.push_back(std::move(predicate_levels));
     }
-    local.object_context.Bind(local.tree, object_branch, root_class,
-                              bind.dictionary_cleanup_mode);
-
-    const auto physical = ResolvePhysicalBranch(object_branch, parsed.fields);
-    local.physical_branch = physical.branch;
-    local.serialized_plan = BuildSerializedReadPlan(root_class, parsed, local.physical_branch);
+    local.path_reader.Resolve(tree, object_branch, root_class,
+                              std::move(parsed), std::move(full_levels));
     std::string serialized_rejection;
     if (!bind.path_predicates.empty()) {
         serialized_rejection = "path_predicates require universal object materialization";
-    } else if (!local.serialized_plan.supported) {
-        serialized_rejection = local.serialized_plan.reason;
     }
 
     bool projection_applied = false;
-    if (bind.path_predicates.empty() && physical.mode == "ancestor") {
-        const auto projection = ApplyBranchProjection(local.tree, {local.physical_branch},
+    if (bind.path_predicates.empty() &&
+        local.path_reader.PhysicalMode() == "ancestor") {
+        const auto projection = ApplyBranchProjection(
+            tree, {local.path_reader.PhysicalBranch()},
                                                       bind.tree_cache_bytes);
         projection_applied = projection.applied;
         if (projection_applied) global.projected_files.fetch_add(1);
     }
-    if (!projection_applied) EnableAllBranches(local.tree, bind.tree_cache_bytes);
+    if (!projection_applied) EnableAllBranches(tree, bind.tree_cache_bytes);
 
-    if (bind.reader_mode != RootReaderMode::OBJECT && serialized_rejection.empty()) {
-        local.serialized_reader.Bind(local.physical_branch, local.serialized_plan,
-                                     bind.raw_max_entry_bytes, bind.raw_max_values_per_entry);
-        local.serialized_active = true;
-        local.validation_remaining = bind.raw_validation_entries;
-    } else if (bind.reader_mode != RootReaderMode::OBJECT) {
-        if (bind.reader_mode == RootReaderMode::SERIALIZED) {
-            throw IOException("reader_mode='serialized' cannot read " + bind.logical_path + ": " +
-                              (serialized_rejection.empty() ? "serialized reader unavailable" : serialized_rejection));
-        }
-        if (!local.fallback_recorded) {
-            global.fallback_files.fetch_add(1);
-            local.fallback_recorded = true;
-        }
-        WarnRootFallbackOnce(bind.logical_path, local.serialized_plan.schema_fingerprint,
-                             serialized_rejection.empty() ? "serialized reader unavailable" : serialized_rejection);
-    }
-    const auto runtime_index_depth = IndexDepth(local.levels);
+    RootPathReaderOptions reader_options;
+    reader_options.reader_mode = bind.reader_mode;
+    reader_options.validation_entries = bind.raw_validation_entries;
+    reader_options.max_entry_bytes = bind.raw_max_entry_bytes;
+    reader_options.max_values_per_entry = bind.raw_max_values_per_entry;
+    reader_options.tree_cache_bytes = bind.tree_cache_bytes;
+    reader_options.enable_all_branches_on_fallback = true;
+    const auto started = local.path_reader.StartSerialized(
+        local.object_reader.CurrentObject(), std::move(reader_options),
+        std::move(serialized_rejection));
+    if (started.fallback_activated) global.fallback_files.fetch_add(1);
+
+    const auto runtime_index_depth = local.path_reader.IndexDepth();
     if (runtime_index_depth != bind.index_names.size()) {
         throw IOException("ROOT container depth differs from the catalog output schema for " + bind.logical_path);
     }
-    local.index_depth = runtime_index_depth;
     local.open_uri = task.root_uri;
     local.open_schema = task.schema_id;
 }
 
-static void PrefetchPhysicalRange(TFile *file, uint64_t offset, uint64_t size) {
+void DatasetScanExecutor::PrefetchPhysicalRange(
+    TFile *file, uint64_t offset, uint64_t size) const {
     if (!file || !size) return;
     constexpr uint64_t max_chunk = static_cast<uint64_t>(std::numeric_limits<Int_t>::max());
     while (size) {
@@ -1885,7 +1615,9 @@ static void PrefetchPhysicalRange(TFile *file, uint64_t offset, uint64_t size) {
     }
 }
 
-static bool ClaimTask(const DatasetBindData &bind, DatasetGlobalState &global, DatasetLocalState &local) {
+bool DatasetScanExecutor::ClaimTask(
+    const DatasetBindData &bind, DatasetGlobalState &global,
+    DatasetLocalState &local) {
     while (true) {
         if (local.next_task_in_group >= local.task_group_end) {
             const auto group_index = global.next_group.fetch_add(1);
@@ -1928,14 +1660,17 @@ static bool ClaimTask(const DatasetBindData &bind, DatasetGlobalState &global, D
         local.value_offset = 0;
         local.has_task = true;
         if (bind.tree_cache_bytes) {
-            local.tree->SetCacheEntryRange(static_cast<Long64_t>(local.current_task.entry_begin),
-                                           static_cast<Long64_t>(local.current_task.entry_end));
+            local.object_reader.Tree()->SetCacheEntryRange(
+                static_cast<Long64_t>(local.current_task.entry_begin),
+                static_cast<Long64_t>(local.current_task.entry_end));
         }
         return true;
     }
 }
 
-static bool PassesPathPredicates(const DatasetBindData &bind, DatasetLocalState &local, void *object) {
+bool DatasetScanExecutor::PassesPathPredicates(
+    const DatasetBindData &bind, DatasetLocalState &local,
+    void *object) const {
     if (bind.path_predicates.empty()) return true;
     std::vector<double> predicate_values;
     std::vector<int32_t> ignored_indices;
@@ -1949,56 +1684,45 @@ static bool PassesPathPredicates(const DatasetBindData &bind, DatasetLocalState 
     return true;
 }
 
-static bool LoadNextEntry(const DatasetBindData &bind, DatasetLocalState &local, DatasetGlobalState &global) {
+bool DatasetScanExecutor::LoadNextEntry(
+    const DatasetBindData &bind, DatasetLocalState &local,
+    DatasetGlobalState &global) {
     while (local.current_entry < local.current_task.entry_end) {
         const auto entry = local.current_entry++;
-        if (local.serialized_active) {
-            std::string failure_reason;
-            const bool decoded = local.serialized_reader.Decode(entry, local.values,
-                                                                  local.flat_indices, failure_reason);
+        RootEntryReader object_entry(local.object_reader);
+        object_entry.Begin(entry);
+        if (local.path_reader.SerializedActive()) {
+            const auto read = local.path_reader.TryReadSerialized(
+                entry, object_entry, local.values, local.flat_indices);
             SyncSerializedCounters(local, global);
-            if (!decoded) {
-                RecordDatasetFallback(bind, global, local, failure_reason);
-            } else {
+            global.get_entry_calls.fetch_add(object_entry.LoadCount());
+            if (read.fallback_activated) global.fallback_files.fetch_add(1);
+            if (read.decoded) {
                 global.serialized_entry_calls.fetch_add(1);
                 global.serialized_values.fetch_add(local.values.size());
-                if (local.validation_remaining > 0) {
-                    std::vector<double> reference_values;
-                    std::vector<int32_t> reference_indices;
-                    global.get_entry_calls.fetch_add(1);
-                    auto *object = local.object_context.Read(entry);
-                    if (object) {
-                        OffsetValueReader::CollectFlat(object, local.levels, local.index_depth,
-                                                       reference_values, reference_indices);
-                    }
-                    if (!object || !EqualDecodedValues(local.values, local.flat_indices,
-                                                       reference_values, reference_indices)) {
-                        RecordDatasetFallback(bind, global, local,
-                                              "serialized values differ from universal ROOT reader");
-                    } else {
-                        --local.validation_remaining;
-                    }
-                }
-                if (local.serialized_active) {
-                    global.decoded_values.fetch_add(local.values.size());
-                    local.value_offset = 0;
-                    local.value_event_fk = local.current_task.event_base + entry;
-                    local.value_entry_id = entry;
-                    local.value_source_id = local.current_task.file_id;
-                    if (!local.values.empty()) return true;
-                    continue;
-                }
+            }
+            if (read.serialized) {
+                global.decoded_values.fetch_add(local.values.size());
+                local.value_offset = 0;
+                local.value_event_fk = local.current_task.event_base + entry;
+                local.value_entry_id = entry;
+                local.value_source_id = local.current_task.file_id;
+                if (!local.values.empty()) return true;
+                continue;
+            }
+            if (read.fallback_activated && object_entry.LoadCount()) {
+                object_entry.Invalidate();
             }
         }
 
-        global.get_entry_calls.fetch_add(1);
-        auto *object = local.object_context.Read(entry);
+        const auto prior_loads = object_entry.LoadCount();
+        auto *object = object_entry.Read();
+        global.get_entry_calls.fetch_add(object_entry.LoadCount() - prior_loads);
         if (!object) continue;
         if (!PassesPathPredicates(bind, local, object)) continue;
         local.values.clear();
         local.flat_indices.clear();
-        OffsetValueReader::CollectFlat(object, local.levels, local.index_depth, local.values,
-                                       local.flat_indices);
+        local.path_reader.CollectFlat(object, local.values, local.flat_indices);
         global.decoded_values.fetch_add(local.values.size());
         local.value_offset = 0;
         local.value_event_fk = local.current_task.event_base + entry;
@@ -2009,7 +1733,9 @@ static bool LoadNextEntry(const DatasetBindData &bind, DatasetLocalState &local,
     return false;
 }
 
-static void SetDoubleAsType(Vector &vector, idx_t row, const LogicalType &type, double value) {
+void DatasetScanExecutor::SetDoubleAsType(
+    Vector &vector, idx_t row, const LogicalType &type,
+    double value) const {
     switch (type.id()) {
     case LogicalTypeId::BOOLEAN: FlatVector::GetData<bool>(vector)[row] = value != 0; break;
     case LogicalTypeId::TINYINT: FlatVector::GetData<int8_t>(vector)[row] = static_cast<int8_t>(value); break;
@@ -2027,9 +1753,12 @@ static void SetDoubleAsType(Vector &vector, idx_t row, const LogicalType &type, 
     FlatVector::Validity(vector).SetValid(row);
 }
 
-static void EmitProjectedRow(const DatasetBindData &bind, const DatasetGlobalState &global, DataChunk &output,
-                             idx_t output_row, uint64_t event_fk, const std::string &source_id,
-                             uint64_t entry_id, double numeric_value, const int32_t *indices, idx_t index_count) {
+void DatasetScanExecutor::EmitProjectedRow(
+    const DatasetBindData &bind, const DatasetGlobalState &global,
+    DataChunk &output, idx_t output_row, uint64_t event_fk,
+    const std::string &source_id, uint64_t entry_id,
+    double numeric_value, const int32_t *indices,
+    idx_t index_count) const {
     for (idx_t output_col = 0; output_col < global.output_column_ids.size(); ++output_col) {
         const auto full_col = global.output_column_ids[output_col];
         auto &vector = output.data[output_col];
@@ -2061,13 +1790,13 @@ static void EmitProjectedRow(const DatasetBindData &bind, const DatasetGlobalSta
     }
 }
 
-static unique_ptr<LocalTableFunctionState> DatasetInitLocal(ExecutionContext &, TableFunctionInitInput &,
-                                                             GlobalTableFunctionState *) {
+unique_ptr<LocalTableFunctionState> DatasetScanStateFactory::CreateLocal() {
     auto local = make_uniq<DatasetLocalState>();
     return std::move(local);
 }
 
-static idx_t ReserveOutputRows(DatasetGlobalState &global, idx_t requested) {
+idx_t DatasetScanExecutor::ReserveOutputRows(
+    DatasetGlobalState &global, idx_t requested) const {
     if (requested == 0 || global.stop_requested.load(std::memory_order_relaxed)) return 0;
     if (global.row_limit == std::numeric_limits<uint64_t>::max()) {
         global.emitted_rows.fetch_add(requested, std::memory_order_relaxed);
@@ -2089,7 +1818,9 @@ static idx_t ReserveOutputRows(DatasetGlobalState &global, idx_t requested) {
     return 0;
 }
 
-static void DatasetScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+void DatasetScanExecutor::Scan(
+    ClientContext &context, TableFunctionInput &input,
+    DataChunk &output) {
     auto &bind = input.bind_data->Cast<DatasetBindData>();
     auto &global = input.global_state->Cast<DatasetGlobalState>();
     auto &local = input.local_state->Cast<DatasetLocalState>();
@@ -2147,7 +1878,8 @@ static void DatasetScan(ClientContext &context, TableFunctionInput &input, DataC
 }
 
 
-static InsertionOrderPreservingMap<string> DatasetToString(TableFunctionToStringInput &input) {
+InsertionOrderPreservingMap<string> DatasetScanExplain::Bound(
+    TableFunctionToStringInput &input) const {
     InsertionOrderPreservingMap<string> result;
     if (!input.bind_data) return result;
     const auto &bind = input.bind_data->Cast<DatasetBindData>();
@@ -2167,7 +1899,8 @@ static InsertionOrderPreservingMap<string> DatasetToString(TableFunctionToString
     return result;
 }
 
-static InsertionOrderPreservingMap<string> DatasetDynamicToString(TableFunctionDynamicToStringInput &input) {
+InsertionOrderPreservingMap<string> DatasetScanExplain::Running(
+    TableFunctionDynamicToStringInput &input) const {
     InsertionOrderPreservingMap<string> result;
     if (input.bind_data) {
         const auto &bind = input.bind_data->Cast<DatasetBindData>();
@@ -2219,7 +1952,8 @@ static InsertionOrderPreservingMap<string> DatasetDynamicToString(TableFunctionD
     return result;
 }
 
-static double DatasetProgress(ClientContext &, const FunctionData *, const GlobalTableFunctionState *state) {
+double DatasetScanExecutor::Progress(
+    const GlobalTableFunctionState *state) const {
     if (!state) return 0.0;
     const auto &global = state->Cast<DatasetGlobalState>();
     if (global.tasks.empty()) return 100.0;
@@ -2262,11 +1996,12 @@ static unique_ptr<FunctionData> DatasetStatsBind(ClientContext &context, TableFu
                                                   vector<string> &return_names) {
     const auto catalog_path = input.inputs[0].ToString();
     const auto logical_path = NormalizePath(input.inputs[1].ToString());
-    auto sources = ResolveCatalogSources(catalog_path, input.named_parameters);
-    ResolveCommittedSnapshot(context, sources);
-    const auto files_relation = RelationSQL(sources.files, sources.sql_tables);
-    const auto schemas_relation = RelationSQL(sources.schemas, sources.sql_tables);
-    const auto baskets_relation = RelationSQL(sources.baskets, sources.sql_tables);
+    RootDatasetCatalog catalog(context, catalog_path,
+                               input.named_parameters);
+    const auto &sources = catalog.Sources();
+    const auto files_relation = CatalogRelationSQL(sources.files, sources.sql_tables);
+    const auto schemas_relation = CatalogRelationSQL(sources.schemas, sources.sql_tables);
+    const auto baskets_relation = CatalogRelationSQL(sources.baskets, sources.sql_tables);
     std::string snapshot_files;
     std::string snapshot_baskets;
     if (!sources.snapshot_id.empty()) {
@@ -2348,9 +2083,57 @@ static void ConfigureCatalogParameters(TableFunction &function) {
     function.named_parameters["snapshot_id"] = LogicalType::VARCHAR;
 }
 
+unique_ptr<FunctionData> DatasetBindCallback(
+    ClientContext &context, TableFunctionBindInput &input,
+    vector<LogicalType> &return_types, vector<string> &return_names) {
+    return DatasetScanBinder().Bind(
+        context, input, return_types, return_names);
+}
+
+unique_ptr<GlobalTableFunctionState> DatasetInitCallback(
+    ClientContext &context, TableFunctionInitInput &input) {
+    return DatasetScanStateFactory().CreateGlobal(context, input);
+}
+
+unique_ptr<LocalTableFunctionState> DatasetInitLocalCallback(
+    ExecutionContext &, TableFunctionInitInput &,
+    GlobalTableFunctionState *) {
+    return DatasetScanStateFactory().CreateLocal();
+}
+
+void DatasetScanCallback(
+    ClientContext &context, TableFunctionInput &input,
+    DataChunk &output) {
+    DatasetScanExecutor().Scan(context, input, output);
+}
+
+InsertionOrderPreservingMap<string> DatasetToStringCallback(
+    TableFunctionToStringInput &input) {
+    return DatasetScanExplain().Bound(input);
+}
+
+InsertionOrderPreservingMap<string> DatasetDynamicToStringCallback(
+    TableFunctionDynamicToStringInput &input) {
+    return DatasetScanExplain().Running(input);
+}
+
+double DatasetProgressCallback(
+    ClientContext &, const FunctionData *,
+    const GlobalTableFunctionState *state) {
+    return DatasetScanExecutor().Progress(state);
+}
+
+unique_ptr<NodeStatistics> DatasetCardinalityCallback(
+    ClientContext &, const FunctionData *bind_data) {
+    return DatasetScanStateFactory().Cardinality(bind_data);
+}
+
 void RegisterRootLakeScan(ExtensionLoader &loader) {
-    TableFunction function("read_root_dataset", {LogicalType::VARCHAR, LogicalType::VARCHAR}, DatasetScan, DatasetBind,
-                           DatasetInit, DatasetInitLocal);
+    TableFunction function(
+        "read_root_dataset",
+        {LogicalType::VARCHAR, LogicalType::VARCHAR},
+        DatasetScanCallback, DatasetBindCallback,
+        DatasetInitCallback, DatasetInitLocalCallback);
     function.named_parameters["dictionary"] = LogicalType::VARCHAR;
     function.named_parameters["dictionary_cleanup"] = LogicalType::VARCHAR;
     ConfigureCatalogParameters(function);
@@ -2373,10 +2156,10 @@ void RegisterRootLakeScan(ExtensionLoader &loader) {
     function.filter_pushdown = true;
     function.filter_prune = true;
     function.projection_pushdown = true;
-    function.to_string = DatasetToString;
-    function.dynamic_to_string = DatasetDynamicToString;
-    function.table_scan_progress = DatasetProgress;
-    function.cardinality = DatasetCardinality;
+    function.to_string = DatasetToStringCallback;
+    function.dynamic_to_string = DatasetDynamicToStringCallback;
+    function.table_scan_progress = DatasetProgressCallback;
+    function.cardinality = DatasetCardinalityCallback;
     function.get_virtual_columns = DatasetVirtualColumns;
     loader.RegisterFunction(function);
 

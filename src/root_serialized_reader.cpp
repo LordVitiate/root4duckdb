@@ -1,22 +1,35 @@
 #include "root_serialized_reader.hpp"
 
 #include "root_debug.hpp"
-
-#include "TBranch.h"
-#include "TBasket.h"
-#include "TBuffer.h"
+#include "root_headers.hpp"
 
 #include <algorithm>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace duckdb::rootlake {
 
+namespace {
+
+constexpr uint32_t kRootByteCountMask = 0x40000000U;
+constexpr uint32_t kRootByteCountValueMask = 0x3fffffffU;
+
+uint32_t ReadBE32(const uint8_t *ptr) {
+    return (static_cast<uint32_t>(ptr[0]) << 24U) |
+           (static_cast<uint32_t>(ptr[1]) << 16U) |
+           (static_cast<uint32_t>(ptr[2]) << 8U) |
+           static_cast<uint32_t>(ptr[3]);
+}
+
+} // namespace
+
 void SerializedBasketReader::Bind(TBranch *branch_p, SerializedReadPlan plan_p,
                                   uint64_t max_entry_bytes_p,
-                                  uint64_t max_values_per_entry_p) {
+                                  uint64_t max_values_per_entry_p,
+                                  void *root_object_scratch) {
+    Reset();
     branch = branch_p;
-    basket = nullptr;
-    basket_prepared = false;
     plan = std::move(plan_p);
     layout = {};
     layout.value_type = plan.value_type;
@@ -26,19 +39,40 @@ void SerializedBasketReader::Bind(TBranch *branch_p, SerializedReadPlan plan_p,
     layout.fixed_array_length = plan.fixed_array_length;
     layout.array_dimensions = plan.array_dimensions;
     layout.index_depth = plan.index_depth;
-    current_basket = -1;
-    current_basket_entry_begin = 0;
-    current_basket_entry_end = 0;
     max_entry_bytes = std::max<uint64_t>(12, max_entry_bytes_p);
     max_values_per_entry = std::max<uint64_t>(1, max_values_per_entry_p);
-    observed_memberwise_header = 0;
-    counters = {};
+    this->root_object_scratch = IsSerializedNestedProjection(plan.projection_kind)
+                                    ? root_object_scratch : nullptr;
+    if (IsSerializedNestedProjection(plan.projection_kind) && root_object_scratch) {
+        outer_collection_scratch =
+            static_cast<char *>(root_object_scratch) + plan.outer_container_offset;
+    }
     RootDebug("SERIALIZED.BIND",
               "path=" + plan.logical_path +
               " branch=" + (branch && branch->GetName() ? branch->GetName() : "none") +
               " supported=" + (plan.supported ? "true" : "false") +
               " type=" + plan.value_type +
+              " projection=" + SerializedProjectionName(plan.projection_kind) +
               " prefix_bytes=" + std::to_string(plan.bytes_before_value_per_element));
+}
+
+void SerializedBasketReader::Reset() {
+    branch = nullptr;
+    basket = nullptr;
+    basket_prepared = false;
+    plan = {};
+    layout = {};
+    current_basket = -1;
+    current_basket_entry_begin = 0;
+    current_basket_entry_end = 0;
+    max_entry_bytes = 0;
+    max_values_per_entry = 0;
+    root_object_scratch = nullptr;
+    outer_collection_scratch = nullptr;
+    resolved_element_version = -1;
+    resolved_prefix_element_ids.clear();
+    observed_memberwise_header = 0;
+    counters = {};
 }
 
 bool SerializedBasketReader::LoadBasket(uint64_t entry, std::string &failure_reason) {
@@ -153,9 +187,14 @@ bool SerializedBasketReader::Decode(uint64_t entry, std::vector<double> &values,
                   " reason=" + failure_reason);
         return false;
     }
-    if (!DecodeSerializedVectorEntry(bytes, entry_size, layout, max_values_per_entry,
-                                     observed_memberwise_header, values, flat_indices,
-                                     failure_reason, collect_indices)) {
+    const bool decoded =
+        IsSerializedNestedProjection(plan.projection_kind)
+            ? DecodeNestedProjectionEntry(bytes, entry_size, values, flat_indices,
+                                          failure_reason, collect_indices)
+            : DecodeSerializedVectorEntry(bytes, entry_size, layout, max_values_per_entry,
+                                          observed_memberwise_header, values, flat_indices,
+                                          failure_reason, collect_indices);
+    if (!decoded) {
         RootDebug("SERIALIZED.DECODE_FAILURE",
                   "path=" + plan.logical_path + " entry=" + std::to_string(entry) +
                   " reason=" + failure_reason);
@@ -165,6 +204,130 @@ bool SerializedBasketReader::Decode(uint64_t entry, std::vector<double> &values,
     counters.values += values.size();
     counters.serialized_bytes += entry_size;
     return true;
+}
+
+bool SerializedBasketReader::DecodeNestedProjectionEntry(
+    const uint8_t *bytes, size_t entry_size, std::vector<double> &values,
+    std::vector<int32_t> &flat_indices, std::string &failure_reason,
+    bool collect_indices) {
+    values.clear();
+    flat_indices.clear();
+    failure_reason.clear();
+    if (!bytes || entry_size < 12) {
+        failure_reason = "serialized vector entry is shorter than its header";
+        return false;
+    }
+    if (!plan.outer_container_class || !plan.outer_element_class) {
+        failure_reason = "serialized nested vector plan has no ROOT collection metadata";
+        return false;
+    }
+    if (plan.projection_kind == SerializedProjectionKind::NESTED_OBJECT_VECTOR &&
+        (!root_object_scratch || plan.projection_levels.empty() || plan.index_depth != 3)) {
+        failure_reason = "serialized nested object projection has no safe traversal metadata";
+        return false;
+    }
+    if (entry_size > static_cast<size_t>(std::numeric_limits<Int_t>::max())) {
+        failure_reason = "serialized nested vector entry exceeds ROOT buffer limits";
+        return false;
+    }
+
+    const uint32_t raw_byte_count = ReadBE32(bytes);
+    if ((raw_byte_count & kRootByteCountMask) == 0) {
+        failure_reason = "serialized vector entry has no ROOT byte-count marker";
+        return false;
+    }
+    const uint64_t declared_size =
+        static_cast<uint64_t>(raw_byte_count & kRootByteCountValueMask) + 4;
+    if (declared_size != entry_size) {
+        failure_reason = "serialized vector byte-count does not match entry offsets";
+        return false;
+    }
+    const uint32_t memberwise_header = ReadBE32(bytes + 4);
+    if (!memberwise_header) {
+        failure_reason = "serialized vector has an empty member-wise header";
+        return false;
+    }
+    if (!observed_memberwise_header) observed_memberwise_header = memberwise_header;
+    if (memberwise_header != observed_memberwise_header) {
+        failure_reason = "member-wise streamer header changed inside one physical branch";
+        return false;
+    }
+
+    try {
+        TBufferFile buffer(TBuffer::kRead, static_cast<Int_t>(entry_size),
+                           const_cast<uint8_t *>(bytes), kFALSE);
+        if (branch && branch->GetTree() && branch->GetTree()->GetCurrentFile()) {
+            buffer.SetParent(branch->GetTree()->GetCurrentFile());
+        }
+
+        UInt_t start = 0;
+        UInt_t byte_count = 0;
+        const Version_t collection_version =
+            buffer.ReadVersion(&start, &byte_count, plan.outer_container_class);
+        if ((collection_version & TBufferFile::kStreamedMemberWise) == 0) {
+            failure_reason = "serialized outer vector is not member-wise streamed";
+            return false;
+        }
+        if (static_cast<uint64_t>(start) + byte_count + 4 != entry_size) {
+            failure_reason = "ROOT member-wise byte-count differs from basket entry offsets";
+            return false;
+        }
+        const Version_t element_version =
+            buffer.ReadVersionForMemberWise(plan.outer_element_class);
+        if (!ResolveSerializedNestedVersion(plan, element_version,
+                                            resolved_element_version,
+                                            resolved_prefix_element_ids,
+                                            failure_reason)) return false;
+        Int_t signed_outer_count = -1;
+        buffer.ReadInt(signed_outer_count);
+        if (signed_outer_count < 0 ||
+            static_cast<uint64_t>(signed_outer_count) > max_values_per_entry) {
+            failure_reason = "serialized outer vector count exceeds configured safety limit";
+            return false;
+        }
+        const uint64_t outer_count = static_cast<uint32_t>(signed_outer_count);
+        if (!outer_count) {
+            if (static_cast<size_t>(buffer.Length()) != entry_size) {
+                failure_reason = "empty serialized outer vector has unexpected member payload";
+                return false;
+            }
+            return true;
+        }
+
+        if (!ConsumeSerializedSelectedMembers(
+                buffer, plan, element_version, outer_count,
+                outer_collection_scratch, resolved_prefix_element_ids,
+                failure_reason)) return false;
+
+        if (plan.projection_kind == SerializedProjectionKind::NESTED_OBJECT_VECTOR) {
+            return CollectSerializedNestedObjectProjection(
+                plan, root_object_scratch, max_values_per_entry,
+                values, flat_indices, failure_reason, collect_indices);
+        }
+
+        const Int_t root_offset = buffer.Length();
+        if (root_offset < 0 || static_cast<size_t>(root_offset) > entry_size) {
+            failure_reason = "ROOT serialized prefix actions moved outside the basket entry";
+            return false;
+        }
+        const size_t column_offset = static_cast<size_t>(root_offset);
+        RootDebug("SERIALIZED.NESTED_COLUMN",
+                  "path=" + plan.logical_path +
+                  " outer_count=" + std::to_string(outer_count) +
+                  " element_version=" + std::to_string(element_version) +
+                  " offset=" + std::to_string(column_offset));
+        return DecodeSerializedNestedPrimitiveVectorColumn(
+            bytes, entry_size, column_offset, outer_count, layout,
+            max_values_per_entry, values, flat_indices, failure_reason,
+            collect_indices);
+    } catch (const std::exception &ex) {
+        failure_reason = std::string("ROOT failed while consuming serialized member prefix: ") +
+                         ex.what();
+        return false;
+    } catch (...) {
+        failure_reason = "ROOT failed while consuming serialized member prefix";
+        return false;
+    }
 }
 
 bool SerializedBasketReader::CurrentBasketInfo(SerializedBasketInfo &info) const {
