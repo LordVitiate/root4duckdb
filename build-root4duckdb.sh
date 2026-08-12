@@ -249,7 +249,7 @@ fi
 
 echo "[5/6] Smoke testing registered functions"
 "$DUCKDB_BIN" -c "SELECT 42 AS root4duckdb_build_ok;"
-"$DUCKDB_BIN" -c "SELECT function_name FROM duckdb_functions() WHERE function_name IN ('read_root','create_meta','root_build_index','read_root_dataset','root_iceberg_catalog') ORDER BY function_name;"
+"$DUCKDB_BIN" -c "SELECT function_name FROM duckdb_functions() WHERE function_name IN ('read_root','root_build_index','read_root_dataset','root_iceberg_catalog') ORDER BY function_name;"
 
 if ((RUN_TESTS)); then
     echo "[6/6] Running SQL and native integration tests"

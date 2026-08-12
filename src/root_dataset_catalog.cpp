@@ -10,6 +10,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -91,7 +92,7 @@ std::vector<PathLevel> LoadAccessPlan(Connection &connection,
     return levels;
 }
 
-std::vector<SchemaBinding> LoadSchemas(
+std::vector<SchemaBinding> LoadSchemaBindings(
     ClientContext &context, const CatalogSources &sources,
     const std::string &logical_path, const std::string &schema_label,
     const std::string &access_label) {
@@ -137,9 +138,9 @@ std::string CatalogRelationSQL(const std::string &source, bool sql_tables) {
     return "read_parquet(" + SqlLiteral(source) + ")";
 }
 
-CatalogSources ResolveCatalogSources(
+CatalogSources RootDatasetCatalog::ResolveSources(
     const std::string &catalog_path,
-    const named_parameter_map_t &parameters) {
+    const named_parameter_map_t &parameters) const {
     CatalogSources sources;
     if (IsRootIcebergCatalog(catalog_path)) {
         sources.files = RootIcebergRelation(catalog_path, "files");
@@ -232,7 +233,21 @@ CatalogSources ResolveCatalogSources(
     return sources;
 }
 
-void ResolveCommittedSnapshot(ClientContext &context, CatalogSources &sources) {
+RootDatasetCatalog::RootDatasetCatalog(
+    ClientContext &context_p, const std::string &catalog_path,
+    const named_parameter_map_t &parameters)
+    : context(context_p) {
+    sources = ResolveSources(catalog_path, parameters);
+    ResolveCommittedSnapshot();
+}
+
+RootDatasetCatalog::RootDatasetCatalog(
+    ClientContext &context_p, CatalogSources sources_p)
+    : context(context_p), sources(std::move(sources_p)) {
+    ResolveCommittedSnapshot();
+}
+
+void RootDatasetCatalog::ResolveCommittedSnapshot() {
     if (!sources.sql_tables || sources.snapshots.empty() ||
         !sources.snapshot_id.empty()) {
         return;
@@ -272,12 +287,11 @@ void ResolveCommittedSnapshot(ClientContext &context, CatalogSources &sources) {
     sources.snapshot_id = result->GetValue(0, 0).ToString();
 }
 
-DatasetSchemaSet LoadDatasetSchemas(ClientContext &context,
-                                    const CatalogSources &sources,
-                                    const std::string &logical_path) {
-    auto schemas = LoadSchemas(context, sources, logical_path,
-                               "load ROOT schema metadata",
-                               "load ROOT access plan");
+DatasetSchemaSet RootDatasetCatalog::LoadSchemas(
+    const std::string &logical_path) const {
+    auto schemas = LoadSchemaBindings(
+        context, sources, logical_path,
+        "load ROOT schema metadata", "load ROOT access plan");
     if (schemas.empty()) {
         throw InvalidInputException(
             "Logical path is absent from catalog: " + logical_path);
@@ -322,13 +336,13 @@ DatasetSchemaSet LoadDatasetSchemas(ClientContext &context,
     return result;
 }
 
-std::vector<SchemaBinding> LoadDatasetPathSchemas(
-    ClientContext &context, const CatalogSources &sources,
+std::vector<SchemaBinding> RootDatasetCatalog::LoadPathSchemas(
     const std::string &logical_path, LogicalType &value_type,
-    std::unordered_map<std::string, idx_t> &lookup) {
-    auto schemas = LoadSchemas(context, sources, logical_path,
-                               "load predicate ROOT schema metadata",
-                               "load predicate ROOT access plan");
+    std::unordered_map<std::string, idx_t> &lookup) const {
+    auto schemas = LoadSchemaBindings(
+        context, sources, logical_path,
+        "load predicate ROOT schema metadata",
+        "load predicate ROOT access plan");
     if (schemas.empty()) {
         throw InvalidInputException(
             "Predicate path is absent from the catalog snapshot: " + logical_path);

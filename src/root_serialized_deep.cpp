@@ -1,6 +1,7 @@
 #include "root_serialized_reader.hpp"
 
 #include "root_debug.hpp"
+#include "root_headers.hpp"
 
 #include <algorithm>
 #include <memory>

@@ -40,16 +40,29 @@ struct DatasetSchemaSet {
     LogicalType value_type;
 };
 
-CatalogSources ResolveCatalogSources(const std::string &catalog_path,
-                                     const named_parameter_map_t &parameters);
-void ResolveCommittedSnapshot(ClientContext &context, CatalogSources &sources);
 std::string CatalogRelationSQL(const std::string &source, bool sql_tables);
-DatasetSchemaSet LoadDatasetSchemas(ClientContext &context,
-                                    const CatalogSources &sources,
-                                    const std::string &logical_path);
-std::vector<SchemaBinding> LoadDatasetPathSchemas(
-    ClientContext &context, const CatalogSources &sources,
-    const std::string &logical_path, LogicalType &value_type,
-    std::unordered_map<std::string, idx_t> &lookup);
+
+class RootDatasetCatalog final {
+public:
+    RootDatasetCatalog(ClientContext &context,
+                       const std::string &catalog_path,
+                       const named_parameter_map_t &parameters);
+    RootDatasetCatalog(ClientContext &context, CatalogSources sources);
+
+    const CatalogSources &Sources() const { return sources; }
+    DatasetSchemaSet LoadSchemas(const std::string &logical_path) const;
+    std::vector<SchemaBinding> LoadPathSchemas(
+        const std::string &logical_path, LogicalType &value_type,
+        std::unordered_map<std::string, idx_t> &lookup) const;
+
+private:
+    CatalogSources ResolveSources(
+        const std::string &catalog_path,
+        const named_parameter_map_t &parameters) const;
+    void ResolveCommittedSnapshot();
+
+    ClientContext &context;
+    CatalogSources sources;
+};
 
 } // namespace duckdb::rootlake

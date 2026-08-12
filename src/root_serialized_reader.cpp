@@ -1,6 +1,7 @@
 #include "root_serialized_reader.hpp"
 
 #include "root_debug.hpp"
+#include "root_headers.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -27,9 +28,8 @@ void SerializedBasketReader::Bind(TBranch *branch_p, SerializedReadPlan plan_p,
                                   uint64_t max_entry_bytes_p,
                                   uint64_t max_values_per_entry_p,
                                   void *root_object_scratch) {
+    Reset();
     branch = branch_p;
-    basket = nullptr;
-    basket_prepared = false;
     plan = std::move(plan_p);
     layout = {};
     layout.value_type = plan.value_type;
@@ -39,22 +39,14 @@ void SerializedBasketReader::Bind(TBranch *branch_p, SerializedReadPlan plan_p,
     layout.fixed_array_length = plan.fixed_array_length;
     layout.array_dimensions = plan.array_dimensions;
     layout.index_depth = plan.index_depth;
-    current_basket = -1;
-    current_basket_entry_begin = 0;
-    current_basket_entry_end = 0;
     max_entry_bytes = std::max<uint64_t>(12, max_entry_bytes_p);
     max_values_per_entry = std::max<uint64_t>(1, max_values_per_entry_p);
     this->root_object_scratch = IsSerializedNestedProjection(plan.projection_kind)
                                     ? root_object_scratch : nullptr;
-    outer_collection_scratch = nullptr;
     if (IsSerializedNestedProjection(plan.projection_kind) && root_object_scratch) {
         outer_collection_scratch =
             static_cast<char *>(root_object_scratch) + plan.outer_container_offset;
     }
-    resolved_element_version = -1;
-    resolved_prefix_element_ids.clear();
-    observed_memberwise_header = 0;
-    counters = {};
     RootDebug("SERIALIZED.BIND",
               "path=" + plan.logical_path +
               " branch=" + (branch && branch->GetName() ? branch->GetName() : "none") +
@@ -62,6 +54,25 @@ void SerializedBasketReader::Bind(TBranch *branch_p, SerializedReadPlan plan_p,
               " type=" + plan.value_type +
               " projection=" + SerializedProjectionName(plan.projection_kind) +
               " prefix_bytes=" + std::to_string(plan.bytes_before_value_per_element));
+}
+
+void SerializedBasketReader::Reset() {
+    branch = nullptr;
+    basket = nullptr;
+    basket_prepared = false;
+    plan = {};
+    layout = {};
+    current_basket = -1;
+    current_basket_entry_begin = 0;
+    current_basket_entry_end = 0;
+    max_entry_bytes = 0;
+    max_values_per_entry = 0;
+    root_object_scratch = nullptr;
+    outer_collection_scratch = nullptr;
+    resolved_element_version = -1;
+    resolved_prefix_element_ids.clear();
+    observed_memberwise_header = 0;
+    counters = {};
 }
 
 bool SerializedBasketReader::LoadBasket(uint64_t entry, std::string &failure_reason) {

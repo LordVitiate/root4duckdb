@@ -4,12 +4,9 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <cctype>
 #include <chrono>
-#include <fstream>
 #include <functional>
-#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -31,11 +28,9 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/planner/table_filter.hpp"
-#include "duckdb/planner/filter/constant_filter.hpp" 
+#include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 
-#include <nlohmann/json.hpp>
-#include "include/root_meta.hpp"
 #include "include/root_branch_projection.hpp"
 #include "include/root_debug.hpp"
 #include "include/root_dictionary.hpp"
@@ -44,59 +39,22 @@
 #include "include/root_filter.hpp"
 #include "include/root_input_resolver.hpp"
 #include "include/root_lake_common.hpp"
+#include "include/root_path_reader.hpp"
 #include "include/root_runtime_settings.hpp"
-#include "include/root_serialized_reader.hpp"
 
 namespace duckdb {
 
-struct SimpleBranchInfo {
+struct RootPrimitiveBranch {
     std::string name;
     std::string type_name;
     TBranch* branch = nullptr;
     TLeaf* leaf = nullptr;
 };
 
-static LogicalType RootTypeToDuckDB(const std::string& root_type, bool is_string, bool is_primitive)
-{
-    if (is_string || !is_primitive)
-    {
-        return LogicalType::VARCHAR;
-    }
-
-    std::string t = root_type;
-    if (t == "I") return LogicalType::INTEGER;
-    if (t == "F") return LogicalType::FLOAT;
-    if (t == "D") return LogicalType::DOUBLE;
-    if (t == "L") return LogicalType::BIGINT;
-    if (t == "b") return LogicalType::TINYINT;   // signed char
-    if (t == "B") return LogicalType::UTINYINT;  // unsigned char
-    if (t == "O") return LogicalType::BOOLEAN;   // bool
-    if (t == "S") return LogicalType::SMALLINT;
-    if (t == "s") return LogicalType::USMALLINT;
-    if (t == "i") return LogicalType::UINTEGER;
-    if (t == "l") return LogicalType::UBIGINT;
-
-    if (t == "Double_t" || t == "double") return LogicalType::DOUBLE;
-    if (t == "Float_t" || t == "float") return LogicalType::FLOAT;
-    if (t == "Int_t" || t == "int") return LogicalType::INTEGER;
-    if (t == "Long64_t" || t == "long long") return LogicalType::BIGINT;
-    if (t == "Char_t" || t == "char") return LogicalType::TINYINT;
-    if (t == "UChar_t" || t == "unsigned char") return LogicalType::UTINYINT;    
-    if (t == "Bool_t" || t == "bool") return LogicalType::BOOLEAN;
-    if (t == "Short_t" || t == "short") return LogicalType::SMALLINT;
-    if (t == "UShort_t" || t == "unsigned short") return LogicalType::USMALLINT;
-    if (t == "UInt_t" || t == "unsigned int") return LogicalType::UINTEGER;
-    if (t == "ULong_t" || t == "unsigned long" ||
-        t == "ULong64_t" || t == "unsigned long long") return LogicalType::UBIGINT;
-
-    return LogicalType::VARCHAR;
-}
-
-struct RootLakeColumnInfo
+struct RootScanColumn
 {
     std::string name;
     std::string logical_path;
-    MetaColumnType type;
     std::string branch_name;
     std::string root_type;
     bool is_string = false;
@@ -106,148 +64,7 @@ struct RootLakeColumnInfo
 
 };
 
-struct BasketMeta
-{
-    uint16_t column_index;
-    uint64_t start_row;
-    uint32_t num_rows;
-    double min_value;
-    double max_value;
-    uint32_t bloom_size;
-    std::vector<uint8_t> bloom_filter;
-
-    [[nodiscard]] bool ContainsRow(uint64_t global_row) const noexcept
-    {
-        return global_row >= start_row && global_row < start_row + num_rows;
-    }
-
-    [[nodiscard]] uint64_t EndRow() const noexcept
-    {
-        return start_row + num_rows;
-    }
-};
-
-class BinaryMetadataReader
-{
-    const std::vector<uint8_t>& buffer_;
-    size_t offset_ = 0;
-
-public:
-    explicit BinaryMetadataReader(const std::vector<uint8_t>& buffer) : buffer_(buffer) {}
-
-    template<typename T>
-    T Read()
-    {
-        if (offset_ + sizeof(T) > buffer_.size())
-        {
-            throw IOException("Binary metadata EOF.");
-        }
-        T value;
-        std::memcpy(&value, &buffer_[offset_], sizeof(T));
-        offset_ += sizeof(T);
-        return value;
-    }
-
-    std::vector<uint8_t> ReadBytes(uint32_t count)
-    {
-        if (offset_ + count > buffer_.size())
-        {
-            throw IOException("Binary metadata block EOF.");
-        }
-        std::vector<uint8_t> result(buffer_.begin() + offset_, buffer_.begin() + offset_ + count);
-        offset_ += count;
-        return result;
-    }
-
-    [[nodiscard]] bool HasMore() const
-    {
-        return offset_ < buffer_.size();
-    }
-};
-
-class MetadataLoader
-{
-public:
-    struct LoadResult
-    {
-        std::string tree_name;
-        uint64_t total_rows = 0;
-        std::vector<RootLakeColumnInfo> columns;
-        std::vector<BasketMeta> baskets;
-    };
-
-private:
-    static MetaColumnType ParseColumnType(const std::string& type_name)
-    {
-        if (type_name == "Int_t" || type_name == "I") return MetaColumnType::INT32;
-        if (type_name == "Float_t" || type_name == "F") return MetaColumnType::FLOAT;
-        if (type_name == "Double_t" || type_name == "D") return MetaColumnType::DOUBLE;
-        if (type_name == "Long64_t" || type_name == "L") return MetaColumnType::INT64;
-        return MetaColumnType::UNKNOWN;
-    }
-
-    static std::vector<BasketMeta> ParseBinaryTail(const std::vector<uint8_t>& buffer)
-    {
-        std::vector<BasketMeta> baskets;
-        BinaryMetadataReader reader(buffer);
-
-        while (reader.HasMore())
-        {
-            BasketMeta basket;
-            basket.column_index = reader.Read<uint16_t>();
-            basket.start_row = reader.Read<uint64_t>();
-            basket.num_rows = reader.Read<uint32_t>();
-            basket.min_value = reader.Read<double>();
-            basket.max_value = reader.Read<double>();
-            basket.bloom_size = reader.Read<uint32_t>();
-
-            if (basket.bloom_size > 0)
-            {
-                basket.bloom_filter = reader.ReadBytes(basket.bloom_size);
-            }
-            baskets.push_back(std::move(basket));
-        }
-        return baskets;
-    }
-
-public:
-    static LoadResult Load(const std::string& meta_path)
-    {
-        LoadResult result;
-
-        std::ifstream in(meta_path, std::ios::binary);
-        if (!in)
-        {
-            throw IOException("Index not found: " + meta_path);
-        }
-
-        std::string json_line;
-        std::getline(in, json_line);
-        auto root_meta_json = nlohmann::json::parse(json_line);
-
-        result.tree_name = root_meta_json["tree_name"].get<std::string>();
-        result.total_rows = root_meta_json["total_entries"].get<uint64_t>();
-
-        for (const auto& col : root_meta_json["columns"])
-        {
-            RootLakeColumnInfo info;
-            info.name = col["name"].get<std::string>();
-            info.type = ParseColumnType(col["type"].get<std::string>());
-            result.columns.push_back(std::move(info));
-        }
-
-        std::vector<uint8_t> binary_tail(
-            (std::istreambuf_iterator<char>(in)),
-            std::istreambuf_iterator<char>()
-        );
-        in.close();
-
-        result.baskets = ParseBinaryTail(binary_tail);
-        return result;
-    }
-};
-
-class WorkScheduler
+class RootEntryScheduler
 {
     uint64_t& next_row_;
     uint64_t total_rows_;
@@ -261,7 +78,7 @@ public:
         [[nodiscard]] bool HasWork() const { return start < end; }
     };
 
-    WorkScheduler(uint64_t& next_row, uint64_t total_rows, std::mutex& mtx)
+    RootEntryScheduler(uint64_t& next_row, uint64_t total_rows, std::mutex& mtx)
         : next_row_(next_row), total_rows_(total_rows), mutex_(mtx) {}
 
     WorkBatch ClaimWork(uint64_t preferred_batch_size = 100000)
@@ -290,26 +107,24 @@ public:
 };
 
 
-struct FastRootBindData : public TableFunctionData
+struct RootScanBindData : public TableFunctionData
 {
-    RootDebugLifetimeSentinel lifetime_sentinel {"FastRootBindData"};
+    RootDebugLifetimeSentinel lifetime_sentinel {"RootScanBindData"};
     std::string root_path;
     std::string input_specification;
     std::vector<std::string> root_paths;
     idx_t representative_source_id = 0;
     uint64_t bind_open_us = 0;
-    std::string meta_path;
     std::string tree_name;
     uint64_t total_rows = 0;
-    std::vector<RootLakeColumnInfo> columns;
-    std::vector<BasketMeta> baskets;
+    std::vector<RootScanColumn> columns;
 
     bool is_browse_mode = false;
     bool is_direct_branch_mode = false;
-    bool is_empty_mode = false;           // safe zero-row result; never opens a TTree
+    bool is_empty_mode = false;
     rootlake::RootDictionaryCleanupMode dictionary_cleanup_mode = rootlake::RootDictionaryCleanupMode::FULL;
     std::vector<std::string> browse_children;
-    SimpleBranchInfo direct_branch_info;
+    RootPrimitiveBranch direct_branch_info;
     rootlake::RootReaderMode reader_mode = rootlake::RootReaderMode::AUTO;
     uint32_t raw_validation_entries = 4;
     uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
@@ -320,7 +135,7 @@ struct FastRootBindData : public TableFunctionData
 
     bool IsMultiFile() const { return root_paths.size() > 1; }
 
-    ~FastRootBindData()
+    ~RootScanBindData()
     {
         RootDebug("BIND_DATA.DTOR_BODY",
                   "this=" + RootPointer(this) +
@@ -329,7 +144,7 @@ struct FastRootBindData : public TableFunctionData
     }
 };
 
-struct FastRootGlobalState : public GlobalTableFunctionState
+struct RootScanGlobalState : public GlobalTableFunctionState
 {
     uint64_t next_row = 0;
     uint64_t total_rows = 0;
@@ -354,14 +169,14 @@ struct FastRootGlobalState : public GlobalTableFunctionState
     idx_t MaxThreads() const override
     {
         if (file_scheduler) return file_scheduler->MaxThreads();
-        return WorkScheduler::EstimateOptimalThreads(scheduled_rows);
+        return RootEntryScheduler::EstimateOptimalThreads(scheduled_rows);
     }
 };
 
-struct FastRootLocalState : public LocalTableFunctionState
+struct RootScanLocalState : public LocalTableFunctionState
 {
     rootlake::RootFileHandle root_file;
-    std::unordered_map<std::string, rootlake::RootObjectContext> root_contexts;
+    std::unordered_map<std::string, rootlake::RootObjectReader> root_readers;
 
     uint64_t local_current_row = 0;
     uint64_t local_end_row = 0;
@@ -370,16 +185,12 @@ struct FastRootLocalState : public LocalTableFunctionState
     size_t current_elem_idx = 0;
     std::vector<rootlake::ReadResult> cached_results;
     bool has_cached_entry = false;
-    
+
     bool has_container_columns = false;
     rootlake::RootFilterEvaluator filter_evaluator;
 
-    rootlake::SerializedReadPlan serialized_plan;
-    rootlake::SerializedBasketReader serialized_reader;
-    bool serialized_active = false;
+    rootlake::RootPathReader path_reader;
     idx_t serialized_column = DConstants::INVALID_INDEX;
-    std::string serialized_context;
-    uint32_t validation_remaining = 0;
     std::vector<double> serialized_values;
     std::vector<int32_t> serialized_indices;
     uint64_t reported_serialized_baskets = 0;
@@ -393,25 +204,172 @@ struct FastRootLocalState : public LocalTableFunctionState
     rootlake::RootDirectFileTask file_task;
     std::chrono::steady_clock::time_point file_started;
 
-    ~FastRootLocalState() = default;
+    ~RootScanLocalState() = default;
 };
 
-static void AddEventIdColumn(
-    FastRootBindData& bind_data,
+enum class CacheResult {
+    CACHED,
+    CONTINUE_LOOP,
+    BREAK_LOOP
+};
+
+class RootScanBinder final {
+public:
+    unique_ptr<FunctionData> Bind(
+        ClientContext &context, TableFunctionBindInput &input,
+        vector<LogicalType> &return_types, vector<string> &return_names);
+
+private:
+    void ConfigureOptions(
+        RootScanBindData &bind_data, ClientContext &context,
+        TableFunctionBindInput &input);
+    void BindRootBrowse(
+        RootScanBindData &bind_data,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+    void BindRequestedPath(
+        RootScanBindData &bind_data, TableFunctionBindInput &input,
+        bool dictionary_loaded,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+    void BindPrimitiveCompatibility(
+        RootScanBindData &bind_data, TFile &file, TTree &tree,
+        const std::string &path_prefix,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+    std::vector<RootPrimitiveBranch> CollectPrimitiveBranches(TTree &tree);
+    bool IsTreeName(TFile &file, const std::string &name);
+    void AddEventIdColumn(
+        RootScanBindData &bind_data,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+    void BindDirectPrimitives(
+        RootScanBindData &bind_data, const std::string &path_prefix,
+        const std::vector<std::string> &matching_paths,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+    void BindBrowseMode(
+        RootScanBindData &bind_data, const std::string &path_prefix,
+        const std::set<std::string> &direct_children,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+    void BindEmptyResult(
+        RootScanBindData &bind_data, const std::string &path_prefix,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+    bool LoadRequestedDictionary(
+        ClientContext &context, TableFunctionBindInput &input);
+    bool BindSemanticPath(
+        RootScanBindData &bind_data, TFile *file,
+        const std::string &path_prefix_raw,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+    std::unique_ptr<TFile> OpenRepresentativeFile(
+        RootScanBindData &bind_data);
+    void AddMultiFileIdentityColumns(
+        RootScanBindData &bind_data,
+        std::vector<std::string> &return_names,
+        std::vector<LogicalType> &return_types);
+};
+
+class RootScanFileManager final {
+public:
+    void Open(
+        const RootScanBindData &bind_data, RootScanGlobalState &global,
+        RootScanLocalState &local, const std::string &file_path,
+        bool synchronize_open);
+    void Reset(
+        RootScanGlobalState &global, RootScanLocalState &local,
+        bool completed);
+    bool EnsureReady(
+        const RootScanBindData &bind_data, RootScanGlobalState &global,
+        RootScanLocalState &local);
+};
+
+class RootScanStateFactory final {
+public:
+    unique_ptr<GlobalTableFunctionState> CreateGlobal(
+        ClientContext &context, TableFunctionInitInput &input);
+    unique_ptr<LocalTableFunctionState> CreateLocal(
+        TableFunctionInitInput &input,
+        GlobalTableFunctionState *global_state);
+};
+
+class RootScanExecutor final {
+public:
+    void Execute(
+        ClientContext &context, TableFunctionInput &input,
+        DataChunk &output);
+
+private:
+    void ProcessBrowseMode(
+        ClientContext &context, const RootScanBindData &bind_data,
+        RootScanGlobalState &global, RootScanLocalState &local,
+        DataChunk &output);
+    bool WriteNumericValue(Vector &vector, idx_t row, double value);
+    std::optional<int32_t> ResolveCachedIndexValue(
+        const RootScanBindData &bind_data,
+        const RootScanLocalState &local, idx_t column_index,
+        size_t element_index);
+    rootlake::RootScalarActual CachedScalar(
+        const RootScanBindData &bind_data,
+        const RootScanLocalState &local, idx_t column_index,
+        uint64_t entry, size_t element_index);
+    bool PassesCachedFilters(
+        ClientContext &context, const RootScanBindData &bind_data,
+        const RootScanGlobalState &global, RootScanLocalState &local,
+        uint64_t entry, size_t element_index);
+    bool PassesDirectBranchFilters(
+        ClientContext &context, const RootScanBindData &bind_data,
+        const RootScanGlobalState &global, RootScanLocalState &local,
+        uint64_t entry, double value);
+    void ProcessDirectBranch(
+        ClientContext &context, const RootScanBindData &bind_data,
+        RootScanGlobalState &global, RootScanLocalState &local,
+        DataChunk &output);
+    void ProcessCachedEntry(
+        ClientContext &context, const RootScanBindData &bind_data,
+        RootScanGlobalState &global, RootScanLocalState &local,
+        DataChunk &output, idx_t &output_count);
+    std::vector<std::string> SplitIndexSignature(
+        const std::string &signature);
+    void MaterializeSerializedResult(
+        const RootScanColumn &column, uint64_t entry,
+        const rootlake::SerializedReadPlan &plan,
+        const std::vector<double> &values,
+        const std::vector<int32_t> &flat_indices,
+        rootlake::ReadResult &result);
+    CacheResult ReadAndCacheEntry(
+        const RootScanBindData &bind_data, RootScanGlobalState &global,
+        RootScanLocalState &local, DataChunk &output,
+        idx_t &output_count);
+
+    RootScanFileManager file_manager;
+};
+
+class RootScanExplain final {
+public:
+    InsertionOrderPreservingMap<string> Bound(
+        TableFunctionToStringInput &input);
+    InsertionOrderPreservingMap<string> Running(
+        TableFunctionDynamicToStringInput &input);
+};
+
+void RootScanBinder::AddEventIdColumn(
+    RootScanBindData& bind_data,
     std::vector<std::string>& return_names,
     std::vector<LogicalType>& return_types)
 {
     return_names.emplace_back("event_id");
     return_types.emplace_back(LogicalType(LogicalTypeId::BIGINT));
     
-    RootLakeColumnInfo col;
+    RootScanColumn col;
     col.name = "event_id";
-    col.type = MetaColumnType::INT64;
     bind_data.columns.emplace_back(std::move(col));
 }
 
-static void BindDirectPrimitives(
-    FastRootBindData& bind_data,
+void RootScanBinder::BindDirectPrimitives(
+    RootScanBindData& bind_data,
     const std::string& path_prefix,
     const std::vector<std::string>& matching_paths,
     std::vector<std::string>& return_names,
@@ -422,7 +380,7 @@ static void BindDirectPrimitives(
               " matching_paths=" + std::to_string(matching_paths.size()));
     struct ResolvedColumn
     {
-        RootLakeColumnInfo column;
+        RootScanColumn column;
         LogicalType duckdb_type;
     };
 
@@ -497,10 +455,9 @@ static void BindDirectPrimitives(
             continue;
         }
 
-        RootLakeColumnInfo col;
+        RootScanColumn col;
         col.name = flat_name;
         col.logical_path = full_path;
-        col.type = MetaColumnType::UNKNOWN;
         col.branch_name = parsed.root_class;
         col.root_type = leaf.type;
         col.is_string = leaf.is_string;
@@ -523,7 +480,8 @@ static void BindDirectPrimitives(
         }
 
         ResolvedColumn resolved;
-        resolved.duckdb_type = RootTypeToDuckDB(col.root_type, col.is_string, true);
+        resolved.duckdb_type = rootlake::RootTypeToScanLogicalType(
+            col.root_type, col.is_string, true);
         resolved.column = std::move(col);
         RootDebug("BIND.COLUMN_READY",
                   "name=" + resolved.column.name +
@@ -537,9 +495,8 @@ static void BindDirectPrimitives(
     const std::string root_class_name = rootlake::ParsePathPrefix(path_prefix).root_class;
     for (const auto& index_name : ordered_index_names)
     {
-        RootLakeColumnInfo index_column;
+        RootScanColumn index_column;
         index_column.name = index_name;
-        index_column.type = MetaColumnType::INT32;
         index_column.is_virtual_index = true;
         index_column.branch_name = root_class_name;
         bind_data.columns.emplace_back(std::move(index_column));
@@ -559,8 +516,8 @@ static void BindDirectPrimitives(
               " return_names=" + std::to_string(return_names.size()));
 }
 
-static void BindBrowseMode(
-    FastRootBindData& bind_data,
+void RootScanBinder::BindBrowseMode(
+    RootScanBindData& bind_data,
     const std::string& path_prefix,
     const std::set<std::string>& direct_children,
     std::vector<std::string>& return_names,
@@ -585,8 +542,8 @@ static void BindBrowseMode(
     }
 }
 
-static void BindEmptyResult(
-    FastRootBindData& bind_data,
+void RootScanBinder::BindEmptyResult(
+    RootScanBindData& bind_data,
     const std::string& path_prefix,
     std::vector<std::string>& return_names,
     std::vector<LogicalType>& return_types)
@@ -607,9 +564,8 @@ static void BindEmptyResult(
         if (container_name.find("vec") == 0 || container_name.find("set") == 0)
         {
             std::string idx_name = container_name + "_idx";
-            RootLakeColumnInfo idx_col;
+            RootScanColumn idx_col;
             idx_col.name = idx_name;
-            idx_col.type = MetaColumnType::INT32;
             idx_col.is_virtual_index = true;
             idx_col.branch_name = rootlake::ParsePathPrefix(path_prefix).root_class;
             bind_data.columns.emplace_back(std::move(idx_col));
@@ -619,7 +575,8 @@ static void BindEmptyResult(
     }
 }
 
-static bool LoadRequestedDictionary(ClientContext& context, TableFunctionBindInput& input)
+bool RootScanBinder::LoadRequestedDictionary(
+    ClientContext& context, TableFunctionBindInput& input)
 {
     auto it = input.named_parameters.find("dictionary");
     if (it == input.named_parameters.end())
@@ -636,38 +593,13 @@ static bool LoadRequestedDictionary(ClientContext& context, TableFunctionBindInp
     return rootlake::LoadRootDictionary(context, dict_path);
 }
 
-static rootlake::RootDictionaryCleanupMode ResolveDictionaryCleanupMode(const TableFunctionBindInput& input,
-                                                                       bool dictionary_loaded)
-{
-    auto it = input.named_parameters.find("dictionary_cleanup");
-    std::string mode = it == input.named_parameters.end() ? "auto" : it->second.ToString();
-    std::transform(mode.begin(), mode.end(), mode.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (mode.empty() || mode == "auto") {
-        return dictionary_loaded ? rootlake::RootDictionaryCleanupMode::RETAIN
-                                 : rootlake::RootDictionaryCleanupMode::FULL;
-    }
-    if (mode == "retain" || mode == "none" || mode == "skip") {
-        return rootlake::RootDictionaryCleanupMode::RETAIN;
-    }
-    if (mode == "destruct_only" || mode == "dtor_only") {
-        return rootlake::RootDictionaryCleanupMode::DESTRUCT_ONLY;
-    }
-    if (mode == "full" || mode == "strict" || mode == "delete") {
-        return rootlake::RootDictionaryCleanupMode::FULL;
-    }
-    throw InvalidInputException("dictionary_cleanup must be one of: auto, retain, destruct_only, full");
-}
-
-static bool BindSemanticPathWithoutMetadata(
-    FastRootBindData& bind_data,
+bool RootScanBinder::BindSemanticPath(
+    RootScanBindData& bind_data,
     TFile* file,
     const std::string& path_prefix_raw,
-    const std::string& normalized_prefix,
     std::vector<std::string>& return_names,
     std::vector<LogicalType>& return_types)
 {
-    (void)normalized_prefix;
     RootDebug("SEMANTIC.BEGIN",
               "path=" + path_prefix_raw + " file_ptr=" + RootPointer(file));
 
@@ -750,7 +682,8 @@ static bool BindSemanticPathWithoutMetadata(
     return false;
 }
 
-static std::unique_ptr<TFile> OpenRepresentativeFile(FastRootBindData& bind_data)
+std::unique_ptr<TFile> RootScanBinder::OpenRepresentativeFile(
+    RootScanBindData& bind_data)
 {
     std::vector<std::string> failures;
     for (idx_t source_id = 0; source_id < bind_data.root_paths.size(); ++source_id)
@@ -781,15 +714,16 @@ static std::unique_ptr<TFile> OpenRepresentativeFile(FastRootBindData& bind_data
     throw IOException(message.str());
 }
 
-static void AddMultiFileIdentityColumns(FastRootBindData& bind_data,
-                                        vector<string>& return_names,
-                                        vector<LogicalType>& return_types)
+void RootScanBinder::AddMultiFileIdentityColumns(
+    RootScanBindData& bind_data,
+    std::vector<std::string>& return_names,
+    std::vector<LogicalType>& return_types)
 {
     if (!bind_data.IsMultiFile() || bind_data.is_browse_mode ||
         bind_data.source_id_column != DConstants::INVALID_INDEX) return;
 
     bind_data.source_id_column = bind_data.columns.size();
-    RootLakeColumnInfo source_id;
+    RootScanColumn source_id;
     source_id.name = "source_id";
     source_id.root_type = "ULong64_t";
     bind_data.columns.push_back(std::move(source_id));
@@ -797,7 +731,7 @@ static void AddMultiFileIdentityColumns(FastRootBindData& bind_data,
     return_types.emplace_back(LogicalTypeId::UBIGINT);
 
     bind_data.source_path_column = bind_data.columns.size();
-    RootLakeColumnInfo source_path;
+    RootScanColumn source_path;
     source_path.name = "source_path";
     source_path.root_type = "string";
     source_path.is_string = true;
@@ -806,287 +740,211 @@ static void AddMultiFileIdentityColumns(FastRootBindData& bind_data,
     return_types.emplace_back(LogicalTypeId::VARCHAR);
 }
 
-unique_ptr<FunctionData> RootScanBind(
+unique_ptr<FunctionData> RootScanBinder::Bind(
     ClientContext& context,
     TableFunctionBindInput& input,
     vector<LogicalType>& return_types,
     vector<string>& return_names)
 {
     RootDebugOperationScope debug_operation("RootScanBind");
-    auto bind_data = make_uniq<FastRootBindData>();
+    auto bind_data = make_uniq<RootScanBindData>();
+    ConfigureOptions(*bind_data, context, input);
 
-    bind_data->input_specification = input.inputs[0].ToString();
-    bind_data->root_paths = rootlake::ResolveRootInputs(context, bind_data->input_specification);
-    bind_data->root_path = bind_data->root_paths.front();
+    const bool dictionary_loaded = LoadRequestedDictionary(context, input);
+    auto cleanup_parameter = input.named_parameters.find("dictionary_cleanup");
+    const std::string cleanup_mode =
+        cleanup_parameter == input.named_parameters.end()
+            ? "auto" : cleanup_parameter->second.ToString();
+    bind_data->dictionary_cleanup_mode = rootlake::ParseDictionaryCleanupMode(
+        cleanup_mode,
+        dictionary_loaded ? rootlake::RootDictionaryCleanupMode::RETAIN
+                          : rootlake::RootDictionaryCleanupMode::FULL);
+
+    if (input.named_parameters.find("path_prefix") ==
+        input.named_parameters.end()) {
+        BindRootBrowse(*bind_data, return_names, return_types);
+    } else {
+        BindRequestedPath(*bind_data, input, dictionary_loaded,
+                          return_names, return_types);
+    }
+    return std::move(bind_data);
+}
+
+void RootScanBinder::ConfigureOptions(
+    RootScanBindData &bind_data, ClientContext &context,
+    TableFunctionBindInput &input) {
+    bind_data.input_specification = input.inputs[0].ToString();
+    bind_data.root_paths = rootlake::ResolveRootInputs(
+        context, bind_data.input_specification);
+    bind_data.root_path = bind_data.root_paths.front();
     auto reader_mode = input.named_parameters.find("reader_mode");
     if (reader_mode != input.named_parameters.end()) {
-        bind_data->reader_mode = rootlake::ParseRootReaderMode(reader_mode->second.ToString());
+        bind_data.reader_mode =
+            rootlake::ParseRootReaderMode(reader_mode->second.ToString());
     }
     auto raw_validation = input.named_parameters.find("raw_validation_entries");
     if (raw_validation != input.named_parameters.end()) {
-        bind_data->raw_validation_entries = raw_validation->second.GetValue<uint32_t>();
+        bind_data.raw_validation_entries =
+            raw_validation->second.GetValue<uint32_t>();
     }
     auto raw_entry_limit = input.named_parameters.find("raw_max_entry_bytes");
     if (raw_entry_limit != input.named_parameters.end()) {
-        bind_data->raw_max_entry_bytes = raw_entry_limit->second.GetValue<uint64_t>();
+        bind_data.raw_max_entry_bytes =
+            raw_entry_limit->second.GetValue<uint64_t>();
     }
     auto raw_value_limit = input.named_parameters.find("raw_max_values_per_entry");
     if (raw_value_limit != input.named_parameters.end()) {
-        bind_data->raw_max_values_per_entry = raw_value_limit->second.GetValue<uint64_t>();
+        bind_data.raw_max_values_per_entry =
+            raw_value_limit->second.GetValue<uint64_t>();
     }
     auto tree_cache = input.named_parameters.find("tree_cache_bytes");
     if (tree_cache != input.named_parameters.end()) {
-        bind_data->tree_cache_bytes = tree_cache->second.GetValue<uint64_t>();
+        bind_data.tree_cache_bytes = tree_cache->second.GetValue<uint64_t>();
     }
-    if (bind_data->raw_max_entry_bytes < 12) {
+    if (bind_data.raw_max_entry_bytes < 12) {
         throw InvalidInputException("raw_max_entry_bytes must be at least 12");
     }
-    if (bind_data->raw_max_values_per_entry == 0) {
+    if (bind_data.raw_max_values_per_entry == 0) {
         throw InvalidInputException("raw_max_values_per_entry must be positive");
     }
     RootDebug("BIND.BEGIN",
-              "root_input=" + bind_data->input_specification +
-              " resolved_files=" + std::to_string(bind_data->root_paths.size()) +
+              "root_input=" + bind_data.input_specification +
+              " resolved_files=" + std::to_string(bind_data.root_paths.size()) +
               " inputs=" + std::to_string(input.inputs.size()) +
               " named_parameters=" + std::to_string(input.named_parameters.size()));
-    bind_data->meta_path = bind_data->IsMultiFile() ? std::string() : bind_data->root_path + ".json";
-    if (!bind_data->IsMultiFile() && input.inputs.size() > 1)
-    {
-        auto& fs = FileSystem::GetFileSystem(context);
-        bind_data->meta_path = input.inputs[1].ToString() + "/" + fs.ExtractBaseName(bind_data->root_path) + ".json";
+}
+
+void RootScanBinder::BindRootBrowse(
+    RootScanBindData &bind_data,
+    std::vector<std::string> &return_names,
+    std::vector<LogicalType> &return_types) {
+    auto file = OpenRepresentativeFile(bind_data);
+    TTree *tree = rootlake::FindTree(file.get(), "", "");
+    if (!tree) throw IOException("No TTree found in ROOT file.");
+
+    auto *branches = tree->GetListOfBranches();
+    for (int index = 0; branches && index < branches->GetEntries(); ++index) {
+        auto *element = dynamic_cast<TBranchElement *>(branches->At(index));
+        if (element && element->GetClassName()) {
+            bind_data.browse_children.push_back(
+                "/" + std::string(element->GetClassName()));
+            continue;
+        }
+        auto *branch = dynamic_cast<TBranch *>(branches->At(index));
+        if (branch) {
+            bind_data.browse_children.push_back(
+                "/" + std::string(branch->GetName()));
+        }
     }
+    std::sort(bind_data.browse_children.begin(),
+              bind_data.browse_children.end());
+    bind_data.browse_children.erase(
+        std::unique(bind_data.browse_children.begin(),
+                    bind_data.browse_children.end()),
+        bind_data.browse_children.end());
+    bind_data.is_browse_mode = true;
+    return_names.emplace_back("path");
+    return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+}
 
-    const bool dictionary_loaded = LoadRequestedDictionary(context, input);
-    bind_data->dictionary_cleanup_mode =
-        ResolveDictionaryCleanupMode(input, dictionary_loaded);
-    RootDebug("BIND.DICTIONARY_DONE",
-              "loaded=" + std::to_string(dictionary_loaded ? 1 : 0));
-
-    bool use_path_prefix = input.named_parameters.find("path_prefix") != input.named_parameters.end();
-    if (!use_path_prefix)
-    {
-        RootDebug("FILE.BEFORE_OPEN", "mode=root_browse path=" + bind_data->root_path);
-        auto file = OpenRepresentativeFile(*bind_data);
-        RootDebug("FILE.AFTER_OPEN",
-                  "mode=root_browse file_ptr=" + RootPointer(file.get()) +
-                  " zombie=" + std::to_string(file && file->IsZombie() ? 1 : 0));
-        if (!file || file->IsZombie())
-        {
-            throw IOException("Failed to open ROOT file: " + bind_data->root_path);
-        }
-        TTree* tree = rootlake::FindTree(file.get(), "", "");
-        if (!tree)
-        {
-            throw IOException("No TTree found in ROOT file.");
-        }
-        auto* branches = tree->GetListOfBranches();
-        std::vector<std::string> root_paths;
-        for (int i = 0; i < branches->GetEntries(); ++i)
-        {
-            auto* be = dynamic_cast<TBranchElement*>(branches->At(i));
-            if (be && be->GetClassName())
-            {
-                root_paths.push_back("/" + std::string(be->GetClassName()));
-            }
-            else
-            {
-                auto* br = dynamic_cast<TBranch*>(branches->At(i));
-                if (br)
-                {
-                    root_paths.push_back("/" + std::string(br->GetName()));
-                }
-            }
-        }
-        std::sort(root_paths.begin(), root_paths.end());
-        root_paths.erase(std::unique(root_paths.begin(), root_paths.end()), root_paths.end());
-
-        bind_data->is_browse_mode = true;
-        bind_data->browse_children = root_paths;
-        return_names.emplace_back("path");
-        return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
-        RootDebug("FILE.BEFORE_CLOSE", "mode=root_browse file_ptr=" + RootPointer(file.get()));
-        file.reset();
-        RootDebug("FILE.AFTER_CLOSE", "mode=root_browse");
-        RootDebug("BIND.RETURN", "mode=root_browse");
-        return std::move(bind_data);
-    }
-
-    std::string path_prefix_raw = input.named_parameters["path_prefix"].ToString();
+void RootScanBinder::BindRequestedPath(
+    RootScanBindData &bind_data, TableFunctionBindInput &input,
+    bool dictionary_loaded, std::vector<std::string> &return_names,
+    std::vector<LogicalType> &return_types) {
+    const std::string path_prefix_raw =
+        input.named_parameters["path_prefix"].ToString();
     RootDebug("BIND.PATH", "path_prefix=" + path_prefix_raw);
     const auto requested_path = rootlake::ParsePathPrefix(path_prefix_raw);
-    if (!requested_path.fields.empty() && !dictionary_loaded)
-    {
-        RootDebug("BIND.NO_DICTIONARY",
-                  "semantic_path=" + path_prefix_raw + " refusing unsafe emulated-class bind");
+    if (!requested_path.fields.empty() && !dictionary_loaded) {
         throw InvalidInputException(
             "Semantic ROOT path '" + path_prefix_raw +
             "' requires dictionary := '/path/to/libDictionary.so'. "
             "Binding complex classes from embedded StreamerInfo without a runtime dictionary is disabled because ROOT may construct unsafe emulated classes.");
     }
-    std::string path_prefix = path_prefix_raw;
-    if (!path_prefix.empty() && path_prefix.back() == '/')
-    {
-        path_prefix.pop_back();
+    auto file = OpenRepresentativeFile(bind_data);
+    TTree *tree = rootlake::FindTree(file.get(), "", "");
+    if (!tree) throw IOException("No TTree found in ROOT file.");
+
+    if (!BindSemanticPath(bind_data, file.get(), path_prefix_raw,
+                          return_names, return_types)) {
+        BindPrimitiveCompatibility(bind_data, *file, *tree,
+                                   path_prefix_raw, return_names,
+                                   return_types);
     }
-    size_t last_slash = path_prefix.find_last_of('/');
-    std::string last_part = (last_slash == std::string::npos) 
-        ? path_prefix : path_prefix.substr(last_slash + 1);
-    if (last_part.find("vec") == 0 || 
-        last_part.find("set") == 0 || 
-        last_part.find("list") == 0 ||
-        (!last_part.empty() && std::isupper(last_part[0])))
-    {
-        path_prefix += '/';
-    }
-
-    auto& fs = FileSystem::GetFileSystem(context);
-    bool index_exists = !bind_data->meta_path.empty() && fs.FileExists(bind_data->meta_path);
-
-    if (!index_exists)
-    {
-        RootDebug("FILE.BEFORE_OPEN", "mode=path_bind path=" + bind_data->root_path);
-        auto file = OpenRepresentativeFile(*bind_data);
-        RootDebug("FILE.AFTER_OPEN",
-                  "mode=path_bind file_ptr=" + RootPointer(file.get()) +
-                  " zombie=" + std::to_string(file && file->IsZombie() ? 1 : 0));
-        if (!file || file->IsZombie())
-        {
-            throw IOException("Failed to open ROOT file: " + bind_data->root_path);
-        }
-        TTree* tree = rootlake::FindTree(file.get(), "", "");
-        if (!tree)
-        {
-            throw IOException("No TTree found in ROOT file.");
-        }
-
-        RootDebug("BIND.BEFORE_SEMANTIC", "path=" + path_prefix_raw);
-        if (BindSemanticPathWithoutMetadata(*bind_data, file.get(), path_prefix_raw, path_prefix,
-                                            return_names, return_types))
-        {
-            AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
-            RootDebug("BIND.AFTER_SEMANTIC", "result=success path=" + path_prefix_raw);
-            RootDebug("FILE.BEFORE_CLOSE", "mode=semantic_success file_ptr=" + RootPointer(file.get()));
-            file.reset();
-            RootDebug("FILE.AFTER_CLOSE", "mode=semantic_success");
-            RootDebug("BIND.RETURN", "mode=semantic path=" + path_prefix_raw);
-            return std::move(bind_data);
-        }
-        RootDebug("BIND.AFTER_SEMANTIC", "result=not_bound path=" + path_prefix_raw);
-
-        std::vector<SimpleBranchInfo> simple_branches;
-        auto* branches = tree->GetListOfBranches();
-        for (int i = 0; i < branches->GetEntries(); ++i)
-        {
-            auto* br = dynamic_cast<TBranch*>(branches->At(i));
-            if (!br) continue;
-            if (dynamic_cast<TBranchElement*>(br)) continue;
-            TLeaf* leaf = br->GetLeaf(br->GetName());
-            if (!leaf) continue;
-            SimpleBranchInfo info;
-            info.name = br->GetName();
-            info.type_name = leaf->GetTypeName();
-            info.branch = br;
-            info.leaf = leaf;
-            simple_branches.push_back(std::move(info));
-        }
-
-        std::string target_name = path_prefix_raw;
-        if (!target_name.empty() && target_name[0] == '/') target_name = target_name.substr(1);
-
-        bool is_tree_name = false;
-        TIter next(file->GetListOfKeys());
-        TKey* key;
-        while ((key = dynamic_cast<TKey*>(next())))
-        {
-            if (std::string(key->GetClassName()) == "TTree" && std::string(key->GetName()) == target_name)
-            {
-                is_tree_name = true;
-                break;
-            }
-        }
-        if (is_tree_name)
-        {
-            bind_data->is_browse_mode = true;
-            for (const auto& info : simple_branches)
-            {
-                bind_data->browse_children.push_back("/" + info.name);
-            }
-            return_names.emplace_back("path");
-            return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
-            RootDebug("FILE.BEFORE_CLOSE", "mode=tree_browse file_ptr=" + RootPointer(file.get()));
-            file.reset();
-            RootDebug("FILE.AFTER_CLOSE", "mode=tree_browse");
-            RootDebug("BIND.RETURN", "mode=tree_browse");
-            return std::move(bind_data);
-        }
-
-        for (const auto& info : simple_branches)
-        {
-            if (info.name == target_name)
-            {
-                bind_data->is_direct_branch_mode = true;
-                bind_data->direct_branch_info = info;
-                bind_data->tree_name = tree->GetName();
-                bind_data->total_rows = tree->GetEntries();
-
-                AddEventIdColumn(*bind_data, return_names, return_types);
-                RootLakeColumnInfo col;
-                col.name = info.name;
-                col.type = MetaColumnType::UNKNOWN;
-                col.branch_name = info.name;
-                col.root_type = info.type_name;
-                col.is_string = rootlake::IsStringType(info.type_name);
-                bind_data->columns.push_back(std::move(col));
-                return_names.emplace_back(info.name);
-                return_types.emplace_back(RootTypeToDuckDB(info.type_name, false, true));
-                AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
-                RootDebug("FILE.BEFORE_CLOSE", "mode=direct_branch file_ptr=" + RootPointer(file.get()));
-                file.reset();
-                RootDebug("FILE.AFTER_CLOSE", "mode=direct_branch");
-                RootDebug("BIND.RETURN", "mode=direct_branch name=" + info.name);
-                return std::move(bind_data);
-            }
-        }
-
-        BindEmptyResult(*bind_data, path_prefix_raw, return_names, return_types);
-        AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
-        RootDebug("FILE.BEFORE_CLOSE", "mode=empty file_ptr=" + RootPointer(file.get()));
-        file.reset();
-        RootDebug("FILE.AFTER_CLOSE", "mode=empty");
-        RootDebug("BIND.RETURN", "mode=empty path=" + path_prefix_raw);
-        return std::move(bind_data);
-    }
-
-    auto meta = MetadataLoader::Load(bind_data->meta_path);
-    bind_data->tree_name = std::move(meta.tree_name);
-    bind_data->total_rows = meta.total_rows;
-    bind_data->baskets = std::move(meta.baskets);
-
-    // Indexed and non-indexed reads use the same direct TStreamerInfo path
-    // resolver.  Basket metadata affects scheduling only; it never changes how
-    // a semantic value is bound or materialized.
-    {
-        rootlake::RootFileHandle inspector;
-        inspector.Open(bind_data->root_path, bind_data->tree_name, nullptr);
-        if (inspector.IsValid() &&
-            BindSemanticPathWithoutMetadata(
-                *bind_data, inspector.GetTFile(), path_prefix_raw, path_prefix,
-                return_names, return_types))
-        {
-            AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
-            return std::move(bind_data);
-        }
-    }
-
-    BindEmptyResult(*bind_data, path_prefix_raw, return_names, return_types);
-    AddMultiFileIdentityColumns(*bind_data, return_names, return_types);
-    return std::move(bind_data);
+    AddMultiFileIdentityColumns(bind_data, return_names, return_types);
 }
 
-unique_ptr<GlobalTableFunctionState> RootScanInit(ClientContext& context, TableFunctionInitInput& input)
+std::vector<RootPrimitiveBranch> RootScanBinder::CollectPrimitiveBranches(
+    TTree &tree) {
+    std::vector<RootPrimitiveBranch> result;
+    auto *branches = tree.GetListOfBranches();
+    for (int index = 0; branches && index < branches->GetEntries(); ++index) {
+        auto *branch = dynamic_cast<TBranch *>(branches->At(index));
+        if (!branch || dynamic_cast<TBranchElement *>(branch)) continue;
+        TLeaf *leaf = branch->GetLeaf(branch->GetName());
+        if (!leaf) continue;
+        result.push_back({branch->GetName(), leaf->GetTypeName(), branch, leaf});
+    }
+    return result;
+}
+
+bool RootScanBinder::IsTreeName(TFile &file, const std::string &name) {
+    TIter next(file.GetListOfKeys());
+    while (auto *key = dynamic_cast<TKey *>(next())) {
+        if (std::string(key->GetClassName()) == "TTree" &&
+            std::string(key->GetName()) == name) return true;
+    }
+    return false;
+}
+
+void RootScanBinder::BindPrimitiveCompatibility(
+    RootScanBindData &bind_data, TFile &file, TTree &tree,
+    const std::string &path_prefix,
+    std::vector<std::string> &return_names,
+    std::vector<LogicalType> &return_types) {
+    const auto branches = CollectPrimitiveBranches(tree);
+    const std::string target_name =
+        !path_prefix.empty() && path_prefix.front() == '/'
+            ? path_prefix.substr(1) : path_prefix;
+
+    if (IsTreeName(file, target_name)) {
+        bind_data.is_browse_mode = true;
+        for (const auto &branch : branches) {
+            bind_data.browse_children.push_back("/" + branch.name);
+        }
+        return_names.emplace_back("path");
+        return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+        return;
+    }
+
+    for (const auto &branch : branches) {
+        if (branch.name != target_name) continue;
+        bind_data.is_direct_branch_mode = true;
+        bind_data.direct_branch_info = branch;
+        bind_data.tree_name = tree.GetName();
+        bind_data.total_rows = tree.GetEntries();
+        AddEventIdColumn(bind_data, return_names, return_types);
+
+        RootScanColumn column;
+        column.name = branch.name;
+        column.branch_name = branch.name;
+        column.root_type = branch.type_name;
+        column.is_string = rootlake::IsStringType(branch.type_name);
+        bind_data.columns.push_back(std::move(column));
+        return_names.emplace_back(branch.name);
+        return_types.emplace_back(rootlake::RootTypeToScanLogicalType(
+            branch.type_name, false, true));
+        return;
+    }
+
+    BindEmptyResult(bind_data, path_prefix, return_names, return_types);
+}
+
+unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(
+    ClientContext& context, TableFunctionInitInput& input)
 {
-    auto& bind_data = input.bind_data->Cast<FastRootBindData>();
-    auto global_state = make_uniq<FastRootGlobalState>();
+    auto& bind_data = input.bind_data->Cast<RootScanBindData>();
+    auto global_state = make_uniq<RootScanGlobalState>();
 
     global_state->browse_offset = 0;
     if (input.filters) global_state->filters = input.filters->Copy();
@@ -1151,11 +1009,10 @@ unique_ptr<GlobalTableFunctionState> RootScanInit(ClientContext& context, TableF
     return std::move(global_state);
 }
 
-static void InitializeRootLocalFile(const FastRootBindData& bind_data,
-                                    FastRootGlobalState& gstate,
-                                    FastRootLocalState& target,
-                                    const std::string& file_path,
-                                    bool synchronize_open)
+void RootScanFileManager::Open(
+    const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+    RootScanLocalState& target, const std::string& file_path,
+    bool synchronize_open)
 {
     RootDebugOperationScope debug_operation("RootScanInitLocal");
     RootDebug("INIT_LOCAL.BEGIN",
@@ -1250,39 +1107,18 @@ static void InitializeRootLocalFile(const FastRootBindData& bind_data,
 
     for (const auto& root_class_name : unique_root_classes)
     {
-        auto* tree = rootlake::FindTree(file, "", root_class_name);
-        if (!tree)
-        {
+        try {
+            rootlake::RootObjectReader reader;
+            reader.Bind(file, "", root_class_name,
+                        bind_data.dictionary_cleanup_mode);
+            local_state->root_readers.emplace(
+                root_class_name, std::move(reader));
+        } catch (const std::exception &exception) {
             if (gstate.file_scheduler) {
                 throw IOException("ROOT schema mismatch in " + file_path +
-                                  ": tree for class '" + root_class_name + "' is absent");
+                                  ": " + exception.what());
             }
-            continue;
         }
-
-        auto* branch = rootlake::FindObjectBranch(tree, root_class_name);
-        if (!branch)
-        {
-            if (gstate.file_scheduler) {
-                throw IOException("ROOT schema mismatch in " + file_path +
-                                  ": object branch for class '" + root_class_name + "' is absent");
-            }
-            continue;
-        }
-
-        auto* rc = TClass::GetClass(root_class_name.c_str());
-        if (!rc || !rc->HasDictionary())
-        {
-            if (gstate.file_scheduler) {
-                throw IOException("ROOT dictionary is unavailable for class '" + root_class_name + "'");
-            }
-            continue;
-        }
-
-        rootlake::RootObjectContext ctx;
-        ctx.Bind(tree, branch, rc, bind_data.dictionary_cleanup_mode,
-                 root_class_name);
-        local_state->root_contexts.emplace(root_class_name, std::move(ctx));
     }
 
     std::vector<idx_t> serialized_candidates;
@@ -1311,44 +1147,37 @@ static void InitializeRootLocalFile(const FastRootBindData& bind_data,
     {
         const auto col_idx = serialized_candidates.front();
         const auto& col = bind_data.columns[col_idx];
-        auto context_it = local_state->root_contexts.find(col.branch_name);
-        if (context_it != local_state->root_contexts.end())
+        auto reader_it = local_state->root_readers.find(col.branch_name);
+        if (reader_it != local_state->root_readers.end())
         {
-            auto& object_context = context_it->second;
-            const auto parsed = rootlake::ParsePath(col.logical_path);
-            const auto physical = rootlake::ResolvePhysicalBranch(object_context.branch, parsed.fields);
-            local_state->serialized_plan = rootlake::BuildSerializedReadPlan(
-                object_context.root_class, parsed, physical.branch);
-            const auto projection = physical.mode == "ancestor"
+            auto& object_reader = reader_it->second;
+            auto parsed = rootlake::ParsePath(col.logical_path);
+            local_state->path_reader.Resolve(
+                object_reader.Tree(), object_reader.ObjectBranch(),
+                object_reader.RootClass(), std::move(parsed), col.levels);
+            const auto projection =
+                local_state->path_reader.PhysicalMode() == "ancestor"
                 ? rootlake::ApplyBranchProjection(
-                    object_context.tree, {physical.branch}, bind_data.tree_cache_bytes)
+                    object_reader.Tree(),
+                    {local_state->path_reader.PhysicalBranch()},
+                    bind_data.tree_cache_bytes)
                 : rootlake::BranchProjectionResult {};
             if (!projection.applied) {
-                rootlake::EnableAllBranches(object_context.tree, bind_data.tree_cache_bytes);
+                rootlake::EnableAllBranches(
+                    object_reader.Tree(), bind_data.tree_cache_bytes);
             }
-            if (bind_data.reader_mode != rootlake::RootReaderMode::OBJECT &&
-                local_state->serialized_plan.supported)
-            {
-                local_state->serialized_reader.Bind(
-                    physical.branch, local_state->serialized_plan,
-                    bind_data.raw_max_entry_bytes, bind_data.raw_max_values_per_entry,
-                    object_context.CurrentObject());
-                local_state->serialized_active = true;
-                local_state->serialized_column = col_idx;
-                local_state->serialized_context = col.branch_name;
-                local_state->validation_remaining = bind_data.raw_validation_entries;
-            }
-            else if (bind_data.reader_mode == rootlake::RootReaderMode::SERIALIZED)
-            {
-                throw InvalidInputException("reader_mode='serialized' cannot read " + col.logical_path +
-                                            ": " + local_state->serialized_plan.reason);
-            }
-            else if (bind_data.reader_mode == rootlake::RootReaderMode::AUTO)
-            {
-                rootlake::WarnRootFallbackOnce(col.logical_path,
-                    local_state->serialized_plan.schema_fingerprint,
-                    local_state->serialized_plan.reason);
-            }
+            rootlake::RootPathReaderOptions reader_options;
+            reader_options.reader_mode = bind_data.reader_mode;
+            reader_options.validation_entries =
+                bind_data.raw_validation_entries;
+            reader_options.max_entry_bytes = bind_data.raw_max_entry_bytes;
+            reader_options.max_values_per_entry =
+                bind_data.raw_max_values_per_entry;
+            reader_options.tree_cache_bytes = bind_data.tree_cache_bytes;
+            reader_options.enable_all_branches_on_fallback = true;
+            local_state->path_reader.StartSerialized(
+                object_reader.CurrentObject(), std::move(reader_options));
+            local_state->serialized_column = col_idx;
         }
         else if (bind_data.reader_mode == rootlake::RootReaderMode::SERIALIZED)
         {
@@ -1379,9 +1208,9 @@ static void InitializeRootLocalFile(const FastRootBindData& bind_data,
 
     if (gstate.file_scheduler) {
         uint64_t entries = 0;
-        if (!local_state->root_contexts.empty()) {
+        if (!local_state->root_readers.empty()) {
             entries = static_cast<uint64_t>(std::max<Long64_t>(
-                0, local_state->root_contexts.begin()->second.tree->GetEntries()));
+                0, local_state->root_readers.begin()->second.Tree()->GetEntries()));
         }
         local_state->local_current_row = gstate.event_range_impossible
             ? entries : std::min(entries, gstate.event_lower);
@@ -1390,29 +1219,31 @@ static void InitializeRootLocalFile(const FastRootBindData& bind_data,
             local_state->local_end_row = std::min(entries, gstate.event_upper + 1);
         }
         local_state->file_active = true;
-        const auto fingerprint = local_state->serialized_plan.schema_fingerprint.empty()
+        const auto fingerprint =
+            local_state->path_reader.SerializedPlan().schema_fingerprint.empty()
             ? std::string("object:") + bind_data.tree_name
-            : local_state->serialized_plan.schema_fingerprint;
+            : local_state->path_reader.SerializedPlan().schema_fingerprint;
         gstate.file_scheduler->ObserveSchema(fingerprint);
     }
 }
 
-unique_ptr<LocalTableFunctionState> RootScanInitLocal(ExecutionContext& context,
-                                                      TableFunctionInitInput& input,
-                                                      GlobalTableFunctionState* global_state_p)
+unique_ptr<LocalTableFunctionState> RootScanStateFactory::CreateLocal(
+    TableFunctionInitInput& input,
+    GlobalTableFunctionState* global_state_p)
 {
-    auto& bind_data = input.bind_data->Cast<FastRootBindData>();
-    auto& gstate = global_state_p->Cast<FastRootGlobalState>();
-    auto local_state = make_uniq<FastRootLocalState>();
+    auto& bind_data = input.bind_data->Cast<RootScanBindData>();
+    auto& gstate = global_state_p->Cast<RootScanGlobalState>();
+    auto local_state = make_uniq<RootScanLocalState>();
     if (!bind_data.is_empty_mode && !bind_data.is_browse_mode && !bind_data.IsMultiFile()) {
-        InitializeRootLocalFile(bind_data, gstate, *local_state, bind_data.root_path, true);
+        RootScanFileManager().Open(
+            bind_data, gstate, *local_state, bind_data.root_path, true);
     }
     return std::move(local_state);
 }
 
-static void ResetRootLocalFile(FastRootGlobalState& gstate,
-                               FastRootLocalState& local_state,
-                               bool completed)
+void RootScanFileManager::Reset(
+    RootScanGlobalState& gstate, RootScanLocalState& local_state,
+    bool completed)
 {
     if (completed && local_state.file_active && gstate.file_scheduler) {
         const auto elapsed = std::chrono::steady_clock::now() - local_state.file_started;
@@ -1421,12 +1252,8 @@ static void ResetRootLocalFile(FastRootGlobalState& gstate,
             static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
     }
-    local_state.serialized_reader.Bind(nullptr, rootlake::SerializedReadPlan {});
-    local_state.serialized_active = false;
+    local_state.path_reader.Reset();
     local_state.serialized_column = DConstants::INVALID_INDEX;
-    local_state.serialized_context.clear();
-    local_state.serialized_plan = {};
-    local_state.validation_remaining = 0;
     local_state.serialized_values.clear();
     local_state.serialized_indices.clear();
     local_state.reported_serialized_baskets = 0;
@@ -1436,7 +1263,7 @@ static void ResetRootLocalFile(FastRootGlobalState& gstate,
     local_state.has_cached_entry = false;
     local_state.current_entry = std::numeric_limits<uint64_t>::max();
     local_state.current_elem_idx = 0;
-    local_state.root_contexts.clear();
+    local_state.root_readers.clear();
     local_state.direct_branch = nullptr;
     local_state.direct_leaf = nullptr;
     local_state.root_file.Close();
@@ -1446,9 +1273,9 @@ static void ResetRootLocalFile(FastRootGlobalState& gstate,
     local_state.file_active = false;
 }
 
-static bool EnsureMultiFileReady(const FastRootBindData& bind_data,
-                                 FastRootGlobalState& gstate,
-                                 FastRootLocalState& local_state)
+bool RootScanFileManager::EnsureReady(
+    const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+    RootScanLocalState& local_state)
 {
     if (!gstate.file_scheduler) throw InternalException("multi-file ROOT scheduler is unavailable");
     while (true) {
@@ -1456,7 +1283,7 @@ static bool EnsureMultiFileReady(const FastRootBindData& bind_data,
             (local_state.has_cached_entry || local_state.local_current_row < local_state.local_end_row)) {
             return true;
         }
-        if (local_state.file_active) ResetRootLocalFile(gstate, local_state, true);
+        if (local_state.file_active) Reset(gstate, local_state, true);
 
         rootlake::RootDirectFileTask task;
         if (!gstate.file_scheduler->Claim(task)) {
@@ -1470,30 +1297,30 @@ static bool EnsureMultiFileReady(const FastRootBindData& bind_data,
         local_state.file_task = std::move(task);
         local_state.file_started = std::chrono::steady_clock::now();
         try {
-            InitializeRootLocalFile(bind_data, gstate, local_state,
-                                    local_state.file_task.path, false);
+            Open(bind_data, gstate, local_state,
+                 local_state.file_task.path, false);
         } catch (const rootlake::RootFileUnavailableException &exception) {
             gstate.file_scheduler->RecordUnavailable(
                 local_state.file_task, exception.attempts, exception.elapsed_us);
-            ResetRootLocalFile(gstate, local_state, false);
+            Reset(gstate, local_state, false);
             continue;
         } catch (const std::exception &exception) {
             gstate.file_scheduler->RecordFailure(local_state.file_task, exception.what());
-            ResetRootLocalFile(gstate, local_state, false);
+            Reset(gstate, local_state, false);
             continue;
         } catch (...) {
             gstate.file_scheduler->RecordFailure(local_state.file_task, "unknown ROOT reader error");
-            ResetRootLocalFile(gstate, local_state, false);
+            Reset(gstate, local_state, false);
             continue;
         }
     }
 }
 
-static void ProcessBrowseMode(
+void RootScanExecutor::ProcessBrowseMode(
     ClientContext& context,
-    const FastRootBindData& bind_data,
-    FastRootGlobalState& gstate,
-    FastRootLocalState& lstate,
+    const RootScanBindData& bind_data,
+    RootScanGlobalState& gstate,
+    RootScanLocalState& lstate,
     DataChunk& output)
 {
     const auto& children = bind_data.browse_children;
@@ -1553,7 +1380,8 @@ static void ProcessBrowseMode(
     output.SetCardinality(count);
 }
 
-static bool WriteNumericValue(Vector& vector, idx_t row, double value)
+bool RootScanExecutor::WriteNumericValue(
+    Vector& vector, idx_t row, double value)
 {
     switch (vector.GetType().id())
     {
@@ -1587,9 +1415,9 @@ static bool WriteNumericValue(Vector& vector, idx_t row, double value)
     return true;
 }
 
-static std::optional<int32_t> ResolveCachedIndexValue(const FastRootBindData& bind_data,
-                                                       const FastRootLocalState& lstate,
-                                                       idx_t col_idx, size_t elem_idx)
+std::optional<int32_t> RootScanExecutor::ResolveCachedIndexValue(
+    const RootScanBindData& bind_data, const RootScanLocalState& lstate,
+    idx_t col_idx, size_t elem_idx)
 {
     if (col_idx >= bind_data.columns.size()) return std::nullopt;
     const auto& col = bind_data.columns[col_idx];
@@ -1615,9 +1443,9 @@ static std::optional<int32_t> ResolveCachedIndexValue(const FastRootBindData& bi
     return std::nullopt;
 }
 
-static rootlake::RootScalarActual CachedScalar(const FastRootBindData& bind_data,
-                                                const FastRootLocalState& lstate,
-                                                idx_t col_idx, uint64_t entry, size_t elem_idx)
+rootlake::RootScalarActual RootScanExecutor::CachedScalar(
+    const RootScanBindData& bind_data, const RootScanLocalState& lstate,
+    idx_t col_idx, uint64_t entry, size_t elem_idx)
 {
     if (col_idx == COLUMN_IDENTIFIER_ROW_ID) return rootlake::RootScalarActual::Signed(entry);
     if (col_idx >= bind_data.columns.size()) return rootlake::RootScalarActual::Null(LogicalType::SQLNULL);
@@ -1633,7 +1461,8 @@ static rootlake::RootScalarActual CachedScalar(const FastRootBindData& bind_data
     }
     if (column.is_virtual_index) return rootlake::RootScalarActual::Index(
         ResolveCachedIndexValue(bind_data, lstate, col_idx, elem_idx));
-    const auto logical_type = RootTypeToDuckDB(column.root_type, column.is_string, true);
+    const auto logical_type = rootlake::RootTypeToScanLogicalType(
+        column.root_type, column.is_string, true);
     if (col_idx >= lstate.cached_results.size()) return rootlake::RootScalarActual::Null(logical_type);
     const auto& result = lstate.cached_results[col_idx];
     if (elem_idx >= result.size()) return rootlake::RootScalarActual::Null(logical_type);
@@ -1641,9 +1470,10 @@ static rootlake::RootScalarActual CachedScalar(const FastRootBindData& bind_data
     return rootlake::RootScalarActual::Numeric(logical_type, result.numbers[elem_idx]);
 }
 
-static bool PassesCachedFilters(ClientContext& context, const FastRootBindData& bind_data,
-                                const FastRootGlobalState& gstate, FastRootLocalState& lstate,
-                                uint64_t entry, size_t elem_idx)
+bool RootScanExecutor::PassesCachedFilters(
+    ClientContext& context, const RootScanBindData& bind_data,
+    const RootScanGlobalState& gstate, RootScanLocalState& lstate,
+    uint64_t entry, size_t elem_idx)
 {
     if (!gstate.filters) return true;
     for (const auto& filter : gstate.filters->filters)
@@ -1655,12 +1485,14 @@ static bool PassesCachedFilters(ClientContext& context, const FastRootBindData& 
     return true;
 }
 
-static bool PassesDirectBranchFilters(ClientContext& context, const FastRootBindData& bind_data,
-                                      const FastRootGlobalState& gstate, FastRootLocalState& lstate,
-                                      uint64_t entry, double value)
+bool RootScanExecutor::PassesDirectBranchFilters(
+    ClientContext& context, const RootScanBindData& bind_data,
+    const RootScanGlobalState& gstate, RootScanLocalState& lstate,
+    uint64_t entry, double value)
 {
     if (!gstate.filters) return true;
-    const auto value_type = RootTypeToDuckDB(bind_data.direct_branch_info.type_name, false, true);
+    const auto value_type = rootlake::RootTypeToScanLogicalType(
+        bind_data.direct_branch_info.type_name, false, true);
     for (const auto& filter : gstate.filters->filters)
     {
         if (filter.first >= gstate.scan_column_ids.size()) continue;
@@ -1682,11 +1514,11 @@ static bool PassesDirectBranchFilters(ClientContext& context, const FastRootBind
     return true;
 }
 
-static void ProcessDirectBranch(
+void RootScanExecutor::ProcessDirectBranch(
     ClientContext& context,
-    const FastRootBindData& bind_data,
-    FastRootGlobalState& gstate,
-    FastRootLocalState& lstate,
+    const RootScanBindData& bind_data,
+    RootScanGlobalState& gstate,
+    RootScanLocalState& lstate,
     DataChunk& output)
 {
     if (!lstate.direct_branch || !lstate.direct_leaf)
@@ -1701,7 +1533,7 @@ static void ProcessDirectBranch(
         if (lstate.local_current_row >= lstate.local_end_row)
         {
             if (gstate.file_scheduler) break;
-            WorkScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
+            RootEntryScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
             auto batch = scheduler.ClaimWork(100000);
             if (!batch.HasWork()) break;
             lstate.local_current_row = batch.start;
@@ -1755,11 +1587,11 @@ static void ProcessDirectBranch(
     output.SetCardinality(out_count);
 }
 
-static void ProcessCachedEntry(
+void RootScanExecutor::ProcessCachedEntry(
     ClientContext& context,
-    const FastRootBindData& bind_data,
-    FastRootGlobalState& gstate,
-    FastRootLocalState& lstate,
+    const RootScanBindData& bind_data,
+    RootScanGlobalState& gstate,
+    RootScanLocalState& lstate,
     DataChunk& output,
     idx_t& out_count)
 {
@@ -1827,7 +1659,7 @@ static void ProcessCachedEntry(
             }
 
             if (col.is_virtual_index)
-            {                // Index-only projections use a cached materialized leaf from the same object branch.
+            {
                 std::string search = col.name;
                 if (search.size() > 4 && search.substr(search.size() - 4) == "_idx")
                 {
@@ -1945,14 +1777,8 @@ static void ProcessCachedEntry(
     }
 }
 
-enum class CacheResult
-{
-    CACHED,
-    CONTINUE_LOOP,
-    BREAK_LOOP
-};
-
-static std::vector<std::string> SplitIndexSignature(const std::string& signature)
+std::vector<std::string> RootScanExecutor::SplitIndexSignature(
+    const std::string& signature)
 {
     std::vector<std::string> names;
     std::stringstream stream(signature);
@@ -1963,11 +1789,12 @@ static std::vector<std::string> SplitIndexSignature(const std::string& signature
     return names;
 }
 
-static void MaterializeSerializedResult(const RootLakeColumnInfo& column, uint64_t entry,
-                                        const rootlake::SerializedReadPlan& plan,
-                                        const std::vector<double>& values,
-                                        const std::vector<int32_t>& flat_indices,
-                                        rootlake::ReadResult& result)
+void RootScanExecutor::MaterializeSerializedResult(
+    const RootScanColumn& column, uint64_t entry,
+    const rootlake::SerializedReadPlan& plan,
+    const std::vector<double>& values,
+    const std::vector<int32_t>& flat_indices,
+    rootlake::ReadResult& result)
 {
     result.Clear();
     const auto index_names = SplitIndexSignature(column.index_signature);
@@ -1986,31 +1813,15 @@ static void MaterializeSerializedResult(const RootLakeColumnInfo& column, uint64
     }
 }
 
-static void ReadResultAsSerializedVectors(const rootlake::ReadResult& result,
-                                          std::vector<double>& values,
-                                          std::vector<int32_t>& flat_indices)
-{
-    values.clear();
-    flat_indices.clear();
-    values.reserve(result.numbers.size());
-    for (idx_t i = 0; i < result.numbers.size(); ++i) {
-        if (result.is_string_flag[i]) continue;
-        values.push_back(result.numbers[i]);
-        for (const auto index : result.vector_indices[i]) {
-            flat_indices.push_back(static_cast<int32_t>(index));
-        }
-    }
-}
-
-static CacheResult ReadAndCacheEntry(
-    const FastRootBindData& bind_data,
-    FastRootGlobalState& gstate,
-    FastRootLocalState& lstate,
+CacheResult RootScanExecutor::ReadAndCacheEntry(
+    const RootScanBindData& bind_data,
+    RootScanGlobalState& gstate,
+    RootScanLocalState& lstate,
     DataChunk& output,
     idx_t& out_count)
 {
     uint64_t entry = lstate.local_current_row;
-    
+
     std::map<std::string, std::vector<idx_t>> branch_columns;
     for (idx_t out_idx = 0; out_idx < gstate.scan_column_ids.size(); ++out_idx)
     {
@@ -2029,12 +1840,24 @@ static CacheResult ReadAndCacheEntry(
     lstate.cached_results.resize(bind_data.columns.size());
     bool has_data = false;
 
-    if (lstate.serialized_active && lstate.serialized_column < bind_data.columns.size())
+    if (lstate.path_reader.SerializedActive() &&
+        lstate.serialized_column < bind_data.columns.size())
     {
-        std::string failure_reason;
-        const bool decoded = lstate.serialized_reader.Decode(
-            entry, lstate.serialized_values, lstate.serialized_indices, failure_reason);
-        const auto& serialized_counters = lstate.serialized_reader.Counters();
+        const auto& column = bind_data.columns[lstate.serialized_column];
+        auto reader_it = lstate.root_readers.find(column.branch_name);
+        if (reader_it == lstate.root_readers.end()) {
+            throw InternalException(
+                "serialized ROOT path has no universal object reader");
+        }
+        rootlake::RootEntryReader object_entry(reader_it->second);
+        object_entry.Begin(entry);
+        const auto read = lstate.path_reader.TryReadSerialized(
+            entry, object_entry, lstate.serialized_values,
+            lstate.serialized_indices);
+        gstate.object_validation_entries.fetch_add(object_entry.LoadCount());
+
+        const auto& serialized_counters =
+            lstate.path_reader.SerializedCounters();
         gstate.serialized_baskets.fetch_add(
             serialized_counters.baskets - lstate.reported_serialized_baskets);
         gstate.serialized_compressed_bytes.fetch_add(
@@ -2044,59 +1867,15 @@ static CacheResult ReadAndCacheEntry(
         lstate.reported_serialized_baskets = serialized_counters.baskets;
         lstate.reported_serialized_compressed_bytes = serialized_counters.compressed_bytes;
         lstate.reported_serialized_entry_bytes = serialized_counters.serialized_bytes;
-        if (decoded)
-        {
+        if (read.decoded) {
             gstate.serialized_entries.fetch_add(1);
             gstate.serialized_values.fetch_add(lstate.serialized_values.size());
-            if (lstate.validation_remaining > 0)
-            {
-                auto context_it = lstate.root_contexts.find(lstate.serialized_context);
-                rootlake::ReadResult reference;
-                bool reference_ok = false;
-                if (context_it != lstate.root_contexts.end())
-                {
-                    auto& ctx = context_it->second;
-                    const auto bytes = ctx.tree->GetEntry(static_cast<Long64_t>(entry));
-                    gstate.object_validation_entries.fetch_add(1);
-                    if (bytes >= 0 && ctx.CurrentObject())
-                    {
-                        const auto& column = bind_data.columns[lstate.serialized_column];
-                        rootlake::OffsetValueReader::CollectDirect(
-                            ctx.CurrentObject(), column.levels,
-                            std::numeric_limits<Long64_t>::max(),
-                            static_cast<Long64_t>(entry), reference);
-                        std::vector<double> reference_values;
-                        std::vector<int32_t> reference_indices;
-                        ReadResultAsSerializedVectors(reference, reference_values, reference_indices);
-                        reference_ok = rootlake::EqualDecodedValues(
-                            lstate.serialized_values, lstate.serialized_indices,
-                            reference_values, reference_indices);
-                    }
-                }
-                if (!reference_ok) failure_reason = "serialized values differ from universal ROOT reader";
-                else --lstate.validation_remaining;
-            }
         }
-
-        if (!decoded || !failure_reason.empty())
+        if (read.serialized)
         {
-            if (bind_data.reader_mode == rootlake::RootReaderMode::SERIALIZED) {
-                throw IOException("reader_mode='serialized' failed for " +
-                                  lstate.serialized_plan.logical_path + ": " + failure_reason);
-            }
-            rootlake::WarnRootFallbackOnce(lstate.serialized_plan.logical_path,
-                                           lstate.serialized_plan.schema_fingerprint,
-                                           failure_reason);
-            auto context_it = lstate.root_contexts.find(lstate.serialized_context);
-            if (context_it != lstate.root_contexts.end()) {
-                rootlake::EnableAllBranches(context_it->second.tree, bind_data.tree_cache_bytes);
-            }
-            lstate.serialized_active = false;
-        }
-        else
-        {
-            const auto& column = bind_data.columns[lstate.serialized_column];
-            MaterializeSerializedResult(column, entry, lstate.serialized_plan,
+            MaterializeSerializedResult(
+                                        column, entry,
+                                        lstate.path_reader.SerializedPlan(),
                                         lstate.serialized_values, lstate.serialized_indices,
                                         lstate.cached_results[lstate.serialized_column]);
             has_data = !lstate.cached_results[lstate.serialized_column].empty();
@@ -2115,7 +1894,7 @@ static CacheResult ReadAndCacheEntry(
     {
         idx_t sample_col_idx = static_cast<idx_t>(-1);
         std::string sample_branch;
-        
+
         for (idx_t i = 0; i < bind_data.columns.size(); ++i)
         {
             const auto& col = bind_data.columns[i];
@@ -2129,29 +1908,28 @@ static CacheResult ReadAndCacheEntry(
 
         if (sample_col_idx != static_cast<idx_t>(-1))
         {
-            auto it = lstate.root_contexts.find(sample_branch);
-            if (it != lstate.root_contexts.end())
+            auto it = lstate.root_readers.find(sample_branch);
+            if (it != lstate.root_readers.end())
             {
-                auto& ctx = it->second;
-                if (entry < static_cast<uint64_t>(ctx.tree->GetEntries()))
+                auto& reader = it->second;
+                if (entry < static_cast<uint64_t>(reader.Tree()->GetEntries()))
                 {
                     RootDebug("READ.BEFORE_GET_ENTRY",
                               "mode=sample class=" + sample_branch +
                               " entry=" + std::to_string(entry) +
-                              " tree_ptr=" + RootPointer(ctx.tree));
-                    Long64_t bytes = ctx.tree->GetEntry(entry);
+                              " tree_ptr=" + RootPointer(reader.Tree()));
+                    void *object = reader.Read(entry);
                     gstate.object_fallback_entries.fetch_add(1);
                     RootDebug("READ.AFTER_GET_ENTRY",
                               "mode=sample class=" + sample_branch +
                               " entry=" + std::to_string(entry) +
-                              " bytes=" + std::to_string(bytes) +
-                              " object_ptr=" + RootPointer(ctx.CurrentObject()));
-                    if (bytes >= 0 && ctx.CurrentObject())
+                              " object_ptr=" + RootPointer(object));
+                    if (object)
                     {
                         const auto& col = bind_data.columns[sample_col_idx];
                         lstate.cached_results[sample_col_idx].Clear();
                         rootlake::OffsetValueReader::CollectDirect(
-                            ctx.CurrentObject(), col.levels,
+                            object, col.levels,
                             std::numeric_limits<Long64_t>::max(), entry,
                             lstate.cached_results[sample_col_idx]);
                         has_data = !lstate.cached_results[sample_col_idx].empty();
@@ -2164,13 +1942,13 @@ static CacheResult ReadAndCacheEntry(
     {
         for (const auto& [branch_name, col_indices] : branch_columns)
         {
-            auto it = lstate.root_contexts.find(branch_name);
-            if (it == lstate.root_contexts.end())
+            auto it = lstate.root_readers.find(branch_name);
+            if (it == lstate.root_readers.end())
             {
                 continue;
             }
-            auto& ctx = it->second;
-            if (entry >= static_cast<uint64_t>(ctx.tree->GetEntries()))
+            auto& reader = it->second;
+            if (entry >= static_cast<uint64_t>(reader.Tree()->GetEntries()))
             {
                 continue;
             }
@@ -2178,15 +1956,14 @@ static CacheResult ReadAndCacheEntry(
             RootDebug("READ.BEFORE_GET_ENTRY",
                       "mode=group class=" + branch_name +
                       " entry=" + std::to_string(entry) +
-                      " tree_ptr=" + RootPointer(ctx.tree));
-            Long64_t bytes = ctx.tree->GetEntry(entry);
+                      " tree_ptr=" + RootPointer(reader.Tree()));
+            void *object = reader.Read(entry);
             gstate.object_fallback_entries.fetch_add(1);
             RootDebug("READ.AFTER_GET_ENTRY",
                       "mode=group class=" + branch_name +
                       " entry=" + std::to_string(entry) +
-                      " bytes=" + std::to_string(bytes) +
-                      " object_ptr=" + RootPointer(ctx.CurrentObject()));
-            if (bytes < 0)
+                      " object_ptr=" + RootPointer(object));
+            if (!object)
             {
                 continue;
             }
@@ -2194,11 +1971,11 @@ static CacheResult ReadAndCacheEntry(
             for (idx_t col_idx : col_indices)
             {
                 const auto& col = bind_data.columns[col_idx];
-                if (ctx.CurrentObject())
+                if (object)
                 {
                     lstate.cached_results[col_idx].Clear();
                     rootlake::OffsetValueReader::CollectDirect(
-                        ctx.CurrentObject(), col.levels,
+                        object, col.levels,
                         std::numeric_limits<Long64_t>::max(), entry,
                         lstate.cached_results[col_idx]);
                     if (!lstate.cached_results[col_idx].empty())
@@ -2233,11 +2010,12 @@ static CacheResult ReadAndCacheEntry(
     return CacheResult::CACHED;
 }
 
-void RootScanFunction(ClientContext& context, TableFunctionInput& data_p, DataChunk& output)
+void RootScanExecutor::Execute(
+    ClientContext& context, TableFunctionInput& data_p, DataChunk& output)
 {
-    auto& bind_data = data_p.bind_data->Cast<FastRootBindData>();
-    auto& gstate = data_p.global_state->Cast<FastRootGlobalState>();
-    auto& lstate = data_p.local_state->Cast<FastRootLocalState>();
+    auto& bind_data = data_p.bind_data->Cast<RootScanBindData>();
+    auto& gstate = data_p.global_state->Cast<RootScanGlobalState>();
+    auto& lstate = data_p.local_state->Cast<RootScanLocalState>();
 
     if (bind_data.is_empty_mode)
     {
@@ -2259,7 +2037,8 @@ void RootScanFunction(ClientContext& context, TableFunctionInput& data_p, DataCh
     if (bind_data.is_direct_branch_mode)
     {
         while (true) {
-            if (gstate.file_scheduler && !EnsureMultiFileReady(bind_data, gstate, lstate)) {
+            if (gstate.file_scheduler &&
+                !file_manager.EnsureReady(bind_data, gstate, lstate)) {
                 output.SetCardinality(0);
                 return;
             }
@@ -2273,7 +2052,8 @@ void RootScanFunction(ClientContext& context, TableFunctionInput& data_p, DataCh
     }
 
     while (true) {
-        if (gstate.file_scheduler && !EnsureMultiFileReady(bind_data, gstate, lstate)) {
+        if (gstate.file_scheduler &&
+            !file_manager.EnsureReady(bind_data, gstate, lstate)) {
             output.SetCardinality(0);
             return;
         }
@@ -2290,7 +2070,7 @@ void RootScanFunction(ClientContext& context, TableFunctionInput& data_p, DataCh
                 if (lstate.local_current_row >= lstate.local_end_row)
                 {
                     if (gstate.file_scheduler) break;
-                    WorkScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
+                    RootEntryScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
                     auto batch = scheduler.ClaimWork(100000);
                     if (!batch.HasWork()) break;
                     lstate.local_current_row = batch.start;
@@ -2318,11 +2098,12 @@ void RootScanFunction(ClientContext& context, TableFunctionInput& data_p, DataCh
     }
 }
 
-static InsertionOrderPreservingMap<string> RootScanToString(TableFunctionToStringInput& input)
+InsertionOrderPreservingMap<string> RootScanExplain::Bound(
+    TableFunctionToStringInput& input)
 {
     InsertionOrderPreservingMap<string> result;
     if (!input.bind_data) return result;
-    const auto& bind = input.bind_data->Cast<FastRootBindData>();
+    const auto& bind = input.bind_data->Cast<RootScanBindData>();
     result["ROOT Input"] = bind.input_specification;
     result["ROOT Files"] = std::to_string(bind.root_paths.size());
     result["ROOT Representative"] = bind.root_path;
@@ -2332,18 +2113,19 @@ static InsertionOrderPreservingMap<string> RootScanToString(TableFunctionToStrin
     return result;
 }
 
-static InsertionOrderPreservingMap<string> RootScanDynamicToString(TableFunctionDynamicToStringInput& input)
+InsertionOrderPreservingMap<string> RootScanExplain::Running(
+    TableFunctionDynamicToStringInput& input)
 {
     InsertionOrderPreservingMap<string> result;
     if (input.bind_data) {
-        const auto& bind = input.bind_data->Cast<FastRootBindData>();
+        const auto& bind = input.bind_data->Cast<RootScanBindData>();
         result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.reader_mode);
         result["ROOT Input Files"] = std::to_string(bind.root_paths.size());
         result["ROOT Representative"] = bind.root_path;
         result["ROOT Bind Open Time (us)"] = std::to_string(bind.bind_open_us);
     }
     if (!input.global_state) return result;
-    const auto& global = input.global_state->Cast<FastRootGlobalState>();
+    const auto& global = input.global_state->Cast<RootScanGlobalState>();
     result["Serialized Entry Calls"] = std::to_string(global.serialized_entries.load());
     result["Serialized Values"] = std::to_string(global.serialized_values.load());
     result["Serialized Baskets"] = std::to_string(global.serialized_baskets.load());
@@ -2368,6 +2150,39 @@ static InsertionOrderPreservingMap<string> RootScanDynamicToString(TableFunction
     return result;
 }
 
+unique_ptr<FunctionData> RootScanBind(
+    ClientContext &context, TableFunctionBindInput &input,
+    vector<LogicalType> &return_types, vector<string> &return_names) {
+    return RootScanBinder().Bind(
+        context, input, return_types, return_names);
+}
+
+unique_ptr<GlobalTableFunctionState> RootScanInit(
+    ClientContext &context, TableFunctionInitInput &input) {
+    return RootScanStateFactory().CreateGlobal(context, input);
+}
+
+unique_ptr<LocalTableFunctionState> RootScanInitLocal(
+    ExecutionContext &, TableFunctionInitInput &input,
+    GlobalTableFunctionState *global_state) {
+    return RootScanStateFactory().CreateLocal(input, global_state);
+}
+
+void RootScanFunction(
+    ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+    RootScanExecutor().Execute(context, input, output);
+}
+
+InsertionOrderPreservingMap<string> RootScanToString(
+    TableFunctionToStringInput &input) {
+    return RootScanExplain().Bound(input);
+}
+
+InsertionOrderPreservingMap<string> RootScanDynamicToString(
+    TableFunctionDynamicToStringInput &input) {
+    return RootScanExplain().Running(input);
+}
+
 void RegisterRootScan(ExtensionLoader &loader)
 {
     TableFunction root_scan("read_root", {LogicalType::VARCHAR}, RootScanFunction, RootScanBind, RootScanInit);
@@ -2389,4 +2204,4 @@ void RegisterRootScan(ExtensionLoader &loader)
     loader.RegisterFunction(root_scan);
 }
 
-} // namespace duckdb 
+} // namespace duckdb

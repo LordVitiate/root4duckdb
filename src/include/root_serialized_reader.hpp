@@ -1,6 +1,7 @@
 #pragma once
 
 #include "root_lake_common.hpp"
+#include "root_semantic_reader.hpp"
 #include "root_serialized_codec.hpp"
 
 #include <cstdint>
@@ -129,6 +130,7 @@ public:
               uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL,
               uint64_t max_values_per_entry = 10ULL * 1024ULL * 1024ULL,
               void *root_object_scratch = nullptr);
+    void Reset();
 
     bool Decode(uint64_t entry, std::vector<double> &values,
                 std::vector<int32_t> &flat_indices, std::string &failure_reason,

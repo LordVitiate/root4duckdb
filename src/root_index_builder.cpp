@@ -3,6 +3,8 @@
 #include "root_bloom.hpp"
 #include "root_branch_projection.hpp"
 #include "root_lake_common.hpp"
+#include "root_path_reader.hpp"
+#include "root_headers.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -121,19 +123,11 @@ struct BasketAccumulator {
 
 struct IndexedPathPlan {
     std::string logical_path;
-    ParsedPath parsed;
-    std::vector<PathLevel> levels;
-    TBranch *physical_branch = nullptr;
-    std::string physical_mode;
+    RootPathReader reader;
     std::string schema_id;
     std::string column_id;
     std::vector<BasketAccumulator> baskets;
     idx_t active_basket = 0;
-    SerializedReadPlan serialized_plan;
-    SerializedBasketReader serialized_reader;
-    bool serialized_active = false;
-    uint32_t validation_remaining = 0;
-    bool fallback_recorded = false;
 };
 
 void ApplyRootBasketMetadata(BasketAccumulator &basket, TBasket *root_basket) {
@@ -166,34 +160,32 @@ IndexedPathPlan PreparePath(const RootIndexBuildOptions &options,
                             const std::string &logical_path) {
     IndexedPathPlan plan;
     plan.logical_path = logical_path;
-    plan.parsed = ParsePath(logical_path);
-    plan.levels = PathResolver::Resolve(root_class, plan.parsed.fields);
-    if (!plan.levels.back().is_primitive ||
-        !IsLosslessDoubleBackedType(plan.levels.back().type)) {
+    auto parsed = ParsePath(logical_path);
+    auto levels = PathResolver::Resolve(root_class, parsed.fields);
+    if (!levels.back().is_primitive ||
+        !IsLosslessDoubleBackedType(levels.back().type)) {
         throw NotImplementedException(
             "Indexed ROOT paths currently require a numeric leaf up to 32-bit integer plus FLOAT/DOUBLE; "
             "unsupported leaf type for " + logical_path + ": " +
-            plan.levels.back().type);
+            levels.back().type);
     }
-    const auto physical = ResolvePhysicalBranch(object_branch, plan.parsed.fields);
-    plan.physical_branch = physical.branch;
-    plan.physical_mode = physical.mode;
-    if (!plan.physical_branch) {
+    plan.schema_id = SchemaFingerprint(parsed.root_class, levels);
+    plan.column_id = ColumnId(plan.schema_id, logical_path);
+    plan.reader.Resolve(nullptr, object_branch, root_class,
+                        std::move(parsed), std::move(levels));
+    auto *physical_branch = plan.reader.PhysicalBranch();
+    if (!physical_branch) {
         throw InvalidInputException(
             "No persistent branch can provide entry ranges for " + logical_path);
     }
-    plan.schema_id = SchemaFingerprint(plan.parsed.root_class, plan.levels);
-    plan.column_id = ColumnId(plan.schema_id, logical_path);
-    plan.serialized_plan =
-        BuildSerializedReadPlan(root_class, plan.parsed, plan.physical_branch);
 
-    const int basket_count = plan.physical_branch->GetWriteBasket() + 1;
-    auto *basket_entries = plan.physical_branch->GetBasketEntry();
-    auto *basket_bytes = plan.physical_branch->GetBasketBytes();
+    const int basket_count = physical_branch->GetWriteBasket() + 1;
+    auto *basket_entries = physical_branch->GetBasketEntry();
+    auto *basket_bytes = physical_branch->GetBasketBytes();
     if (basket_count <= 0 || !basket_entries) {
         throw InvalidInputException(
             "Physical branch has no persistent baskets: " +
-            std::string(plan.physical_branch->GetName()));
+            std::string(physical_branch->GetName()));
     }
     plan.baskets.reserve(static_cast<idx_t>(basket_count));
     for (int basket_id = 0; basket_id < basket_count; ++basket_id) {
@@ -210,7 +202,7 @@ IndexedPathPlan PreparePath(const RootIndexBuildOptions &options,
         auto &basket = plan.baskets.back();
         basket.entry_begin = entry_begin;
         basket.entry_end = entry_end;
-        const auto basket_seek = plan.physical_branch->GetBasketSeek(basket_id);
+        const auto basket_seek = physical_branch->GetBasketSeek(basket_id);
         basket.physical_offset = basket_seek > 0
                                      ? static_cast<uint64_t>(basket_seek)
                                      : 0;
@@ -220,11 +212,11 @@ IndexedPathPlan PreparePath(const RootIndexBuildOptions &options,
                                      : 0;
         const bool serialized_metadata =
             options.reader_mode != RootReaderMode::OBJECT &&
-            plan.serialized_plan.supported;
+            plan.reader.SerializedPlan().supported;
         if (!serialized_metadata) {
             ApplyRootBasketMetadata(
-                basket, plan.physical_branch->GetBasket(basket_id));
-            plan.physical_branch->DropBaskets();
+                basket, physical_branch->GetBasket(basket_id));
+            physical_branch->DropBaskets();
         }
     }
     return plan;
@@ -267,20 +259,13 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
         if (!file || file->IsZombie()) throw IOException("ROOT file is zombie");
 
         const auto root_path_spec = ParsePath(options.logical_paths.front());
-        auto *root_class = TClass::GetClass(root_path_spec.root_class.c_str());
-        if (!root_class || !root_class->HasDictionary()) {
-            throw InvalidInputException(
-                "ROOT dictionary is unavailable for class " +
-                root_path_spec.root_class);
-        }
-        auto *tree = FindTree(file.get(), options.tree_name,
-                              root_path_spec.root_class);
-        if (!tree) throw InvalidInputException("No TTree found");
-        auto *object_branch = FindObjectBranch(tree, root_path_spec.root_class);
-        if (!object_branch) {
-            throw InvalidInputException(
-                "No object branch for class " + root_path_spec.root_class);
-        }
+        RootObjectReader object_reader;
+        object_reader.Bind(file.get(), options.tree_name,
+                           root_path_spec.root_class,
+                           options.dictionary_cleanup_mode);
+        auto *tree = object_reader.Tree();
+        auto *object_branch = object_reader.ObjectBranch();
+        auto *root_class = object_reader.RootClass();
 
         const uint64_t total_entries = static_cast<uint64_t>(tree->GetEntries());
         status.entries = total_entries;
@@ -296,14 +281,12 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
                                         total_entries, logical_path));
         }
 
-        RootObjectContext object_context;
-        object_context.Bind(tree, object_branch, root_class,
-                            options.dictionary_cleanup_mode);
         std::vector<TBranch *> projected_branches;
         bool projection_safe = true;
         for (const auto &path : paths) {
-            projected_branches.push_back(path.physical_branch);
-            projection_safe = projection_safe && path.physical_mode == "ancestor";
+            projected_branches.push_back(path.reader.PhysicalBranch());
+            projection_safe = projection_safe &&
+                              path.reader.PhysicalMode() == "ancestor";
         }
         const auto projection = projection_safe
                                     ? ApplyBranchProjection(
@@ -315,74 +298,44 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
         uint64_t serialized_path_count = 0;
         uint64_t fallback_path_count = 0;
         std::unordered_map<TBranch *, idx_t> paths_per_branch;
-        for (const auto &path : paths) ++paths_per_branch[path.physical_branch];
+        for (const auto &path : paths) {
+            ++paths_per_branch[path.reader.PhysicalBranch()];
+        }
         for (auto &path : paths) {
-            if (options.reader_mode == RootReaderMode::OBJECT) continue;
             std::string rejection;
-            if (!path.serialized_plan.supported) {
-                rejection = path.serialized_plan.reason;
-            } else if (paths_per_branch[path.physical_branch] > 1) {
+            if (paths_per_branch[path.reader.PhysicalBranch()] > 1) {
                 rejection =
                     "multiple requested paths share one physical ancestor; universal one-pass read is cheaper";
             }
-            if (!rejection.empty()) {
-                if (options.reader_mode == RootReaderMode::SERIALIZED) {
-                    throw InvalidInputException(
-                        "reader_mode='serialized' cannot index " +
-                        path.logical_path + ": " + rejection);
-                }
-                path.fallback_recorded = true;
-                ++fallback_path_count;
-                WarnRootFallbackOnce(path.logical_path, path.schema_id, rejection);
-                continue;
-            }
-            path.serialized_reader.Bind(
-                path.physical_branch, path.serialized_plan,
-                options.raw_max_entry_bytes,
-                options.raw_max_values_per_entry,
-                object_context.address_slot);
-            path.serialized_active = true;
-            path.validation_remaining = options.raw_validation_entries;
-            ++serialized_path_count;
+            RootPathReaderOptions reader_options;
+            reader_options.reader_mode = options.reader_mode;
+            reader_options.validation_entries = options.raw_validation_entries;
+            reader_options.max_entry_bytes = options.raw_max_entry_bytes;
+            reader_options.max_values_per_entry =
+                options.raw_max_values_per_entry;
+            reader_options.tree_cache_bytes = options.tree_cache_bytes;
+            reader_options.operation = "index";
+            const auto started = path.reader.StartSerialized(
+                object_reader.CurrentObject(), std::move(reader_options),
+                std::move(rejection));
+            if (started.serialized_active) ++serialized_path_count;
+            if (started.fallback_activated) ++fallback_path_count;
         }
-
-        auto fallback = [&](IndexedPathPlan &path, const std::string &reason) {
-            if (options.reader_mode == RootReaderMode::SERIALIZED) {
-                throw IOException("reader_mode='serialized' failed for " +
-                                  path.logical_path + ": " + reason);
-            }
-            path.serialized_active = false;
-            if (!path.fallback_recorded) {
-                path.fallback_recorded = true;
-                ++fallback_path_count;
-            }
-            WarnRootFallbackOnce(path.logical_path, path.schema_id, reason);
-        };
 
         std::vector<double> values;
         std::vector<int32_t> indices;
-        std::vector<double> reference_values;
-        std::vector<int32_t> reference_indices;
-        uint64_t object_reads = 0;
+        RootEntryReader object_entry(object_reader);
         for (uint64_t entry = 0; entry < total_entries; ++entry) {
             bool need_object = options.reader_mode == RootReaderMode::OBJECT;
             for (const auto &path : paths) {
-                if (!path.serialized_active || path.validation_remaining > 0) {
+                if (!path.reader.SerializedActive() ||
+                    path.reader.ValidationRemaining() > 0) {
                     need_object = true;
                     break;
                 }
             }
-            void *object = nullptr;
-            bool object_loaded = false;
-            auto ensure_object = [&]() {
-                if (!object_loaded) {
-                    object = object_context.Read(entry);
-                    object_loaded = true;
-                    ++object_reads;
-                }
-                return object;
-            };
-            if (need_object) ensure_object();
+            object_entry.Begin(entry);
+            if (need_object) object_entry.Read();
 
             for (auto &path : paths) {
                 while (path.active_basket < path.baskets.size() &&
@@ -395,48 +348,25 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
 
                 values.clear();
                 indices.clear();
-                if (path.serialized_active) {
-                    std::string failure_reason;
-                    const bool collect_indices = path.validation_remaining > 0;
-                    const bool decoded = path.serialized_reader.Decode(
-                        entry, values, indices, failure_reason, collect_indices);
-                    if (path.serialized_plan.projection_kind ==
-                        SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR) {
-                        object = nullptr;
-                        object_loaded = false;
-                    }
+                if (path.reader.SerializedActive()) {
+                    const auto read = path.reader.TryReadSerialized(
+                        entry, object_entry, values, indices,
+                        path.reader.ValidationRemaining() > 0);
+                    if (read.fallback_activated) ++fallback_path_count;
                     SerializedBasketInfo basket_info;
-                    if (path.serialized_reader.CurrentBasketInfo(basket_info)) {
+                    if (path.reader.CurrentBasketInfo(basket_info)) {
                         ApplySerializedBasketMetadata(basket, basket_info);
-                    }
-                    if (!decoded) {
-                        fallback(path, failure_reason);
-                    } else if (path.validation_remaining > 0) {
-                        reference_values.clear();
-                        reference_indices.clear();
-                        if (ensure_object()) {
-                            OffsetValueReader::CollectFlat(
-                                object, path.levels, IndexDepth(path.levels),
-                                reference_values, reference_indices);
-                        }
-                        if (!object || !EqualDecodedValues(
-                                           values, indices, reference_values,
-                                           reference_indices)) {
-                            fallback(path,
-                                     "serialized values differ from universal ROOT reader");
-                        } else {
-                            --path.validation_remaining;
-                        }
                     }
                 }
 
-                if (!path.serialized_active) {
+                if (!path.reader.SerializedActive()) {
                     values.clear();
-                    if (!ensure_object()) {
+                    void *object = object_entry.Read();
+                    if (!object) {
                         ++basket.null_count;
                         continue;
                     }
-                    OffsetValueReader::CollectValues(object, path.levels, values);
+                    path.reader.CollectValues(object, values);
                 }
                 for (const double value : values) basket.Add(value);
             }
@@ -445,10 +375,11 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
         for (auto &path : paths) {
             for (auto &basket : path.baskets) {
                 if (basket.key_length && basket.uncompressed_size) continue;
+                auto *physical_branch = path.reader.PhysicalBranch();
                 ApplyRootBasketMetadata(
-                    basket, path.physical_branch->GetBasket(
+                    basket, physical_branch->GetBasket(
                                 static_cast<int>(basket.basket_id)));
-                path.physical_branch->DropBaskets();
+                physical_branch->DropBaskets();
             }
         }
 
@@ -457,7 +388,8 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
             schema_ids.push_back(path.schema_id);
             if (written_columns.insert(path.column_id).second) {
                 WriteSchemaRows(metadata, path.schema_id, path.column_id,
-                                path.logical_path, path.parsed, path.levels);
+                                path.logical_path, path.reader.Path(),
+                                path.reader.Levels());
             }
 
             uint64_t flat_value_begin = 0;
@@ -484,8 +416,8 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
                 row.file_id = file_id;
                 row.column_id = path.column_id;
                 row.basket_id = basket.basket_id;
-                row.basket_branch_name = path.physical_branch->GetName();
-                row.basket_branch_mode = path.physical_mode;
+                row.basket_branch_name = path.reader.PhysicalBranch()->GetName();
+                row.basket_branch_mode = path.reader.PhysicalMode();
                 row.entry_begin = basket.entry_begin;
                 row.entry_end = basket.entry_end;
                 row.event_base = event_base;
@@ -548,7 +480,7 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
             " logical paths; serialized=" +
             std::to_string(serialized_path_count) +
             ", object_fallback=" + std::to_string(fallback_path_count) +
-            ", object_reads=" + std::to_string(object_reads);
+            ", object_reads=" + std::to_string(object_entry.LoadCount());
     } catch (const std::exception &exception) {
         status.status = "ERROR";
         status.message = exception.what();

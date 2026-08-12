@@ -1,6 +1,7 @@
 #include "root_semantic_reader.hpp"
 
 #include "root_debug.hpp"
+#include "root_headers.hpp"
 #include "root_lake_common.hpp"
 
 #include <algorithm>
@@ -569,6 +570,27 @@ LogicalType RootTypeToLogicalType(const std::string &raw_type) {
     throw NotImplementedException("Unsupported ROOT leaf type: " + raw_type);
 }
 
+LogicalType RootTypeToScanLogicalType(const std::string &raw_type,
+                                      bool is_string, bool is_primitive) {
+    if (is_string || !is_primitive) return LogicalType::VARCHAR;
+
+    const auto &type = raw_type;
+    if (type == "Bool_t" || type == "bool" || type == "O") return LogicalType::BOOLEAN;
+    if (type == "Char_t" || type == "char" || type == "b") return LogicalType::TINYINT;
+    if (type == "UChar_t" || type == "unsigned char" || type == "B") return LogicalType::UTINYINT;
+    if (type == "Short_t" || type == "short" || type == "S") return LogicalType::SMALLINT;
+    if (type == "UShort_t" || type == "unsigned short" || type == "s") return LogicalType::USMALLINT;
+    if (type == "Int_t" || type == "int" || type == "I") return LogicalType::INTEGER;
+    if (type == "UInt_t" || type == "unsigned int" || type == "i") return LogicalType::UINTEGER;
+    if (type == "Long64_t" || type == "long long" || type == "L") return LogicalType::BIGINT;
+    if (type == "ULong_t" || type == "unsigned long" ||
+        type == "ULong64_t" || type == "unsigned long long" ||
+        type == "l") return LogicalType::UBIGINT;
+    if (type == "Float_t" || type == "float" || type == "F") return LogicalType::FLOAT;
+    if (type == "Double_t" || type == "double" || type == "D") return LogicalType::DOUBLE;
+    return LogicalType::VARCHAR;
+}
+
 bool IsLosslessDoubleBackedType(const std::string &raw_type) {
     switch (RootTypeToLogicalType(raw_type).id()) {
     case LogicalTypeId::BOOLEAN:
@@ -924,12 +946,11 @@ void OffsetValueReader::CollectDirect(void *root_object,
 }
 
 RootDictionaryCleanupMode ParseDictionaryCleanupMode(
-    std::string mode, bool external_dictionary_loaded) {
-    (void)external_dictionary_loaded;
-    if (mode.empty() || mode == "auto") return RootDictionaryCleanupMode::FULL;
+    std::string mode, RootDictionaryCleanupMode automatic_mode) {
     std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char character) {
         return static_cast<char>(std::tolower(character));
     });
+    if (mode.empty() || mode == "auto") return automatic_mode;
     if (mode == "retain" || mode == "none" || mode == "skip") {
         return RootDictionaryCleanupMode::RETAIN;
     }
@@ -941,6 +962,69 @@ RootDictionaryCleanupMode ParseDictionaryCleanupMode(
     }
     throw InvalidInputException(
         "dictionary_cleanup must be one of: auto, retain, destruct_only, full");
+}
+
+void RootObjectReader::Bind(TFile *file_p, const std::string &tree_name,
+                            const std::string &root_class_name,
+                            RootDictionaryCleanupMode cleanup_mode) {
+    Reset();
+    if (!file_p || file_p->IsZombie()) {
+        throw InvalidInputException("Cannot bind an invalid ROOT file");
+    }
+    auto *root_class = TClass::GetClass(root_class_name.c_str());
+    if (!root_class || !root_class->HasDictionary()) {
+        throw InvalidInputException(
+            "ROOT dictionary is unavailable for class " + root_class_name);
+    }
+    auto *tree = FindTree(file_p, tree_name, root_class_name);
+    if (!tree) {
+        throw InvalidInputException(
+            "No TTree found for ROOT class " + root_class_name);
+    }
+    auto *branch = FindObjectBranch(tree, root_class_name);
+    if (!branch) {
+        throw InvalidInputException(
+            "No object branch for ROOT class " + root_class_name);
+    }
+    context.Bind(tree, branch, root_class, cleanup_mode, root_class_name);
+    file = file_p;
+}
+
+void RootObjectReader::Reset() {
+    context.Reset();
+    file = nullptr;
+}
+
+void *RootObjectReader::Read(uint64_t entry) {
+    return context.Read(entry);
+}
+
+bool RootObjectReader::IsBound() const {
+    return file && context.tree && context.branch && context.root_class;
+}
+
+RootEntryReader::RootEntryReader(RootObjectReader &reader_p)
+    : reader(reader_p) {
+}
+
+void RootEntryReader::Begin(uint64_t entry_p) {
+    entry = entry_p;
+    object = nullptr;
+    loaded = false;
+}
+
+void *RootEntryReader::Read() {
+    if (!loaded) {
+        object = reader.Read(entry);
+        loaded = true;
+        ++load_count;
+    }
+    return object;
+}
+
+void RootEntryReader::Invalidate() {
+    object = nullptr;
+    loaded = false;
 }
 
 RootObjectContext::RootObjectContext(RootObjectContext &&other) noexcept {

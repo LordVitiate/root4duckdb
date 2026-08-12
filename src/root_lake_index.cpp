@@ -100,6 +100,77 @@ struct BuildIndexGlobalState final : public GlobalTableFunctionState {
     idx_t MaxThreads() const override { return 1; }
 };
 
+class RootIndexBinder final {
+public:
+    unique_ptr<FunctionData> Bind(
+        TableFunctionBindInput &input,
+        vector<LogicalType> &return_types,
+        vector<string> &return_names);
+};
+
+class RootIndexPublisher final {
+public:
+    void Publish(ClientContext &context, const BuildIndexBindData &bind,
+                 BuildIndexGlobalState &state,
+                 const std::string &dataset_id,
+                 const fs::path &staging);
+
+private:
+    void PublishTables(DatabaseInstance &database,
+                       const fs::path &staging,
+                       const BuildIndexBindData &bind,
+                       const BuildIndexGlobalState &state,
+                       const std::string &dataset_id,
+                       const std::string &snapshot_id);
+    void CommitParquetSnapshot(const BuildIndexBindData &bind,
+                               const std::string &dataset_id,
+                               BuildIndexGlobalState &state,
+                               const fs::path &staging);
+};
+
+class RootIndexCoordinator final {
+public:
+    unique_ptr<GlobalTableFunctionState> Run(
+        ClientContext &context, TableFunctionInitInput &input);
+
+private:
+    RootIndexBuildOptions ConfigureRuntime(
+        ClientContext &context, BuildIndexBindData &bind,
+        BuildIndexGlobalState &state,
+        const std::vector<std::string> &files) const;
+    std::string DatasetId(const BuildIndexBindData &bind,
+                          const std::vector<std::string> &files) const;
+    idx_t WorkerCount(BuildIndexBindData &bind,
+                      BuildIndexGlobalState &state,
+                      idx_t file_count) const;
+    std::vector<RootIndexFilePlan> InspectFiles(
+        const RootIndexBuildOptions &options,
+        const std::vector<std::string> &files,
+        idx_t thread_count, const BuildIndexBindData &bind,
+        BuildIndexGlobalState &state,
+        const fs::path &failure_directory) const;
+    void BuildFiles(ClientContext &context,
+                    const RootIndexBuildOptions &options,
+                    const std::string &dataset_id,
+                    const fs::path &staging,
+                    const std::vector<RootIndexFilePlan> &plans,
+                    idx_t thread_count,
+                    const BuildIndexBindData &bind,
+                    BuildIndexGlobalState &state) const;
+    void ValidateBuild(const BuildIndexBindData &bind,
+                       const fs::path &failure_directory,
+                       BuildIndexGlobalState &state) const;
+    void PreserveFailedStaging(const BuildIndexBindData &bind,
+                               const fs::path &staging_root,
+                               const fs::path &staging,
+                               const std::string &snapshot_id) const;
+};
+
+class RootIndexResultWriter final {
+public:
+    void Write(TableFunctionInput &input, DataChunk &output) const;
+};
+
 static bool LocalFileStat(const std::string &path, struct stat &status) {
     if (path.find("://") != std::string::npos) return false;
     return ::stat(path.c_str(), &status) == 0;
@@ -213,9 +284,10 @@ static bool IsSafePublishTableName(const std::string &name) {
     return true;
 }
 
-static void PublishMetadataTables(DatabaseInstance &db, const fs::path &staging,
-                                  const BuildIndexBindData &bind, const BuildIndexGlobalState &state,
-                                  const std::string &dataset_id, const std::string &snapshot_id) {
+void RootIndexPublisher::PublishTables(
+    DatabaseInstance &db, const fs::path &staging,
+    const BuildIndexBindData &bind, const BuildIndexGlobalState &state,
+    const std::string &dataset_id, const std::string &snapshot_id) {
     if (bind.publish_mode == "none") return;
     const std::vector<std::pair<std::string, fs::path>> tables = {
         {bind.files_table, staging / "root_files.parquet"},
@@ -308,8 +380,9 @@ static void PublishMetadataTables(DatabaseInstance &db, const fs::path &staging,
     }
 }
 
-static void CommitSnapshot(const BuildIndexBindData &bind, const std::string &dataset_id,
-                           BuildIndexGlobalState &state, const fs::path &staging) {
+void RootIndexPublisher::CommitParquetSnapshot(
+    const BuildIndexBindData &bind, const std::string &dataset_id,
+    BuildIndexGlobalState &state, const fs::path &staging) {
     const fs::path root(bind.output_dir);
     const fs::path snapshots = root / "snapshots";
     fs::create_directories(snapshots);
@@ -367,8 +440,46 @@ static void CommitSnapshot(const BuildIndexBindData &bind, const std::string &da
     }
 }
 
-static unique_ptr<FunctionData> BuildIndexBind(ClientContext &, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &return_names) {
+void RootIndexPublisher::Publish(
+    ClientContext &context, const BuildIndexBindData &bind,
+    BuildIndexGlobalState &state, const std::string &dataset_id,
+    const fs::path &staging) {
+    if (bind.catalog_mode == "tables") {
+        PublishTables(*context.db, staging, bind, state,
+                      dataset_id, state.snapshot_id);
+        state.published = true;
+        state.publish_mode = bind.publish_mode;
+        state.snapshot_dir = "tables:" +
+            (bind.catalog_prefix.empty()
+                 ? bind.snapshots_table : bind.catalog_prefix);
+        fs::remove_all(staging);
+        return;
+    }
+    if (bind.catalog_mode == "sqlite") {
+        const auto iceberg_commit = PublishRootIndexStagingToIceberg(
+            context, bind.output_dir, state.snapshot_id, staging.string(),
+            state.manifest_fingerprint, state.dictionary_fingerprint);
+        (void)iceberg_commit;
+        fs::remove_all(staging);
+        state.snapshot_dir = bind.output_dir;
+        state.published = true;
+        state.publish_mode = "sqlite-local";
+        return;
+    }
+
+    CommitParquetSnapshot(bind, dataset_id, state, staging);
+    if (bind.catalog_mode == "local") {
+        state.published = true;
+        state.publish_mode = "local-parquet";
+    } else {
+        state.published = false;
+        state.publish_mode = "external-staging";
+    }
+}
+
+unique_ptr<FunctionData> RootIndexBinder::Bind(
+    TableFunctionBindInput &input, vector<LogicalType> &return_types,
+    vector<string> &return_names) {
     auto result = make_uniq<BuildIndexBindData>();
     result->root_glob = input.inputs[0].ToString();
     result->tree_name = input.inputs[1].ToString();
@@ -433,7 +544,7 @@ static unique_ptr<FunctionData> BuildIndexBind(ClientContext &, TableFunctionBin
     it = input.named_parameters.find("dictionary_cleanup");
     if (it != input.named_parameters.end()) dictionary_cleanup = it->second.ToString();
     result->dictionary_cleanup_mode =
-        ParseDictionaryCleanupMode(dictionary_cleanup, !result->dictionary.empty());
+        ParseDictionaryCleanupMode(dictionary_cleanup);
     it = input.named_parameters.find("overwrite");
     if (it != input.named_parameters.end()) result->overwrite = it->second.GetValue<bool>();
     it = input.named_parameters.find("allow_partial");
@@ -531,7 +642,263 @@ static unique_ptr<FunctionData> BuildIndexBind(ClientContext &, TableFunctionBin
     return std::move(result);
 }
 
-static unique_ptr<GlobalTableFunctionState> BuildIndexInit(ClientContext &context, TableFunctionInitInput &input) {
+RootIndexBuildOptions RootIndexCoordinator::ConfigureRuntime(
+    ClientContext &context, BuildIndexBindData &bind,
+    BuildIndexGlobalState &state,
+    const std::vector<std::string> &files) const {
+    const auto runtime = RootRuntimeSettings::From(context, files.size());
+    if (!bind.has_index_threads) {
+        bind.index_threads = static_cast<uint32_t>(runtime.threads);
+    }
+    if (!bind.has_max_in_flight_files) {
+        bind.max_in_flight_files =
+            static_cast<uint32_t>(runtime.max_in_flight_files);
+    }
+    if (!bind.has_memory_budget_bytes) {
+        bind.memory_budget_bytes = runtime.memory_limit_bytes;
+    }
+    if (!bind.has_estimated_worker_bytes) {
+        bind.estimated_worker_bytes = runtime.estimated_worker_bytes;
+    }
+    if (!bind.has_bloom_bytes) bind.bloom_bytes = runtime.bloom_bytes;
+
+    RootIndexBuildOptions options;
+    options.tree_name = bind.tree_name;
+    options.logical_paths = bind.logical_paths;
+    options.bloom_bytes = bind.bloom_bytes;
+    options.bloom_false_positive_rate = bind.bloom_false_positive_rate;
+    options.tree_cache_bytes = bind.tree_cache_bytes;
+    options.reader_mode = bind.reader_mode;
+    options.raw_validation_entries = bind.raw_validation_entries;
+    options.raw_max_entry_bytes = bind.raw_max_entry_bytes;
+    options.raw_max_values_per_entry = bind.raw_max_values_per_entry;
+    options.dictionary_cleanup_mode = bind.dictionary_cleanup_mode;
+
+    if (state.manifest_fingerprint.empty()) {
+        state.manifest_fingerprint = ManifestFingerprint(files);
+    }
+    if (state.dictionary_fingerprint.empty()) {
+        state.dictionary_fingerprint = FileContentFingerprint(bind.dictionary);
+    }
+    return options;
+}
+
+std::string RootIndexCoordinator::DatasetId(
+    const BuildIndexBindData &bind,
+    const std::vector<std::string> &files) const {
+    const auto root_class = ParsePath(bind.logical_paths.front()).root_class;
+    uint64_t hash = FNV1a64(root_class, FNV1a64(bind.tree_name));
+    for (const auto &file : files) hash = FNV1a64(file, hash);
+    return Hex64(hash);
+}
+
+idx_t RootIndexCoordinator::WorkerCount(
+    BuildIndexBindData &bind, BuildIndexGlobalState &state,
+    idx_t file_count) const {
+    const uint32_t hardware_threads =
+        std::max<uint32_t>(1, std::thread::hardware_concurrency());
+    state.requested_threads = bind.index_threads;
+    const uint32_t requested_threads =
+        bind.index_threads ? bind.index_threads : hardware_threads;
+    const uint32_t in_flight_cap = bind.max_in_flight_files
+        ? bind.max_in_flight_files : hardware_threads;
+    const uint32_t memory_cap = bind.memory_budget_bytes
+        ? std::max<uint32_t>(1, static_cast<uint32_t>(
+              bind.memory_budget_bytes / bind.estimated_worker_bytes))
+        : hardware_threads;
+    const idx_t result = std::max<idx_t>(
+        1, std::min<idx_t>(
+               file_count,
+               std::min<uint32_t>(
+                   requested_threads,
+                   std::min<uint32_t>(hardware_threads,
+                                      std::min(in_flight_cap, memory_cap)))));
+    state.effective_threads = static_cast<uint32_t>(result);
+    if (!bind.has_metadata_flush_bytes) {
+        const auto per_worker = bind.memory_budget_bytes
+            ? bind.memory_budget_bytes /
+                  std::max<uint64_t>(1, static_cast<uint64_t>(result) * 8ULL)
+            : 128ULL * 1024ULL * 1024ULL;
+        bind.metadata_flush_bytes = std::clamp<uint64_t>(
+            per_worker, 16ULL * 1024ULL * 1024ULL,
+            256ULL * 1024ULL * 1024ULL);
+    }
+    return result;
+}
+
+std::vector<RootIndexFilePlan> RootIndexCoordinator::InspectFiles(
+    const RootIndexBuildOptions &options,
+    const std::vector<std::string> &files, idx_t thread_count,
+    const BuildIndexBindData &bind, BuildIndexGlobalState &state,
+    const fs::path &failure_directory) const {
+    std::vector<RootIndexFilePlan> plans(files.size());
+    std::atomic<idx_t> next {0};
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+    for (idx_t worker = 0; worker < thread_count; ++worker) {
+        workers.emplace_back([&]() {
+            while (true) {
+                const auto index = next.fetch_add(1);
+                if (index >= files.size()) break;
+                plans[index] = InspectRootIndexFile(options, files[index]);
+            }
+        });
+    }
+    for (auto &worker : workers) worker.join();
+
+    uint64_t event_base = 0;
+    state.statuses.resize(files.size());
+    bool failed = false;
+    for (idx_t index = 0; index < plans.size(); ++index) {
+        plans[index].event_base = event_base;
+        event_base += plans[index].entries;
+        if (plans[index].error.empty()) continue;
+        failed = true;
+        state.statuses[index].file_path = plans[index].path;
+        state.statuses[index].entries = plans[index].entries;
+        state.statuses[index].status = "ERROR";
+        state.statuses[index].message = plans[index].error;
+    }
+    if (failed && !bind.allow_partial) {
+        WriteFailureReport(failure_directory, state.snapshot_id,
+                           state.statuses);
+        throw IOException(
+            "ROOT index preflight failed; see failed-" +
+            state.snapshot_id + ".csv");
+    }
+    return plans;
+}
+
+void RootIndexCoordinator::BuildFiles(
+    ClientContext &context, const RootIndexBuildOptions &options,
+    const std::string &dataset_id, const fs::path &staging,
+    const std::vector<RootIndexFilePlan> &plans, idx_t thread_count,
+    const BuildIndexBindData &bind, BuildIndexGlobalState &state) const {
+    std::atomic<idx_t> next {0};
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+    for (idx_t worker = 0; worker < thread_count; ++worker) {
+        workers.emplace_back([&, worker]() {
+            const auto worker_part =
+                staging / "parts" / ("worker-" + std::to_string(worker));
+            RootIndexFileBuilder file_builder(
+                options, dataset_id, state.snapshot_id);
+            std::vector<idx_t> staged_indices;
+            std::set<std::string> written_columns;
+            bool writer_failed = false;
+            std::string writer_error;
+            std::unique_ptr<RootIndexMetadataWriter> writer;
+            try {
+                writer = std::make_unique<RootIndexMetadataWriter>(
+                    *context.db, (staging / "parts").string(), worker,
+                    bind.metadata_flush_bytes);
+            } catch (const std::exception &exception) {
+                writer_failed = true;
+                writer_error = exception.what();
+            } catch (...) {
+                writer_failed = true;
+                writer_error =
+                    "unknown typed Parquet writer initialization failure";
+            }
+            while (!writer_failed) {
+                const auto index = next.fetch_add(1);
+                if (index >= plans.size()) break;
+                if (!plans[index].error.empty()) continue;
+                try {
+                    RootFileIndexMetadata metadata;
+                    auto next_written_columns = written_columns;
+                    auto status = file_builder.Build(
+                        plans[index].path, plans[index].event_base,
+                        metadata, next_written_columns);
+                    if (status.status == "OK") {
+                        writer->Append(metadata);
+                        written_columns = std::move(next_written_columns);
+                        staged_indices.push_back(index);
+                    }
+                    state.statuses[index] = std::move(status);
+                } catch (const std::exception &exception) {
+                    state.statuses[index].file_path = plans[index].path;
+                    state.statuses[index].entries = plans[index].entries;
+                    state.statuses[index].status = "ERROR";
+                    state.statuses[index].message =
+                        std::string("typed Parquet writer failed: ") +
+                        exception.what();
+                    writer_failed = true;
+                    writer_error = exception.what();
+                } catch (...) {
+                    state.statuses[index].file_path = plans[index].path;
+                    state.statuses[index].entries = plans[index].entries;
+                    state.statuses[index].status = "ERROR";
+                    state.statuses[index].message =
+                        "unknown typed Parquet writer failure";
+                    writer_failed = true;
+                    writer_error = "unknown failure";
+                }
+            }
+            if (!writer_failed) {
+                try {
+                    writer->Finish();
+                } catch (const std::exception &exception) {
+                    writer_failed = true;
+                    writer_error = exception.what();
+                }
+            }
+            if (!writer_failed) return;
+            std::error_code error;
+            fs::remove_all(worker_part, error);
+            for (const auto index : staged_indices) {
+                state.statuses[index].status = "ERROR";
+                state.statuses[index].message =
+                    "worker Parquet batch discarded: " + writer_error;
+            }
+        });
+    }
+    for (auto &worker : workers) worker.join();
+}
+
+void RootIndexCoordinator::ValidateBuild(
+    const BuildIndexBindData &bind, const fs::path &failure_directory,
+    BuildIndexGlobalState &state) const {
+    bool failed = false;
+    idx_t success_count = 0;
+    for (const auto &status : state.statuses) {
+        failed |= status.status != "OK";
+        success_count += status.status == "OK" ? 1 : 0;
+    }
+    if (success_count == 0) {
+        WriteFailureReport(failure_directory, state.snapshot_id,
+                           state.statuses);
+        throw IOException(
+            "No ROOT file was indexed successfully; see failed-" +
+            state.snapshot_id + ".csv");
+    }
+    if (failed && !bind.allow_partial) {
+        WriteFailureReport(failure_directory, state.snapshot_id,
+                           state.statuses);
+        throw IOException(
+            "ROOT indexing failed; see failed-" + state.snapshot_id + ".csv");
+    }
+}
+
+void RootIndexCoordinator::PreserveFailedStaging(
+    const BuildIndexBindData &bind, const fs::path &staging_root,
+    const fs::path &staging, const std::string &snapshot_id) const {
+    std::error_code error;
+    if (!bind.output_dir.empty() && fs::exists(staging, error)) {
+        const auto failed_root = staging_root / "failed";
+        fs::create_directories(failed_root, error);
+        const auto failed =
+            failed_root / (snapshot_id + "-" + TimestampId());
+        error.clear();
+        fs::rename(staging, failed, error);
+        return;
+    }
+    error.clear();
+    fs::remove_all(staging, error);
+}
+
+unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(
+    ClientContext &context, TableFunctionInitInput &input) {
     auto &bind = const_cast<BuildIndexBindData &>(
         input.bind_data->Cast<BuildIndexBindData>());
     auto state = make_uniq<BuildIndexGlobalState>();
@@ -543,42 +910,9 @@ static unique_ptr<GlobalTableFunctionState> BuildIndexInit(ClientContext &contex
 
     LoadRootDictionary(bind.dictionary);
     const auto files = ResolveRootInputs(context, bind.root_glob);
-    const auto root_runtime = RootRuntimeSettings::From(context, files.size());
-    if (!bind.has_index_threads) {
-        bind.index_threads = static_cast<uint32_t>(root_runtime.threads);
-    }
-    if (!bind.has_max_in_flight_files) {
-        bind.max_in_flight_files = static_cast<uint32_t>(root_runtime.max_in_flight_files);
-    }
-    if (!bind.has_memory_budget_bytes) {
-        bind.memory_budget_bytes = root_runtime.memory_limit_bytes;
-    }
-    if (!bind.has_estimated_worker_bytes) {
-        bind.estimated_worker_bytes = root_runtime.estimated_worker_bytes;
-    }
-    if (!bind.has_bloom_bytes) {
-        bind.bloom_bytes = root_runtime.bloom_bytes;
-    }
-    RootIndexBuildOptions index_options;
-    index_options.tree_name = bind.tree_name;
-    index_options.logical_paths = bind.logical_paths;
-    index_options.bloom_bytes = bind.bloom_bytes;
-    index_options.bloom_false_positive_rate = bind.bloom_false_positive_rate;
-    index_options.tree_cache_bytes = bind.tree_cache_bytes;
-    index_options.reader_mode = bind.reader_mode;
-    index_options.raw_validation_entries = bind.raw_validation_entries;
-    index_options.raw_max_entry_bytes = bind.raw_max_entry_bytes;
-    index_options.raw_max_values_per_entry = bind.raw_max_values_per_entry;
-    index_options.dictionary_cleanup_mode = bind.dictionary_cleanup_mode;
-    if (state->manifest_fingerprint.empty()) state->manifest_fingerprint = ManifestFingerprint(files);
-    if (state->dictionary_fingerprint.empty()) {
-        state->dictionary_fingerprint = FileContentFingerprint(bind.dictionary);
-    }
-
-    const auto root_class = ParsePath(bind.logical_paths.front()).root_class;
-    uint64_t dataset_hash = FNV1a64(root_class, FNV1a64(bind.tree_name));
-    for (const auto &file : files) dataset_hash = FNV1a64(file, dataset_hash);
-    const std::string dataset_id = Hex64(dataset_hash);
+    const auto index_options = ConfigureRuntime(
+        context, bind, *state, files);
+    const auto dataset_id = DatasetId(bind, files);
     fs::path staging_root;
     if (!bind.output_dir.empty()) {
         fs::create_directories(bind.output_dir);
@@ -592,204 +926,30 @@ static unique_ptr<GlobalTableFunctionState> BuildIndexInit(ClientContext &contex
     fs::create_directories(staging / "parts");
 
     try {
-        std::vector<RootIndexFilePlan> plans(files.size());
-        const uint32_t hardware_threads = std::max<uint32_t>(1, std::thread::hardware_concurrency());
-        state->requested_threads = bind.index_threads;
-        const uint32_t requested_threads = bind.index_threads ? bind.index_threads : hardware_threads;
-        const uint32_t safe_worker_cap = hardware_threads;
-        const uint32_t in_flight_cap = bind.max_in_flight_files ? bind.max_in_flight_files : safe_worker_cap;
-        const uint32_t memory_cap = bind.memory_budget_bytes
-            ? std::max<uint32_t>(1, static_cast<uint32_t>(bind.memory_budget_bytes / bind.estimated_worker_bytes))
-            : safe_worker_cap;
-        const idx_t thread_count = std::max<idx_t>(
-            1, std::min<idx_t>(files.size(),
-                std::min<uint32_t>(requested_threads,
-                    std::min<uint32_t>(safe_worker_cap, std::min<uint32_t>(in_flight_cap, memory_cap)))));
-        state->effective_threads = static_cast<uint32_t>(thread_count);
-        if (!bind.has_metadata_flush_bytes) {
-            const auto per_worker = bind.memory_budget_bytes
-                ? bind.memory_budget_bytes / std::max<uint64_t>(1, static_cast<uint64_t>(thread_count) * 8ULL)
-                : 128ULL * 1024ULL * 1024ULL;
-            bind.metadata_flush_bytes = std::clamp<uint64_t>(per_worker,
-                16ULL * 1024ULL * 1024ULL, 256ULL * 1024ULL * 1024ULL);
-        }
-        std::atomic<idx_t> inspect_next {0};
-        std::vector<std::thread> workers;
-        workers.reserve(thread_count);
-        for (idx_t worker = 0; worker < thread_count; ++worker) {
-            workers.emplace_back([&]() {
-                while (true) {
-                    const auto index = inspect_next.fetch_add(1);
-                    if (index >= files.size()) break;
-                    plans[index] = InspectRootIndexFile(index_options, files[index]);
-                }
-            });
-        }
-        for (auto &worker : workers) worker.join();
+        const auto thread_count = WorkerCount(
+            bind, *state, files.size());
+        const auto plans = InspectFiles(
+            index_options, files, thread_count, bind, *state,
+            staging_root);
 
-        uint64_t event_base = 0;
-        state->statuses.resize(files.size());
-        bool inspect_failed = false;
-        for (idx_t i = 0; i < plans.size(); ++i) {
-            plans[i].event_base = event_base;
-            event_base += plans[i].entries;
-            if (!plans[i].error.empty()) {
-                inspect_failed = true;
-                state->statuses[i].file_path = plans[i].path;
-                state->statuses[i].entries = plans[i].entries;
-                state->statuses[i].status = "ERROR";
-                state->statuses[i].message = plans[i].error;
-            }
-        }
-        if (inspect_failed && !bind.allow_partial) {
-            WriteFailureReport(staging_root, state->snapshot_id, state->statuses);
-            throw IOException("ROOT index preflight failed; see failed-" + state->snapshot_id + ".csv");
-        }
-
-        std::atomic<idx_t> index_next {0};
-        workers.clear();
-        for (idx_t worker = 0; worker < thread_count; ++worker) {
-            workers.emplace_back([&, worker]() {
-                const auto worker_part = staging / "parts" / ("worker-" + std::to_string(worker));
-                RootIndexFileBuilder file_builder(
-                    index_options, dataset_id, state->snapshot_id);
-                std::vector<idx_t> staged_indices;
-                std::set<std::string> written_columns;
-                bool writer_failed = false;
-                std::string writer_error;
-                std::unique_ptr<RootIndexMetadataWriter> writer;
-                try {
-                    writer = std::make_unique<RootIndexMetadataWriter>(
-                        *context.db, (staging / "parts").string(), worker, bind.metadata_flush_bytes);
-                } catch (const std::exception &ex) {
-                    writer_failed = true;
-                    writer_error = ex.what();
-                } catch (...) {
-                    writer_failed = true;
-                    writer_error = "unknown typed Parquet writer initialization failure";
-                }
-                while (true) {
-                    if (writer_failed) break;
-                    const auto index = index_next.fetch_add(1);
-                    if (index >= plans.size()) break;
-                    if (!plans[index].error.empty()) continue;
-                    try {
-                        RootFileIndexMetadata metadata;
-                        auto next_written_columns = written_columns;
-                        auto status = file_builder.Build(
-                            plans[index].path, plans[index].event_base,
-                            metadata, next_written_columns);
-                        if (status.status == "OK") {
-                            writer->Append(metadata);
-                            written_columns = std::move(next_written_columns);
-                            staged_indices.push_back(index);
-                        }
-                        state->statuses[index] = std::move(status);
-                    } catch (const std::exception &ex) {
-                        state->statuses[index].file_path = plans[index].path;
-                        state->statuses[index].entries = plans[index].entries;
-                        state->statuses[index].status = "ERROR";
-                        state->statuses[index].message = std::string("typed Parquet writer failed: ") + ex.what();
-                        writer_failed = true;
-                        writer_error = ex.what();
-                        break;
-                    } catch (...) {
-                        state->statuses[index].file_path = plans[index].path;
-                        state->statuses[index].entries = plans[index].entries;
-                        state->statuses[index].status = "ERROR";
-                        state->statuses[index].message = "unknown typed Parquet writer failure";
-                        writer_failed = true;
-                        writer_error = "unknown failure";
-                        break;
-                    }
-                }
-                if (!writer_failed) {
-                    try {
-                        writer->Finish();
-                    } catch (const std::exception &ex) {
-                        writer_failed = true;
-                        writer_error = ex.what();
-                    }
-                }
-                if (writer_failed) {
-                    std::error_code ec;
-                    fs::remove_all(worker_part, ec);
-                    for (const auto index : staged_indices) {
-                        state->statuses[index].status = "ERROR";
-                        state->statuses[index].message = "worker Parquet batch discarded: " + writer_error;
-                    }
-                }
-            });
-        }
-        for (auto &worker : workers) worker.join();
-
-        bool indexing_failed = false;
-        idx_t success_count = 0;
-        for (const auto &status : state->statuses) {
-            indexing_failed |= status.status != "OK";
-            success_count += status.status == "OK" ? 1 : 0;
-        }
-        if (success_count == 0) {
-            WriteFailureReport(staging_root, state->snapshot_id, state->statuses);
-            throw IOException("No ROOT file was indexed successfully; see failed-" + state->snapshot_id + ".csv");
-        }
-        if (indexing_failed && !bind.allow_partial) {
-            WriteFailureReport(staging_root, state->snapshot_id, state->statuses);
-            throw IOException("ROOT indexing failed; see failed-" + state->snapshot_id + ".csv");
-        }
+        BuildFiles(context, index_options, dataset_id, staging,
+                   plans, thread_count, bind, *state);
+        ValidateBuild(bind, staging_root, *state);
 
         CompactRootIndexParquet(*context.db, staging.string());
         fs::remove_all(staging / "parts");
-        if (bind.catalog_mode == "tables") {
-            PublishMetadataTables(*context.db, staging, bind, *state, dataset_id, state->snapshot_id);
-            state->published = true;
-            state->publish_mode = bind.publish_mode;
-            state->snapshot_dir = "tables:" + (bind.catalog_prefix.empty() ? bind.snapshots_table : bind.catalog_prefix);
-            fs::remove_all(staging);
-        } else if (bind.catalog_mode == "sqlite") {
-            // The embedded SQLite catalog consumes the typed Parquet staging
-            // directly. Do not publish current.json first: a failed Iceberg
-            // commit must never leave a legacy local snapshot visible.
-            const auto iceberg_commit = PublishRootIndexStagingToIceberg(
-                context, bind.output_dir, state->snapshot_id, staging.string(),
-                state->manifest_fingerprint, state->dictionary_fingerprint);
-            (void)iceberg_commit;
-            fs::remove_all(staging);
-            state->snapshot_dir = bind.output_dir;
-            state->published = true;
-            state->publish_mode = "sqlite-local";
-        } else {
-            CommitSnapshot(bind, dataset_id, *state, staging);
-            if (bind.catalog_mode == "local") {
-                state->published = true;
-                state->publish_mode = "local-parquet";
-            } else if (bind.catalog_mode == "external") {
-                state->published = false;
-                state->publish_mode = "external-staging";
-            }
-        }
+        RootIndexPublisher().Publish(
+            context, bind, *state, dataset_id, staging);
     } catch (...) {
-        std::error_code ec;
-        if (!bind.output_dir.empty() && fs::exists(staging, ec)) {
-            const auto failed_root = staging_root / "failed";
-            fs::create_directories(failed_root, ec);
-            const auto failed = failed_root / (state->snapshot_id + "-" + TimestampId());
-            ec.clear();
-            fs::rename(staging, failed, ec);
-            // If the atomic rename is unavailable, intentionally leave the
-            // original .staging directory in place.  A failed worker must not
-            // destroy file-local Parquet parts that are useful for diagnosis or
-            // a targeted retry; cleanup_orphans.py owns later reclamation.
-        } else {
-            ec.clear();
-            fs::remove_all(staging, ec);
-        }
+        PreserveFailedStaging(
+            bind, staging_root, staging, state->snapshot_id);
         throw;
     }
     return std::move(state);
 }
 
-static void BuildIndexFunction(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+void RootIndexResultWriter::Write(
+    TableFunctionInput &input, DataChunk &output) const {
     auto &state = input.global_state->Cast<BuildIndexGlobalState>();
     idx_t count = 0;
     while (state.offset < state.statuses.size() && count < STANDARD_VECTOR_SIZE) {
@@ -816,10 +976,27 @@ static void BuildIndexFunction(ClientContext &, TableFunctionInput &input, DataC
     output.SetCardinality(count);
 }
 
+unique_ptr<FunctionData> BuildIndexBindCallback(
+    ClientContext &, TableFunctionBindInput &input,
+    vector<LogicalType> &return_types, vector<string> &return_names) {
+    return RootIndexBinder().Bind(input, return_types, return_names);
+}
+
+unique_ptr<GlobalTableFunctionState> BuildIndexInitCallback(
+    ClientContext &context, TableFunctionInitInput &input) {
+    return RootIndexCoordinator().Run(context, input);
+}
+
+void BuildIndexCallback(
+    ClientContext &, TableFunctionInput &input, DataChunk &output) {
+    RootIndexResultWriter().Write(input, output);
+}
+
 static TableFunction MakeBuildIndexFunction(const std::string &name) {
     TableFunction function(name,
                            {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-                           BuildIndexFunction, BuildIndexBind, BuildIndexInit);
+                           BuildIndexCallback, BuildIndexBindCallback,
+                           BuildIndexInitCallback);
     function.named_parameters["dictionary"] = LogicalType::VARCHAR;
     function.named_parameters["dictionary_cleanup"] = LogicalType::VARCHAR;
     function.named_parameters["reader_mode"] = LogicalType::VARCHAR;

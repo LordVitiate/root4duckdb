@@ -9,7 +9,6 @@
 
 namespace duckdb {
 
-void RegisterRootMetaGenerator(ExtensionLoader &loader);
 void RegisterRootScan(ExtensionLoader &loader);
 
 namespace rootlake {
@@ -20,8 +19,6 @@ void RegisterRootLakeScan(ExtensionLoader &loader);
 void LoadRootInternal(ExtensionLoader &loader) {
     ROOT::EnableThreadSafety();
 
-    // Backward-compatible single-file API.
-    RegisterRootMetaGenerator(loader);
     RegisterRootScan(loader);
 
     // Versioned Parquet/Iceberg-backed deep index API.

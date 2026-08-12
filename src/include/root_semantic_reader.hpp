@@ -48,6 +48,8 @@ bool IsPrimitiveType(const std::string &raw_type);
 bool IsStringType(const std::string &raw_type);
 std::string ExtractInnerType(const std::string &container_type);
 LogicalType RootTypeToLogicalType(const std::string &raw_type);
+LogicalType RootTypeToScanLogicalType(const std::string &raw_type,
+                                      bool is_string, bool is_primitive);
 bool IsLosslessDoubleBackedType(const std::string &raw_type);
 double ReadPrimitiveAsDouble(void *ptr, const std::string &raw_type);
 
@@ -128,8 +130,9 @@ enum class RootDictionaryCleanupMode : uint8_t {
     RETAIN = 2
 };
 
-RootDictionaryCleanupMode ParseDictionaryCleanupMode(std::string mode,
-                                                      bool external_dictionary_loaded);
+RootDictionaryCleanupMode ParseDictionaryCleanupMode(
+    std::string mode,
+    RootDictionaryCleanupMode automatic_mode = RootDictionaryCleanupMode::FULL);
 
 class RootObjectContext {
 public:
@@ -158,6 +161,50 @@ private:
     void MoveFrom(RootObjectContext &&other);
 
     std::string class_name;
+};
+
+class RootObjectReader {
+public:
+    RootObjectReader() = default;
+    RootObjectReader(const RootObjectReader &) = delete;
+    RootObjectReader &operator=(const RootObjectReader &) = delete;
+    RootObjectReader(RootObjectReader &&) noexcept = default;
+    RootObjectReader &operator=(RootObjectReader &&) noexcept = default;
+
+    void Bind(TFile *file, const std::string &tree_name,
+              const std::string &root_class_name,
+              RootDictionaryCleanupMode cleanup_mode =
+                  RootDictionaryCleanupMode::FULL);
+    void Reset();
+    void *Read(uint64_t entry);
+
+    bool IsBound() const;
+    TFile *File() const { return file; }
+    TTree *Tree() const { return context.tree; }
+    TBranch *ObjectBranch() const { return context.branch; }
+    TClass *RootClass() const { return context.root_class; }
+    void *CurrentObject() const { return context.CurrentObject(); }
+
+private:
+    TFile *file = nullptr;
+    RootObjectContext context;
+};
+
+class RootEntryReader {
+public:
+    explicit RootEntryReader(RootObjectReader &reader);
+
+    void Begin(uint64_t entry);
+    void *Read();
+    void Invalidate();
+    uint64_t LoadCount() const { return load_count; }
+
+private:
+    RootObjectReader &reader;
+    uint64_t entry = 0;
+    void *object = nullptr;
+    bool loaded = false;
+    uint64_t load_count = 0;
 };
 
 TTree *FindTree(TFile *file, const std::string &tree_name,

@@ -22,8 +22,6 @@ def read(relative: str) -> str:
 
 
 required_files = [
-    "README.md",
-    "ARCHITECTURE.md",
     "VERSION",
     "CMakeLists.txt",
     "cmake/RootDependencies.cmake",
@@ -41,6 +39,8 @@ required_files = [
     "src/root_semantic_reader.cpp",
     "src/root_index_builder.cpp",
     "src/root_dataset_catalog.cpp",
+    "src/root_lake_common.cpp",
+    "src/root_path_reader.cpp",
     "src/root_branch_projection.cpp",
     "src/root_debug.cpp",
     "src/root_serialized_codec.cpp",
@@ -60,6 +60,7 @@ required_files = [
     "src/include/root_debug.hpp",
     "src/include/root_headers.hpp",
     "src/include/root_lake_common.hpp",
+    "src/include/root_path_reader.hpp",
     "src/include/root_serialized_codec.hpp",
     "src/include/root_serialized_reader.hpp",
     "src/include/root_bloom.hpp",
@@ -89,6 +90,8 @@ for obsolete in [
     "src/root_iceberg_catalog.cpp",
     "src/root_serialized_branch_resolver.cpp",
     "src/include/root_serialized_branch_resolver.hpp",
+    "src/include/root_meta.hpp",
+    "src/root_meta_generator.cpp",
     ".gitmodules",
 ]:
     if (ROOT / obsolete).exists():
@@ -100,6 +103,8 @@ for source in [
     "src/root_semantic_reader.cpp",
     "src/root_index_builder.cpp",
     "src/root_dataset_catalog.cpp",
+    "src/root_lake_common.cpp",
+    "src/root_path_reader.cpp",
     "src/root_branch_projection.cpp",
     "src/root_debug.cpp",
     "src/root_serialized_codec.cpp",
@@ -173,13 +178,9 @@ for token in [
 ]:
     if token not in root_headers:
         errors.append(f"ROOT/DuckDB include boundary missing: {token}")
-boundary_positions = [
-    common.find('#include "root_headers.hpp"'),
-    common.find('#include "root_semantic_reader.hpp"'),
-    common.find('#include "duckdb.hpp"'),
-]
-if any(position < 0 for position in boundary_positions) or boundary_positions != sorted(boundary_positions):
-    errors.append("root_lake_common.hpp bypasses the ROOT/DuckDB include boundary")
+for forbidden in ('#include "root_headers.hpp"', '#include "root_semantic_reader.hpp"'):
+    if forbidden in common:
+        errors.append(f"root_lake_common.hpp retains unrelated dependency: {forbidden}")
 semantic_header = read("src/include/root_semantic_reader.hpp")
 semantic_source = read("src/root_semantic_reader.cpp")
 semantic = semantic_header + semantic_source
@@ -189,6 +190,8 @@ for token in [
     "class PathResolver",
     "class OffsetValueReader",
     "class RootObjectContext",
+    "class RootObjectReader",
+    "class RootEntryReader",
     "RootDictionaryCleanupMode",
     "RootDictionaryCleanupMode::RETAIN",
     "tree->GetEntry(static_cast<Long64_t>(entry))",
@@ -199,6 +202,19 @@ for token in [
 for forbidden in ["class PathResolver", "class OffsetValueReader", "class RootObjectContext"]:
     if forbidden in common:
         errors.append(f"inline semantic implementation returned to root_lake_common.hpp: {forbidden}")
+
+path_reader = read("src/include/root_path_reader.hpp") + read("src/root_path_reader.cpp")
+for token in [
+    "class RootPathReader",
+    "RootPathReader::Resolve",
+    "RootPathReader::StartSerialized",
+    "RootPathReader::TryReadSerialized",
+    "RootPathReader::ActivateFallback",
+    "EqualDecodedValues",
+    "OffsetValueReader::CollectFlat",
+]:
+    if token not in path_reader:
+        errors.append(f"shared serialized-first reader invariant missing: {token}")
 
 version_checks = {
     "scripts/production/plan_chunks.py": f"INDEX_VERSION = {INDEX_VERSION}",
@@ -214,8 +230,10 @@ feature_checks: dict[str, list[str]] = {
     "src/root_scan.cpp": [
         "rootlake::RootDictionaryCleanupMode::RETAIN",
         "rootlake::PathResolver::TryResolve",
-        "rootlake::OffsetValueReader::CollectDirect",
-        "rootlake::RootObjectContext",
+        "rootlake::RootObjectReader",
+        "rootlake::RootPathReader",
+        "RootScanBinder",
+        "RootScanExecutor",
         "dictionary_cleanup",
         "root_scan.filter_pushdown = true",
     ],
@@ -237,31 +255,37 @@ feature_checks: dict[str, list[str]] = {
         "manifest_fingerprint",
         "dictionary_fingerprint",
         "RootIndexFileBuilder",
+        "RootIndexBinder",
+        "RootIndexCoordinator",
+        "RootIndexPublisher",
+        "RootIndexResultWriter",
         "catalog_mode",
         "RootIndexMetadataWriter",
     ],
     "src/root_index_builder.cpp": [
         "PathResolver::Resolve",
-        "object_context.Read(entry)",
-        "options.reader_mode != RootReaderMode::OBJECT",
-        "path.serialized_reader.Decode",
-        "EqualDecodedValues",
-        "options.reader_mode == RootReaderMode::SERIALIZED",
-        "OffsetValueReader::CollectValues",
+        "RootObjectReader object_reader",
+        "RootEntryReader object_entry",
+        "RootPathReader reader",
+        "path.reader.TryReadSerialized",
+        "path.reader.CollectValues",
     ],
     "src/root_dataset_catalog.cpp": [
-        "ResolveCatalogSources",
-        "ResolveCommittedSnapshot",
-        "LoadDatasetSchemas",
-        "LoadDatasetPathSchemas",
+        "RootDatasetCatalog::ResolveSources",
+        "RootDatasetCatalog::ResolveCommittedSnapshot",
+        "RootDatasetCatalog::LoadSchemas",
+        "RootDatasetCatalog::LoadPathSchemas",
         "LoadAccessPlan",
     ],
     "src/root_lake_scan.cpp": [
-        "LoadDatasetSchemas",
-        "bind.reader_mode != RootReaderMode::OBJECT",
-        "local.serialized_reader.Decode",
-        "EqualDecodedValues",
-        "bind.reader_mode == RootReaderMode::SERIALIZED",
+        "RootDatasetCatalog catalog",
+        "DatasetScanBinder",
+        "DatasetTaskPlanner",
+        "DatasetScanExecutor",
+        "RootObjectReader object_reader",
+        "RootPathReader path_reader",
+        "local.path_reader.TryReadSerialized",
+        "local.path_reader.CollectFlat",
         "root_dataset_stats",
         "entry_selection",
         "source_id",
@@ -301,6 +325,8 @@ for relative in (
     "src/root_serialized_nested_codec.cpp",
     "src/root_serialized_plan.cpp",
     "src/root_serialized_reader.cpp",
+    "src/root_lake_common.cpp",
+    "src/root_path_reader.cpp",
 ):
     if len(read(relative).splitlines()) > 400:
         errors.append(f"refactored responsibility grew beyond 400 lines: {relative}")
@@ -315,13 +341,31 @@ for forbidden in ("class PathResolver", "class ObjectReader", "class ObjectConte
     if forbidden in direct_source:
         errors.append(f"duplicate direct semantic reader remains: {forbidden}")
 for token in [
-    "bind_data.reader_mode != rootlake::RootReaderMode::OBJECT",
-    "lstate.serialized_reader.Decode",
-    "rootlake::EqualDecodedValues",
-    "bind_data.reader_mode == rootlake::RootReaderMode::SERIALIZED",
+    "rootlake::RootObjectReader",
+    "rootlake::RootPathReader",
+    "lstate.path_reader.TryReadSerialized",
+    "lstate.path_reader.SerializedActive",
 ]:
     if token not in direct_source:
         errors.append(f"direct serialized-first contract missing: {token}")
+
+for relative in (
+    "src/root_scan.cpp",
+    "src/root_index_builder.cpp",
+    "src/root_lake_scan.cpp",
+):
+    consumer = read(relative)
+    if "RootPathReader" not in consumer:
+        errors.append(f"shared ROOT path reader is not used by {relative}")
+    if "SerializedBasketReader" in consumer:
+        errors.append(f"duplicated serialized reader orchestration remains in {relative}")
+
+legacy_metadata_text = "\n".join(
+    source.read_text() for source in (ROOT / "src").rglob("*") if source.is_file()
+)
+for forbidden in ("create_meta", "root_meta.hpp", "root_meta_generator.cpp"):
+    if forbidden in legacy_metadata_text or forbidden in top_cmake:
+        errors.append(f"legacy ROOT metadata generator remains: {forbidden}")
 
 production_source = read("scripts/production/pipeline_config.py") + read("scripts/production/plan_chunks.py")
 for forbidden in ("30_000_000_000", "24_000_000_000", '"max_files": 8'):
