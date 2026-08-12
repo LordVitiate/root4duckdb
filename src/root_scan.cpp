@@ -121,6 +121,7 @@ struct RootScanBindData : public TableFunctionData
 
     bool is_browse_mode = false;
     bool is_direct_branch_mode = false;
+    bool is_primitive_tree_mode = false;
     bool is_empty_mode = false;
     rootlake::RootDictionaryCleanupMode dictionary_cleanup_mode = rootlake::RootDictionaryCleanupMode::FULL;
     std::vector<std::string> browse_children;
@@ -199,6 +200,9 @@ struct RootScanLocalState : public LocalTableFunctionState
 
     TBranch* direct_branch = nullptr;
     TLeaf* direct_leaf = nullptr;
+    std::vector<TBranch *> primitive_tree_branches;
+    std::vector<TLeaf *> primitive_tree_leaves;
+    bool primitive_tree_requires_read = false;
 
     bool file_active = false;
     rootlake::RootDirectFileTask file_task;
@@ -319,6 +323,18 @@ private:
         ClientContext &context, const RootScanBindData &bind_data,
         const RootScanGlobalState &global, RootScanLocalState &local,
         uint64_t entry, size_t element_index);
+    bool PassesPrimitiveTreeFilters(
+        ClientContext &context,
+        const RootScanBindData &bind_data,
+        const RootScanGlobalState &global,
+        RootScanLocalState &local,
+        uint64_t entry);
+    void ProcessPrimitiveTree(
+        ClientContext &context,
+        const RootScanBindData &bind_data,
+        RootScanGlobalState &global,
+        RootScanLocalState &local,
+        DataChunk &output);
     bool PassesDirectBranchFilters(
         ClientContext &context, const RootScanBindData &bind_data,
         const RootScanGlobalState &global, RootScanLocalState &local,
@@ -908,12 +924,101 @@ void RootScanBinder::BindPrimitiveCompatibility(
             ? path_prefix.substr(1) : path_prefix;
 
     if (IsTreeName(file, target_name)) {
-        bind_data.is_browse_mode = true;
-        for (const auto &branch : branches) {
-            bind_data.browse_children.push_back("/" + branch.name);
+        auto *target_tree =
+            dynamic_cast<TTree *>(
+                file.Get(target_name.c_str()));
+
+        if (!target_tree &&
+            std::string(tree.GetName()) == target_name) {
+            target_tree = &tree;
         }
+
+        if (!target_tree) {
+            throw IOException(
+                "ROOT TTree '" + target_name +
+                "' was found in file keys but could not be opened");
+        }
+
+        const auto tree_primitives =
+            CollectPrimitiveBranches(*target_tree);
+
+        auto *tree_branches =
+            target_tree->GetListOfBranches();
+
+        bool primitive_only =
+            tree_branches &&
+            tree_branches->GetEntries() > 0 &&
+            static_cast<idx_t>(
+                tree_branches->GetEntries()) ==
+                tree_primitives.size();
+
+        if (primitive_only) {
+            for (const auto &branch : tree_primitives) {
+                if (!branch.leaf ||
+                    branch.leaf->GetLeafCount() ||
+                    branch.leaf->GetLenStatic() != 1) {
+                    primitive_only = false;
+                    break;
+                }
+            }
+        }
+
+        if (primitive_only) {
+            bind_data.is_primitive_tree_mode = true;
+            bind_data.tree_name =
+                target_tree->GetName();
+            bind_data.total_rows =
+                static_cast<uint64_t>(
+                    std::max<Long64_t>(
+                        0,
+                        target_tree->GetEntries()));
+
+            AddEventIdColumn(
+                bind_data,
+                return_names,
+                return_types);
+
+            for (const auto &branch :
+                 tree_primitives) {
+                RootScanColumn column;
+                column.name = branch.name;
+                column.branch_name = branch.name;
+                column.root_type = branch.type_name;
+
+                bind_data.columns.push_back(
+                    std::move(column));
+
+                return_names.emplace_back(
+                    branch.name);
+
+                return_types.emplace_back(
+                    rootlake::RootTypeToScanLogicalType(
+                        branch.type_name,
+                        false,
+                        true));
+            }
+
+            RootDebug(
+                "BIND.PRIMITIVE_TREE",
+                "tree=" + bind_data.tree_name +
+                " columns=" +
+                std::to_string(
+                    tree_primitives.size()));
+
+            return;
+        }
+
+        bind_data.is_browse_mode = true;
+
+        for (const auto &branch :
+             tree_primitives) {
+            bind_data.browse_children.push_back(
+                "/" + branch.name);
+        }
+
         return_names.emplace_back("path");
-        return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+        return_types.emplace_back(
+            LogicalType(LogicalTypeId::VARCHAR));
         return;
     }
 
@@ -1022,6 +1127,214 @@ void RootScanFileManager::Open(
 
     auto* local_state = &target;
     auto* open_mutex = synchronize_open ? &gstate.coordination_mutex : nullptr;
+
+    if (bind_data.is_primitive_tree_mode)
+    {
+        const auto open_result =
+            local_state->root_file.Open(
+                file_path,
+                bind_data.tree_name,
+                open_mutex);
+
+        if (gstate.file_scheduler) {
+            gstate.file_scheduler->RecordOpen(
+                local_state->file_task,
+                open_result.attempts,
+                open_result.elapsed_us);
+        }
+
+        auto *tree =
+            local_state->root_file.GetTTree();
+
+        if (!tree) {
+            throw IOException(
+                "ROOT schema mismatch in " +
+                file_path +
+                ": primitive TTree '" +
+                bind_data.tree_name +
+                "' is absent");
+        }
+
+        local_state->primitive_tree_branches.assign(
+            bind_data.columns.size(),
+            nullptr);
+
+        local_state->primitive_tree_leaves.assign(
+            bind_data.columns.size(),
+            nullptr);
+
+        local_state->primitive_tree_requires_read =
+            false;
+
+        std::set<idx_t> required_columns;
+
+        for (const auto column :
+             gstate.scan_column_ids) {
+            if (column != COLUMN_IDENTIFIER_ROW_ID &&
+                column < bind_data.columns.size()) {
+                required_columns.insert(column);
+            }
+        }
+
+        for (const auto column :
+             gstate.output_column_ids) {
+            if (column != COLUMN_IDENTIFIER_ROW_ID &&
+                column < bind_data.columns.size()) {
+                required_columns.insert(column);
+            }
+        }
+
+        std::vector<TBranch *>
+            projected_branches;
+
+        for (const auto column_index :
+             required_columns) {
+
+            if (column_index == 0 ||
+                column_index ==
+                    bind_data.source_id_column ||
+                column_index ==
+                    bind_data.source_path_column) {
+                continue;
+            }
+
+            const auto &column =
+                bind_data.columns[
+                    column_index];
+
+            if (column.branch_name.empty()) {
+                continue;
+            }
+
+            auto *branch =
+                tree->GetBranch(
+                    column.branch_name.c_str());
+
+            if (!branch) {
+                throw IOException(
+                    "ROOT schema mismatch in " +
+                    file_path +
+                    ": primitive branch '" +
+                    column.branch_name +
+                    "' is absent");
+            }
+
+            auto *leaf =
+                branch->GetLeaf(
+                    branch->GetName());
+
+            if (!leaf) {
+                throw IOException(
+                    "ROOT schema mismatch in " +
+                    file_path +
+                    ": primitive leaf '" +
+                    column.branch_name +
+                    "' is absent");
+            }
+
+            if (std::string(
+                    leaf->GetTypeName()) !=
+                column.root_type) {
+                throw IOException(
+                    "ROOT schema mismatch in " +
+                    file_path +
+                    ": primitive branch '" +
+                    column.branch_name +
+                    "' changed type from " +
+                    column.root_type +
+                    " to " +
+                    leaf->GetTypeName());
+            }
+
+            local_state
+                ->primitive_tree_branches[
+                    column_index] = branch;
+
+            local_state
+                ->primitive_tree_leaves[
+                    column_index] = leaf;
+
+            projected_branches.push_back(
+                branch);
+        }
+
+        if (projected_branches.empty()) {
+            tree->SetBranchStatus("*", 0);
+        } else {
+            const auto projection =
+                rootlake::ApplyBranchProjection(
+                    tree,
+                    projected_branches,
+                    bind_data.tree_cache_bytes);
+
+            if (!projection.applied) {
+                rootlake::EnableAllBranches(
+                    tree,
+                    bind_data.tree_cache_bytes);
+            }
+
+            local_state
+                ->primitive_tree_requires_read =
+                    true;
+        }
+
+        RootDebug(
+            "PRIMITIVE_TREE.PROJECTION",
+            "file=" + file_path +
+            " projected_branches=" +
+            std::to_string(
+                projected_branches.size()));
+
+        if (gstate.file_scheduler) {
+            const auto entries =
+                static_cast<uint64_t>(
+                    std::max<Long64_t>(
+                        0,
+                        tree->GetEntries()));
+
+            local_state->local_current_row =
+                gstate.event_range_impossible
+                    ? entries
+                    : std::min(
+                          entries,
+                          gstate.event_lower);
+
+            local_state->local_end_row =
+                entries;
+
+            if (gstate.event_upper !=
+                std::numeric_limits<
+                    uint64_t>::max()) {
+                local_state->local_end_row =
+                    std::min(
+                        entries,
+                        gstate.event_upper + 1);
+            }
+
+            local_state->file_active = true;
+
+            std::ostringstream fingerprint;
+            fingerprint
+                << "primitive-tree:"
+                << bind_data.tree_name;
+
+            for (const auto &column :
+                 bind_data.columns) {
+                if (!column.branch_name.empty()) {
+                    fingerprint
+                        << "|"
+                        << column.branch_name
+                        << ":"
+                        << column.root_type;
+                }
+            }
+
+            gstate.file_scheduler->ObserveSchema(
+                fingerprint.str());
+        }
+
+        return;
+    }
 
     if (bind_data.is_direct_branch_mode)
     {
@@ -1266,6 +1579,9 @@ void RootScanFileManager::Reset(
     local_state.root_readers.clear();
     local_state.direct_branch = nullptr;
     local_state.direct_leaf = nullptr;
+    local_state.primitive_tree_branches.clear();
+    local_state.primitive_tree_leaves.clear();
+    local_state.primitive_tree_requires_read = false;
     local_state.root_file.Close();
     local_state.local_current_row = 0;
     local_state.local_end_row = 0;
@@ -1540,6 +1856,305 @@ bool RootScanExecutor::PassesCachedFilters(
         if (!lstate.filter_evaluator.Evaluate(context, *filter.second, actual)) return false;
     }
     return true;
+}
+
+bool RootScanExecutor::PassesPrimitiveTreeFilters(
+    ClientContext &context,
+    const RootScanBindData &bind_data,
+    const RootScanGlobalState &gstate,
+    RootScanLocalState &lstate,
+    uint64_t entry)
+{
+    if (!gstate.filters) {
+        return true;
+    }
+
+    for (const auto &filter :
+         gstate.filters->filters)
+    {
+        if (filter.first >=
+            gstate.scan_column_ids.size()) {
+            continue;
+        }
+
+        const auto column_index =
+            gstate.scan_column_ids[
+                filter.first];
+
+        auto actual =
+            rootlake::RootScalarActual::Null(
+                LogicalType::SQLNULL);
+
+        if (column_index == 0 ||
+            column_index ==
+                COLUMN_IDENTIFIER_ROW_ID) {
+
+            actual =
+                rootlake::RootScalarActual::Signed(
+                    static_cast<int64_t>(
+                        entry));
+
+        } else if (
+            column_index ==
+                bind_data.source_id_column) {
+
+            actual =
+                rootlake::RootScalarActual::Event(
+                    lstate.file_task.source_id);
+
+        } else if (
+            column_index ==
+                bind_data.source_path_column) {
+
+            actual =
+                rootlake::RootScalarActual::String(
+                    lstate.file_task.path);
+
+        } else if (
+            column_index <
+                bind_data.columns.size() &&
+            column_index <
+                lstate
+                    .primitive_tree_leaves
+                    .size()) {
+
+            const auto &column =
+                bind_data.columns[
+                    column_index];
+
+            auto *leaf =
+                lstate.primitive_tree_leaves[
+                    column_index];
+
+            if (leaf &&
+                leaf->GetValuePointer()) {
+
+                const auto value =
+                    rootlake::RootPrimitiveValue
+                        ::FromPointer(
+                            leaf->GetValuePointer(),
+                            column.root_type);
+
+                const auto logical_type =
+                    rootlake
+                        ::RootTypeToScanLogicalType(
+                            column.root_type,
+                            false,
+                            true);
+
+                switch (value.kind) {
+                case rootlake
+                         ::RootPrimitiveKind
+                         ::SIGNED:
+                    actual =
+                        rootlake
+                            ::RootScalarActual
+                            ::Signed(
+                                value.signed_value,
+                                logical_type);
+                    break;
+
+                case rootlake
+                         ::RootPrimitiveKind
+                         ::UNSIGNED:
+                    actual =
+                        rootlake
+                            ::RootScalarActual
+                            ::Unsigned(
+                                value.unsigned_value,
+                                logical_type);
+                    break;
+
+                case rootlake
+                         ::RootPrimitiveKind
+                         ::FLOATING:
+                    actual =
+                        rootlake
+                            ::RootScalarActual
+                            ::Numeric(
+                                logical_type,
+                                value.floating_value);
+                    break;
+                }
+            }
+        }
+
+        if (!lstate.filter_evaluator.Evaluate(
+                context,
+                *filter.second,
+                actual)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void RootScanExecutor::ProcessPrimitiveTree(
+    ClientContext &context,
+    const RootScanBindData &bind_data,
+    RootScanGlobalState &gstate,
+    RootScanLocalState &lstate,
+    DataChunk &output)
+{
+    auto *tree =
+        lstate.root_file.GetTTree();
+
+    if (!tree) {
+        output.SetCardinality(0);
+        return;
+    }
+
+    idx_t output_count = 0;
+
+    while (output_count <
+           STANDARD_VECTOR_SIZE)
+    {
+        if (lstate.local_current_row >=
+            lstate.local_end_row)
+        {
+            if (gstate.file_scheduler) {
+                break;
+            }
+
+            RootEntryScheduler scheduler(
+                gstate.next_row,
+                gstate.total_rows,
+                gstate.coordination_mutex);
+
+            const auto batch =
+                scheduler.ClaimWork(100000);
+
+            if (!batch.HasWork()) {
+                break;
+            }
+
+            lstate.local_current_row =
+                batch.start;
+            lstate.local_end_row =
+                batch.end;
+        }
+
+        const auto entry =
+            lstate.local_current_row++;
+
+        if (lstate.primitive_tree_requires_read) {
+            if (tree->GetEntry(
+                    static_cast<Long64_t>(
+                        entry)) < 0) {
+                break;
+            }
+        }
+
+        if (!PassesPrimitiveTreeFilters(
+                context,
+                bind_data,
+                gstate,
+                lstate,
+                entry)) {
+            continue;
+        }
+
+        for (idx_t output_index = 0;
+             output_index <
+                 gstate.output_column_ids.size();
+             ++output_index)
+        {
+            const auto column_index =
+                gstate.output_column_ids[
+                    output_index];
+
+            auto &vector =
+                output.data[
+                    output_index];
+
+            if (column_index == 0 ||
+                column_index ==
+                    COLUMN_IDENTIFIER_ROW_ID)
+            {
+                FlatVector::GetData<int64_t>(
+                    vector)[output_count] =
+                    static_cast<int64_t>(
+                        entry);
+
+                FlatVector::Validity(vector)
+                    .SetValid(output_count);
+
+                continue;
+            }
+
+            if (column_index ==
+                bind_data.source_id_column)
+            {
+                FlatVector::GetData<uint64_t>(
+                    vector)[output_count] =
+                    lstate.file_task.source_id;
+
+                FlatVector::Validity(vector)
+                    .SetValid(output_count);
+
+                continue;
+            }
+
+            if (column_index ==
+                bind_data.source_path_column)
+            {
+                FlatVector::GetData<string_t>(
+                    vector)[output_count] =
+                    StringVector::AddString(
+                        vector,
+                        lstate.file_task.path);
+
+                FlatVector::Validity(vector)
+                    .SetValid(output_count);
+
+                continue;
+            }
+
+            if (column_index >=
+                    bind_data.columns.size() ||
+                column_index >=
+                    lstate
+                        .primitive_tree_leaves
+                        .size())
+            {
+                FlatVector::Validity(vector)
+                    .SetInvalid(output_count);
+                continue;
+            }
+
+            auto *leaf =
+                lstate.primitive_tree_leaves[
+                    column_index];
+
+            const auto &column =
+                bind_data.columns[
+                    column_index];
+
+            if (!leaf ||
+                !leaf->GetValuePointer())
+            {
+                FlatVector::Validity(vector)
+                    .SetInvalid(output_count);
+                continue;
+            }
+
+            const auto value =
+                rootlake::RootPrimitiveValue
+                    ::FromPointer(
+                        leaf->GetValuePointer(),
+                        column.root_type);
+
+            WriteNumericValue(
+                vector,
+                output_count,
+                value);
+        }
+
+        ++output_count;
+    }
+
+    output.SetCardinality(output_count);
 }
 
 bool RootScanExecutor::PassesDirectBranchFilters(
@@ -2091,6 +2706,39 @@ void RootScanExecutor::Execute(
     {
         ProcessBrowseMode(context, bind_data, gstate, lstate, output);
         return;
+    }
+
+    if (bind_data.is_primitive_tree_mode)
+    {
+        while (true) {
+            if (gstate.file_scheduler &&
+                !file_manager.EnsureReady(
+                    bind_data,
+                    gstate,
+                    lstate)) {
+                output.SetCardinality(0);
+                return;
+            }
+
+            ProcessPrimitiveTree(
+                context,
+                bind_data,
+                gstate,
+                lstate,
+                output);
+
+            if (output.size() > 0) {
+                if (gstate.file_scheduler) {
+                    gstate.file_scheduler
+                        ->RecordFirstRow();
+                }
+                return;
+            }
+
+            if (!gstate.file_scheduler) {
+                return;
+            }
+        }
     }
 
     if (bind_data.is_direct_branch_mode)
