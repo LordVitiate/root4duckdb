@@ -61,8 +61,7 @@ enum class PathPredicateOp {
 
 struct PathPredicateBinding {
     std::string path;
-    PathPredicateOp op = PathPredicateOp::EQ;
-    std::vector<double> values;
+    PathPredicateOp op = PathPredicateOp::EQ;    std::vector<RootPrimitiveValue> values;
     bool require_all_values = false;
     LogicalType value_type;
     std::vector<SchemaBinding> schemas;
@@ -206,6 +205,7 @@ struct DatasetLocalState final : public LocalTableFunctionState {
     bool has_task = false;
     uint64_t current_entry = 0;
     std::vector<double> values;
+    std::vector<RootPrimitiveValue> typed_values;
     std::vector<int32_t> flat_indices;
     idx_t value_offset = 0;
     uint64_t value_event_fk = 0;
@@ -268,8 +268,22 @@ private:
                               void *object) const;
     bool LoadNextEntry(const DatasetBindData &bind, DatasetLocalState &local,
                        DatasetGlobalState &global);
+    void SetPrimitiveAsType(
+        Vector &vector, idx_t row,
+        const LogicalType &type,
+        const RootPrimitiveValue &value) const;
     void SetDoubleAsType(Vector &vector, idx_t row,
                          const LogicalType &type, double value) const;
+    void EmitProjectedTypedRow(
+        const DatasetBindData &bind,
+        const DatasetGlobalState &global,
+        DataChunk &output, idx_t output_row,
+        uint64_t event_fk,
+        const std::string &source_id,
+        uint64_t entry_id,
+        const RootPrimitiveValue &value,
+        const int32_t *indices,
+        idx_t index_count) const;
     void EmitProjectedRow(const DatasetBindData &bind,
                           const DatasetGlobalState &global,
                           DataChunk &output, idx_t output_row,
@@ -291,6 +305,30 @@ public:
 };
 
 
+static bool RequiresTypedDatasetValue(
+    const LogicalType &type) {
+    return type.id() == LogicalTypeId::BIGINT ||
+           type.id() == LogicalTypeId::UBIGINT;
+}
+
+static bool UsesDoubleBackedValueMetadata(
+    const LogicalType &type) {
+    switch (type.id()) {
+    case LogicalTypeId::BOOLEAN:
+    case LogicalTypeId::TINYINT:
+    case LogicalTypeId::UTINYINT:
+    case LogicalTypeId::SMALLINT:
+    case LogicalTypeId::USMALLINT:
+    case LogicalTypeId::INTEGER:
+    case LogicalTypeId::UINTEGER:
+    case LogicalTypeId::FLOAT:
+    case LogicalTypeId::DOUBLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static PathPredicateOp ParsePathPredicateOp(std::string op) {
     std::transform(op.begin(), op.end(), op.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (op == "=" || op == "==" || op == "eq") return PathPredicateOp::EQ;
@@ -305,77 +343,337 @@ static PathPredicateOp ParsePathPredicateOp(std::string op) {
 }
 
 
-static void ParsePathPredicates(
-    RootDatasetCatalog &catalog, DatasetBindData &bind,
-    const std::string &raw_json) {
-    if (raw_json.empty()) return;
-    auto json = nlohmann::json::parse(raw_json);
-    if (!json.is_array()) throw InvalidInputException("path_predicates must be a JSON array");
-    for (const auto &item : json) {
-        if (!item.is_object() || !item.contains("path") || !item.contains("op")) {
-            throw InvalidInputException("Each path predicate needs path and op");
+static RootPrimitiveValue PathPredicateJsonValue(
+    const nlohmann::json &value,
+    const LogicalType &type) {
+
+    switch (type.id()) {
+    case LogicalTypeId::BOOLEAN:
+        if (value.is_boolean()) {
+            return RootPrimitiveValue::Unsigned(
+                value.get<bool>() ? 1 : 0);
         }
-        PathPredicateBinding predicate;
-        predicate.path = NormalizePath(item.at("path").get<std::string>());
-        predicate.op = ParsePathPredicateOp(item.at("op").get<std::string>());
-        const auto quantifier = item.value("quantifier", std::string("any"));
-        predicate.require_all_values = quantifier == "all";
-        if (quantifier != "any" && quantifier != "all") {
-            throw InvalidInputException("path predicate quantifier must be any or all");
-        }
-        if (predicate.op == PathPredicateOp::IN) {
-            if (!item.contains("values") || !item.at("values").is_array()) {
-                throw InvalidInputException("IN path predicate needs values array");
+        if (value.is_number_integer()) {
+            const auto number = value.get<int64_t>();
+            if (number == 0 || number == 1) {
+                return RootPrimitiveValue::Unsigned(
+                    static_cast<uint64_t>(number));
             }
-            for (const auto &value : item.at("values")) predicate.values.push_back(value.get<double>());
-        } else if (predicate.op == PathPredicateOp::BETWEEN) {
-            if (item.contains("values") && item.at("values").is_array() && item.at("values").size() == 2) {
-                predicate.values.push_back(item.at("values")[0].get<double>());
-                predicate.values.push_back(item.at("values")[1].get<double>());
-            } else if (item.contains("lower") && item.contains("upper")) {
-                predicate.values.push_back(item.at("lower").get<double>());
-                predicate.values.push_back(item.at("upper").get<double>());
-            } else {
-                throw InvalidInputException("BETWEEN path predicate needs lower/upper or two values");
-            }
-            if (predicate.values[0] > predicate.values[1]) std::swap(predicate.values[0], predicate.values[1]);
-        } else {
-            if (!item.contains("value")) throw InvalidInputException("Path predicate needs value");
-            predicate.values.push_back(item.at("value").get<double>());
         }
-        if (predicate.values.empty()) throw InvalidInputException("Path predicate has no constants");
-        predicate.schemas = catalog.LoadPathSchemas(
-            predicate.path, predicate.value_type,
-            predicate.schema_lookup);
-        bind.path_predicates.push_back(std::move(predicate));
+        throw InvalidInputException(
+            "Boolean path predicate requires true/false or 0/1");
+
+    case LogicalTypeId::TINYINT:
+    case LogicalTypeId::SMALLINT:
+    case LogicalTypeId::INTEGER:
+    case LogicalTypeId::BIGINT:
+        if (value.is_number_unsigned()) {
+            const auto number = value.get<uint64_t>();
+
+            if (number >
+                static_cast<uint64_t>(
+                    std::numeric_limits<int64_t>::max())) {
+                throw InvalidInputException(
+                    "Signed path predicate constant is too large");
+            }
+
+            return RootPrimitiveValue::Signed(
+                static_cast<int64_t>(number));
+        }
+
+        if (!value.is_number_integer()) {
+            throw InvalidInputException(
+                "Signed integer path predicate requires "
+                "an integer constant");
+        }
+
+        return RootPrimitiveValue::Signed(
+            value.get<int64_t>());
+
+    case LogicalTypeId::UTINYINT:
+    case LogicalTypeId::USMALLINT:
+    case LogicalTypeId::UINTEGER:
+    case LogicalTypeId::UBIGINT:
+        if (value.is_number_unsigned()) {
+            return RootPrimitiveValue::Unsigned(
+                value.get<uint64_t>());
+        }
+
+        if (value.is_number_integer()) {
+            const auto number = value.get<int64_t>();
+
+            if (number < 0) {
+                throw InvalidInputException(
+                    "Unsigned path predicate cannot use "
+                    "a negative constant");
+            }
+
+            return RootPrimitiveValue::Unsigned(
+                static_cast<uint64_t>(number));
+        }
+
+        throw InvalidInputException(
+            "Unsigned integer path predicate requires "
+            "an integer constant");
+
+    case LogicalTypeId::FLOAT:
+    case LogicalTypeId::DOUBLE:
+        if (!value.is_number()) {
+            throw InvalidInputException(
+                "Floating path predicate requires "
+                "a numeric constant");
+        }
+
+        return RootPrimitiveValue::Floating(
+            value.get<double>());
+
+    default:
+        throw NotImplementedException(
+            "Unsupported path predicate type " +
+            type.ToString());
     }
 }
 
-static bool PathPredicateValueMatches(const PathPredicateBinding &predicate, double value) {
-    switch (predicate.op) {
-    case PathPredicateOp::EQ: return value == predicate.values[0];
-    case PathPredicateOp::NE: return value != predicate.values[0];
-    case PathPredicateOp::LT: return value < predicate.values[0];
-    case PathPredicateOp::LE: return value <= predicate.values[0];
-    case PathPredicateOp::GT: return value > predicate.values[0];
-    case PathPredicateOp::GE: return value >= predicate.values[0];
-    case PathPredicateOp::BETWEEN: return value >= predicate.values[0] && value <= predicate.values[1];
-    case PathPredicateOp::IN:
-        return std::find(predicate.values.begin(), predicate.values.end(), value) != predicate.values.end();
+static int ComparePathPredicateValues(
+    const RootPrimitiveValue &left,
+    const RootPrimitiveValue &right,
+    const LogicalType &type) {
+
+    switch (type.id()) {
+    case LogicalTypeId::BOOLEAN:
+    case LogicalTypeId::UTINYINT:
+    case LogicalTypeId::USMALLINT:
+    case LogicalTypeId::UINTEGER:
+    case LogicalTypeId::UBIGINT: {
+        const auto a = left.AsUnsigned();
+        const auto b = right.AsUnsigned();
+        return a < b ? -1 : (a > b ? 1 : 0);
     }
+
+    case LogicalTypeId::TINYINT:
+    case LogicalTypeId::SMALLINT:
+    case LogicalTypeId::INTEGER:
+    case LogicalTypeId::BIGINT: {
+        const auto a = left.AsSigned();
+        const auto b = right.AsSigned();
+        return a < b ? -1 : (a > b ? 1 : 0);
+    }
+
+    case LogicalTypeId::FLOAT:
+    case LogicalTypeId::DOUBLE: {
+        const auto a = left.AsDouble();
+        const auto b = right.AsDouble();
+        return a < b ? -1 : (a > b ? 1 : 0);
+    }
+
+    default:
+        throw NotImplementedException(
+            "Unsupported path predicate type " +
+            type.ToString());
+    }
+}
+
+static void ParsePathPredicates(
+    RootDatasetCatalog &catalog,
+    DatasetBindData &bind,
+    const std::string &raw_json) {
+
+    if (raw_json.empty()) {
+        return;
+    }
+
+    auto json = nlohmann::json::parse(raw_json);
+
+    if (!json.is_array()) {
+        throw InvalidInputException(
+            "path_predicates must be a JSON array");
+    }
+
+    for (const auto &item : json) {
+        if (!item.is_object() ||
+            !item.contains("path") ||
+            !item.contains("op")) {
+            throw InvalidInputException(
+                "Each path predicate needs path and op");
+        }
+
+        PathPredicateBinding predicate;
+
+        predicate.path =
+            NormalizePath(
+                item.at("path").get<std::string>());
+
+        predicate.op =
+            ParsePathPredicateOp(
+                item.at("op").get<std::string>());
+
+        const auto quantifier =
+            item.value(
+                "quantifier",
+                std::string("any"));
+
+        predicate.require_all_values =
+            quantifier == "all";
+
+        if (quantifier != "any" &&
+            quantifier != "all") {
+            throw InvalidInputException(
+                "path predicate quantifier "
+                "must be any or all");
+        }
+
+        // Resolve physical type BEFORE parsing constants.
+        predicate.schemas =
+            catalog.LoadPathSchemas(
+                predicate.path,
+                predicate.value_type,
+                predicate.schema_lookup);
+
+        auto add_value =
+            [&](const nlohmann::json &value) {
+                predicate.values.push_back(
+                    PathPredicateJsonValue(
+                        value,
+                        predicate.value_type));
+            };
+
+        if (predicate.op == PathPredicateOp::IN) {
+            if (!item.contains("values") ||
+                !item.at("values").is_array()) {
+                throw InvalidInputException(
+                    "IN path predicate needs values array");
+            }
+
+            for (const auto &value :
+                 item.at("values")) {
+                add_value(value);
+            }
+
+        } else if (
+            predicate.op ==
+            PathPredicateOp::BETWEEN) {
+
+            if (item.contains("values") &&
+                item.at("values").is_array() &&
+                item.at("values").size() == 2) {
+
+                add_value(item.at("values")[0]);
+                add_value(item.at("values")[1]);
+
+            } else if (
+                item.contains("lower") &&
+                item.contains("upper")) {
+
+                add_value(item.at("lower"));
+                add_value(item.at("upper"));
+
+            } else {
+                throw InvalidInputException(
+                    "BETWEEN path predicate needs "
+                    "lower/upper or two values");
+            }
+
+            if (ComparePathPredicateValues(
+                    predicate.values[0],
+                    predicate.values[1],
+                    predicate.value_type) > 0) {
+                std::swap(
+                    predicate.values[0],
+                    predicate.values[1]);
+            }
+
+        } else {
+            if (!item.contains("value")) {
+                throw InvalidInputException(
+                    "Path predicate needs value");
+            }
+
+            add_value(item.at("value"));
+        }
+
+        if (predicate.values.empty()) {
+            throw InvalidInputException(
+                "Path predicate has no constants");
+        }
+
+        bind.path_predicates.push_back(
+            std::move(predicate));
+    }
+}
+
+static bool PathPredicateValueMatches(
+    const PathPredicateBinding &predicate,
+    const RootPrimitiveValue &value) {
+
+    const auto compare =
+        [&](const RootPrimitiveValue &constant) {
+            return ComparePathPredicateValues(
+                value,
+                constant,
+                predicate.value_type);
+        };
+
+    switch (predicate.op) {
+    case PathPredicateOp::EQ:
+        return compare(predicate.values[0]) == 0;
+
+    case PathPredicateOp::NE:
+        return compare(predicate.values[0]) != 0;
+
+    case PathPredicateOp::LT:
+        return compare(predicate.values[0]) < 0;
+
+    case PathPredicateOp::LE:
+        return compare(predicate.values[0]) <= 0;
+
+    case PathPredicateOp::GT:
+        return compare(predicate.values[0]) > 0;
+
+    case PathPredicateOp::GE:
+        return compare(predicate.values[0]) >= 0;
+
+    case PathPredicateOp::BETWEEN:
+        return
+            compare(predicate.values[0]) >= 0 &&
+            compare(predicate.values[1]) <= 0;
+
+    case PathPredicateOp::IN:
+        return std::any_of(
+            predicate.values.begin(),
+            predicate.values.end(),
+            [&](const RootPrimitiveValue &constant) {
+                return compare(constant) == 0;
+            });
+    }
+
     return false;
 }
 
-static bool PathPredicateEventMatches(const PathPredicateBinding &predicate, const std::vector<double> &values) {
-    if (values.empty()) return false;
-    if (predicate.require_all_values) {
-        return std::all_of(values.begin(), values.end(), [&](double value) {
-            return PathPredicateValueMatches(predicate, value);
-        });
+static bool PathPredicateEventMatches(
+    const PathPredicateBinding &predicate,
+    const std::vector<RootPrimitiveValue> &values) {
+
+    if (values.empty()) {
+        return false;
     }
-    return std::any_of(values.begin(), values.end(), [&](double value) {
-        return PathPredicateValueMatches(predicate, value);
-    });
+
+    if (predicate.require_all_values) {
+        return std::all_of(
+            values.begin(),
+            values.end(),
+            [&](const RootPrimitiveValue &value) {
+                return PathPredicateValueMatches(
+                    predicate, value);
+            });
+    }
+
+    return std::any_of(
+        values.begin(),
+        values.end(),
+        [&](const RootPrimitiveValue &value) {
+            return PathPredicateValueMatches(
+                predicate, value);
+        });
 }
 
 static std::optional<double> FilterConstantAsPhysicalDouble(const Value &value, const LogicalType &physical_type) {
@@ -568,6 +866,104 @@ static bool PassesFilters(ClientContext &context, DatasetLocalState &local, cons
         }
         if (!local.filter_evaluator.Evaluate(context, *entry.second, actual)) return false;
     }
+    return true;
+}
+
+static RootScalarActual DatasetPrimitiveActual(
+    const LogicalType &type,
+    const RootPrimitiveValue &value) {
+    switch (value.kind) {
+    case RootPrimitiveKind::SIGNED:
+        return RootScalarActual::Signed(
+            value.signed_value, type);
+
+    case RootPrimitiveKind::UNSIGNED:
+        return RootScalarActual::Unsigned(
+            value.unsigned_value, type);
+
+    case RootPrimitiveKind::FLOATING:
+        return RootScalarActual::Numeric(
+            type, value.floating_value);
+    }
+
+    return RootScalarActual::Null(type);
+}
+
+static bool PassesTypedFilters(
+    ClientContext &context,
+    DatasetLocalState &local,
+    const DatasetBindData &bind,
+    const DatasetGlobalState &global,
+    uint64_t event_fk,
+    const RootPrimitiveValue &numeric_value,
+    const int32_t *indices,
+    idx_t index_count) {
+
+    if (!global.filters) return true;
+
+    for (const auto &entry : global.filters->filters) {
+        const auto scan_position = entry.first;
+
+        if (scan_position >= global.scan_column_ids.size()) {
+            continue;
+        }
+
+        const column_t column =
+            global.scan_column_ids[scan_position];
+
+        RootScalarActual actual;
+
+        if (column == 0) {
+            actual = RootScalarActual::Event(event_fk);
+
+        } else if (
+            column >= 1 &&
+            static_cast<idx_t>(column) < bind.value_column) {
+
+            const idx_t index_position =
+                static_cast<idx_t>(column) - 1;
+
+            actual = RootScalarActual::Index(
+                index_position < index_count
+                    ? std::optional<int32_t>(
+                          indices[index_position])
+                    : std::nullopt);
+
+        } else if (
+            static_cast<idx_t>(column) ==
+            bind.value_column) {
+
+            actual = DatasetPrimitiveActual(
+                bind.value_type, numeric_value);
+
+        } else if (
+            static_cast<idx_t>(column) ==
+            bind.source_id_column) {
+
+            actual =
+                RootScalarActual::String(
+                    local.value_source_id);
+
+        } else if (
+            static_cast<idx_t>(column) ==
+            bind.entry_id_column) {
+
+            actual =
+                RootScalarActual::Event(
+                    local.value_entry_id);
+
+        } else {
+            actual =
+                RootScalarActual::Null(
+                    LogicalType::SQLNULL);
+        }
+
+        if (!local.filter_evaluator.Evaluate(
+                context, *entry.second, actual)) {
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -872,45 +1268,122 @@ static std::string IdListSQL(const std::vector<SchemaBinding> &schemas, bool col
     return out;
 }
 
-static bool PredicateMetadataMayMatch(const PathPredicateBinding &predicate,
-                                      const Value &min_value, const Value &max_value,
-                                      uint64_t nan_count, uint64_t pos_inf_count,
-                                      uint64_t neg_inf_count, const Value &bloom_value) {
-    const bool has_finite = !min_value.IsNull() && !max_value.IsNull();
-    const double min_number = has_finite ? min_value.GetValue<double>() : 0.0;
-    const double max_number = has_finite ? max_value.GetValue<double>() : 0.0;
+static bool PredicateMetadataMayMatch(
+    const PathPredicateBinding &predicate,
+    const Value &min_value,
+    const Value &max_value,
+    uint64_t nan_count,
+    uint64_t pos_inf_count,
+    uint64_t neg_inf_count,
+    const Value &bloom_value) {
+
+    // Current index-format min/max/Bloom transport is DOUBLE.
+    // Never prune 64-bit integer predicates through it.
+    if (!UsesDoubleBackedValueMetadata(
+            predicate.value_type)) {
+        return true;
+    }
+
+    const bool has_finite =
+        !min_value.IsNull() &&
+        !max_value.IsNull();
+
+    const double min_number =
+        has_finite
+            ? min_value.GetValue<double>()
+            : 0.0;
+
+    const double max_number =
+        has_finite
+            ? max_value.GetValue<double>()
+            : 0.0;
+
     const string *bloom = nullptr;
     string bloom_storage;
+
     if (!bloom_value.IsNull()) {
-        bloom_storage = StringValue::Get(bloom_value);
+        bloom_storage =
+            StringValue::Get(bloom_value);
+
         bloom = &bloom_storage;
     }
-    auto equality_possible = [&](double constant) {
-        if (!std::isfinite(constant) || !has_finite || constant < min_number || constant > max_number) return false;
-        return !bloom || BloomMayContain(*bloom, constant);
-    };
+
+    auto constant =
+        [&](idx_t index) {
+            return predicate.values[index].AsDouble();
+        };
+
+    auto equality_possible =
+        [&](double value) {
+            if (!std::isfinite(value) ||
+                !has_finite ||
+                value < min_number ||
+                value > max_number) {
+                return false;
+            }
+
+            return
+                !bloom ||
+                BloomMayContain(*bloom, value);
+        };
+
     switch (predicate.op) {
     case PathPredicateOp::EQ:
-        return equality_possible(predicate.values[0]);
+        return equality_possible(constant(0));
+
     case PathPredicateOp::NE:
-        if (nan_count || pos_inf_count || neg_inf_count) return true;
-        return !has_finite || min_number != predicate.values[0] || max_number != predicate.values[0];
+        if (nan_count ||
+            pos_inf_count ||
+            neg_inf_count) {
+            return true;
+        }
+
+        return
+            !has_finite ||
+            min_number != constant(0) ||
+            max_number != constant(0);
+
     case PathPredicateOp::LT:
-        return neg_inf_count || (has_finite && min_number < predicate.values[0]);
+        return
+            neg_inf_count ||
+            (has_finite &&
+             min_number < constant(0));
+
     case PathPredicateOp::LE:
-        return neg_inf_count || (has_finite && min_number <= predicate.values[0]);
+        return
+            neg_inf_count ||
+            (has_finite &&
+             min_number <= constant(0));
+
     case PathPredicateOp::GT:
-        return pos_inf_count || (has_finite && max_number > predicate.values[0]);
+        return
+            pos_inf_count ||
+            (has_finite &&
+             max_number > constant(0));
+
     case PathPredicateOp::GE:
-        return pos_inf_count || (has_finite && max_number >= predicate.values[0]);
+        return
+            pos_inf_count ||
+            (has_finite &&
+             max_number >= constant(0));
+
     case PathPredicateOp::BETWEEN:
-        return has_finite && max_number >= predicate.values[0] && min_number <= predicate.values[1];
+        return
+            has_finite &&
+            max_number >= constant(0) &&
+            min_number <= constant(1);
+
     case PathPredicateOp::IN:
-        for (double value : predicate.values) {
-            if (equality_possible(value)) return true;
+        for (const auto &value :
+             predicate.values) {
+            if (equality_possible(
+                    value.AsDouble())) {
+                return true;
+            }
         }
         return false;
     }
+
     return true;
 }
 
@@ -1012,7 +1485,11 @@ static std::unordered_map<std::string, std::vector<EntryInterval>> LoadPredicate
         snapshot_clause = " AND f.snapshot_id=" + SqlLiteral(bind.sources.snapshot_id) +
                           " AND b.snapshot_id=" + SqlLiteral(bind.sources.snapshot_id);
     }
-    const bool needs_bloom = predicate.op == PathPredicateOp::EQ || predicate.op == PathPredicateOp::IN;
+    const bool needs_bloom =
+        UsesDoubleBackedValueMetadata(
+            predicate.value_type) &&
+        (predicate.op == PathPredicateOp::EQ ||
+         predicate.op == PathPredicateOp::IN);
     const auto sql =
         "SELECT f.file_id, b.entry_begin, b.entry_end, b.min_value, b.max_value, b.nan_count, "
         "b.pos_inf_count, b.neg_inf_count, " + std::string(needs_bloom ? "b.bloom_filter" : "NULL::BLOB") +
@@ -1144,11 +1621,38 @@ void DatasetTaskPlanner::Plan(
         predicate += " AND f.snapshot_id = " + SqlLiteral(bind.sources.snapshot_id);
         predicate += " AND b.snapshot_id = " + SqlLiteral(bind.sources.snapshot_id);
     }
-    if (auto value_filter = FilterForFullColumn(global, static_cast<column_t>(bind.value_column))) {
-        const auto file_clause = ZonemapClause(*value_filter, "f.min_value", "f.max_value", bind.value_type);
-        const auto basket_clause = ZonemapClause(*value_filter, "b.min_value", "b.max_value", bind.value_type);
-        if (!file_clause.empty()) predicate += " AND ((" + file_clause + ") OR f.nan_count > 0)";
-        if (!basket_clause.empty()) predicate += " AND ((" + basket_clause + ") OR b.nan_count > 0)";
+    if (UsesDoubleBackedValueMetadata(bind.value_type)) {
+        if (auto value_filter =
+                FilterForFullColumn(
+                    global,
+                    static_cast<column_t>(
+                        bind.value_column))) {
+            const auto file_clause =
+                ZonemapClause(
+                    *value_filter,
+                    "f.min_value",
+                    "f.max_value",
+                    bind.value_type);
+
+            const auto basket_clause =
+                ZonemapClause(
+                    *value_filter,
+                    "b.min_value",
+                    "b.max_value",
+                    bind.value_type);
+
+            if (!file_clause.empty()) {
+                predicate +=
+                    " AND ((" + file_clause +
+                    ") OR f.nan_count > 0)";
+            }
+
+            if (!basket_clause.empty()) {
+                predicate +=
+                    " AND ((" + basket_clause +
+                    ") OR b.nan_count > 0)";
+            }
+        }
     }
     if (auto entry_filter = FilterForFullColumn(global, static_cast<column_t>(bind.entry_id_column))) {
         const auto file_clause = ZonemapClause(*entry_filter, "f.event_base",
@@ -1172,8 +1676,16 @@ void DatasetTaskPlanner::Plan(
         if (!source_clause.empty()) predicate += " AND (" + source_clause + ")";
     }
 
-    auto value_filter = FilterForFullColumn(global, static_cast<column_t>(bind.value_column));
-    const bool needs_bloom = value_filter && FilterNeedsBloom(*value_filter);
+    auto value_filter =
+        FilterForFullColumn(
+            global,
+            static_cast<column_t>(
+                bind.value_column));
+
+    const bool needs_bloom =
+        UsesDoubleBackedValueMetadata(bind.value_type) &&
+        value_filter &&
+        FilterNeedsBloom(*value_filter);
     const auto sql =
         "SELECT f.file_id, f.root_uri, f.tree_name, f.schema_id, f.event_base, f.file_size, f.mtime_ns, "
         "b.basket_id, b.entry_begin, b.entry_end, b.flat_value_begin, b.value_count, b.physical_offset, "
@@ -1669,67 +2181,182 @@ bool DatasetScanExecutor::ClaimTask(
 }
 
 bool DatasetScanExecutor::PassesPathPredicates(
-    const DatasetBindData &bind, DatasetLocalState &local,
+    const DatasetBindData &bind,
+    DatasetLocalState &local,
     void *object) const {
-    if (bind.path_predicates.empty()) return true;
-    std::vector<double> predicate_values;
-    std::vector<int32_t> ignored_indices;
-    for (idx_t predicate_index = 0; predicate_index < bind.path_predicates.size(); ++predicate_index) {
-        predicate_values.clear();
-        ignored_indices.clear();
-        const auto &levels = local.predicate_levels[predicate_index];
-        OffsetValueReader::CollectFlat(object, levels, IndexDepth(levels), predicate_values, ignored_indices);
-        if (!PathPredicateEventMatches(bind.path_predicates[predicate_index], predicate_values)) return false;
+
+    if (bind.path_predicates.empty()) {
+        return true;
     }
+
+    for (idx_t predicate_index = 0;
+         predicate_index <
+             bind.path_predicates.size();
+         ++predicate_index) {
+
+        const auto &levels =
+            local.predicate_levels[
+                predicate_index];
+
+        ReadResult result;
+
+        OffsetValueReader::CollectDirect(
+            object,
+            levels,
+            -1,
+            0,
+            result);
+
+        if (!PathPredicateEventMatches(
+                bind.path_predicates[
+                    predicate_index],
+                result.numbers)) {
+            return false;
+        }
+    }
+
     return true;
 }
 
 bool DatasetScanExecutor::LoadNextEntry(
-    const DatasetBindData &bind, DatasetLocalState &local,
+    const DatasetBindData &bind,
+    DatasetLocalState &local,
     DatasetGlobalState &global) {
-    while (local.current_entry < local.current_task.entry_end) {
-        const auto entry = local.current_entry++;
-        RootEntryReader object_entry(local.object_reader);
+
+    const bool typed_transport =
+        RequiresTypedDatasetValue(bind.value_type);
+
+    while (local.current_entry <
+           local.current_task.entry_end) {
+
+        const auto entry =
+            local.current_entry++;
+
+        RootEntryReader object_entry(
+            local.object_reader);
+
         object_entry.Begin(entry);
+
         if (local.path_reader.SerializedActive()) {
-            const auto read = local.path_reader.TryReadSerialized(
-                entry, object_entry, local.values, local.flat_indices);
+            RootPathReadResult read;
+
+            if (typed_transport) {
+                read =
+                    local.path_reader.TryReadSerialized(
+                        entry,
+                        object_entry,
+                        local.typed_values,
+                        local.flat_indices);
+            } else {
+                read =
+                    local.path_reader.TryReadSerialized(
+                        entry,
+                        object_entry,
+                        local.values,
+                        local.flat_indices);
+            }
+
             SyncSerializedCounters(local, global);
-            global.get_entry_calls.fetch_add(object_entry.LoadCount());
-            if (read.fallback_activated) global.fallback_files.fetch_add(1);
+
+            global.get_entry_calls.fetch_add(
+                object_entry.LoadCount());
+
+            if (read.fallback_activated) {
+                global.fallback_files.fetch_add(1);
+            }
+
+            const idx_t decoded_count =
+                typed_transport
+                    ? local.typed_values.size()
+                    : local.values.size();
+
             if (read.decoded) {
                 global.serialized_entry_calls.fetch_add(1);
-                global.serialized_values.fetch_add(local.values.size());
+                global.serialized_values.fetch_add(
+                    decoded_count);
             }
+
             if (read.serialized) {
-                global.decoded_values.fetch_add(local.values.size());
+                global.decoded_values.fetch_add(
+                    decoded_count);
+
                 local.value_offset = 0;
-                local.value_event_fk = local.current_task.event_base + entry;
+                local.value_event_fk =
+                    local.current_task.event_base +
+                    entry;
+
                 local.value_entry_id = entry;
-                local.value_source_id = local.current_task.file_id;
-                if (!local.values.empty()) return true;
+                local.value_source_id =
+                    local.current_task.file_id;
+
+                if (decoded_count != 0) {
+                    return true;
+                }
+
                 continue;
             }
-            if (read.fallback_activated && object_entry.LoadCount()) {
+
+            if (read.fallback_activated &&
+                object_entry.LoadCount()) {
                 object_entry.Invalidate();
             }
         }
 
-        const auto prior_loads = object_entry.LoadCount();
+        const auto prior_loads =
+            object_entry.LoadCount();
+
         auto *object = object_entry.Read();
-        global.get_entry_calls.fetch_add(object_entry.LoadCount() - prior_loads);
-        if (!object) continue;
-        if (!PassesPathPredicates(bind, local, object)) continue;
+
+        global.get_entry_calls.fetch_add(
+            object_entry.LoadCount() -
+            prior_loads);
+
+        if (!object) {
+            continue;
+        }
+
+        if (!PassesPathPredicates(
+                bind, local, object)) {
+            continue;
+        }
+
         local.values.clear();
+        local.typed_values.clear();
         local.flat_indices.clear();
-        local.path_reader.CollectFlat(object, local.values, local.flat_indices);
-        global.decoded_values.fetch_add(local.values.size());
+
+        if (typed_transport) {
+            local.path_reader.CollectTypedFlat(
+                object,
+                local.typed_values,
+                local.flat_indices);
+
+            global.decoded_values.fetch_add(
+                local.typed_values.size());
+        } else {
+            local.path_reader.CollectFlat(
+                object,
+                local.values,
+                local.flat_indices);
+
+            global.decoded_values.fetch_add(
+                local.values.size());
+        }
+
         local.value_offset = 0;
-        local.value_event_fk = local.current_task.event_base + entry;
+        local.value_event_fk =
+            local.current_task.event_base + entry;
+
         local.value_entry_id = entry;
-        local.value_source_id = local.current_task.file_id;
-        if (!local.values.empty()) return true;
+        local.value_source_id =
+            local.current_task.file_id;
+
+        if (typed_transport
+                ? !local.typed_values.empty()
+                : !local.values.empty()) {
+            return true;
+        }
     }
+
     return false;
 }
 
@@ -1750,6 +2377,32 @@ void DatasetScanExecutor::SetDoubleAsType(
     case LogicalTypeId::DOUBLE: FlatVector::GetData<double>(vector)[row] = value; break;
     default: throw NotImplementedException("Unsupported ROOT dataset output type " + type.ToString());
     }
+    FlatVector::Validity(vector).SetValid(row);
+}
+
+void DatasetScanExecutor::SetPrimitiveAsType(
+    Vector &vector,
+    idx_t row,
+    const LogicalType &type,
+    const RootPrimitiveValue &value) const {
+
+    switch (type.id()) {
+    case LogicalTypeId::BIGINT:
+        FlatVector::GetData<int64_t>(vector)[row] =
+            value.AsSigned();
+        break;
+
+    case LogicalTypeId::UBIGINT:
+        FlatVector::GetData<uint64_t>(vector)[row] =
+            value.AsUnsigned();
+        break;
+
+    default:
+        throw InternalException(
+            "Typed dataset writer used for non-64-bit type " +
+            type.ToString());
+    }
+
     FlatVector::Validity(vector).SetValid(row);
 }
 
@@ -1793,6 +2446,101 @@ void DatasetScanExecutor::EmitProjectedRow(
 unique_ptr<LocalTableFunctionState> DatasetScanStateFactory::CreateLocal() {
     auto local = make_uniq<DatasetLocalState>();
     return std::move(local);
+}
+
+void DatasetScanExecutor::EmitProjectedTypedRow(
+    const DatasetBindData &bind,
+    const DatasetGlobalState &global,
+    DataChunk &output,
+    idx_t output_row,
+    uint64_t event_fk,
+    const std::string &source_id,
+    uint64_t entry_id,
+    const RootPrimitiveValue &numeric_value,
+    const int32_t *indices,
+    idx_t index_count) const {
+
+    for (idx_t output_col = 0;
+         output_col < global.output_column_ids.size();
+         ++output_col) {
+
+        const auto full_col =
+            global.output_column_ids[output_col];
+
+        auto &vector = output.data[output_col];
+
+        if (full_col == COLUMN_IDENTIFIER_EMPTY) {
+            FlatVector::Validity(vector)
+                .SetInvalid(output_row);
+
+        } else if (
+            full_col == COLUMN_IDENTIFIER_ROW_ID ||
+            full_col == 0) {
+
+            FlatVector::GetData<uint64_t>(
+                vector)[output_row] = event_fk;
+
+            FlatVector::Validity(vector)
+                .SetValid(output_row);
+
+        } else if (
+            full_col >= 1 &&
+            static_cast<idx_t>(full_col) <
+                bind.value_column) {
+
+            const idx_t index_position =
+                static_cast<idx_t>(full_col) - 1;
+
+            if (index_position < index_count) {
+                FlatVector::GetData<int32_t>(
+                    vector)[output_row] =
+                    indices[index_position];
+
+                FlatVector::Validity(vector)
+                    .SetValid(output_row);
+            } else {
+                FlatVector::Validity(vector)
+                    .SetInvalid(output_row);
+            }
+
+        } else if (
+            static_cast<idx_t>(full_col) ==
+            bind.value_column) {
+
+            SetPrimitiveAsType(
+                vector,
+                output_row,
+                bind.value_type,
+                numeric_value);
+
+        } else if (
+            static_cast<idx_t>(full_col) ==
+            bind.source_id_column) {
+
+            FlatVector::GetData<string_t>(
+                vector)[output_row] =
+                StringVector::AddString(
+                    vector, source_id);
+
+            FlatVector::Validity(vector)
+                .SetValid(output_row);
+
+        } else if (
+            static_cast<idx_t>(full_col) ==
+            bind.entry_id_column) {
+
+            FlatVector::GetData<uint64_t>(
+                vector)[output_row] =
+                entry_id;
+
+            FlatVector::Validity(vector)
+                .SetValid(output_row);
+
+        } else {
+            FlatVector::Validity(vector)
+                .SetInvalid(output_row);
+        }
+    }
 }
 
 idx_t DatasetScanExecutor::ReserveOutputRows(
@@ -1846,37 +2594,121 @@ void DatasetScanExecutor::Scan(
         return;
     }
 
+    const bool typed_transport =
+        RequiresTypedDatasetValue(bind.value_type);
+
     while (output_count < STANDARD_VECTOR_SIZE) {
         if (!local.has_task) {
-            if (!ClaimTask(bind, global, local)) break;
+            if (!ClaimTask(bind, global, local)) {
+                break;
+            }
         }
-        if (local.value_offset >= local.values.size()) {
-            if (!LoadNextEntry(bind, local, global)) {
+
+        const idx_t available =
+            typed_transport
+                ? local.typed_values.size()
+                : local.values.size();
+
+        if (local.value_offset >= available) {
+            if (!LoadNextEntry(
+                    bind, local, global)) {
                 local.has_task = false;
                 global.completed_tasks.fetch_add(1);
                 continue;
             }
         }
-        while (local.value_offset < local.values.size() && output_count < STANDARD_VECTOR_SIZE) {
-            const auto value_index = local.value_offset++;
-            const auto numeric_value = local.values[value_index];
-            const idx_t index_count = bind.index_names.size();
-            const int32_t *indices = index_count ? local.flat_indices.data() + value_index * index_count : nullptr;
-            if (!PassesFilters(context, local, bind, global, local.value_event_fk, numeric_value, indices,
-                               index_count)) {
-                continue;
+
+        const idx_t loaded =
+            typed_transport
+                ? local.typed_values.size()
+                : local.values.size();
+
+        while (local.value_offset < loaded &&
+               output_count < STANDARD_VECTOR_SIZE) {
+
+            const auto value_index =
+                local.value_offset++;
+
+            const idx_t index_count =
+                bind.index_names.size();
+
+            const int32_t *indices =
+                index_count
+                    ? local.flat_indices.data() +
+                          value_index * index_count
+                    : nullptr;
+
+            if (typed_transport) {
+                const auto &numeric_value =
+                    local.typed_values[value_index];
+
+                if (!PassesTypedFilters(
+                        context,
+                        local,
+                        bind,
+                        global,
+                        local.value_event_fk,
+                        numeric_value,
+                        indices,
+                        index_count)) {
+                    continue;
+                }
+
+                if (ReserveOutputRows(global, 1) == 0) {
+                    output.SetCardinality(output_count);
+                    return;
+                }
+
+                EmitProjectedTypedRow(
+                    bind,
+                    global,
+                    output,
+                    output_count++,
+                    local.value_event_fk,
+                    local.value_source_id,
+                    local.value_entry_id,
+                    numeric_value,
+                    indices,
+                    index_count);
+
+            } else {
+                const auto numeric_value =
+                    local.values[value_index];
+
+                if (!PassesFilters(
+                        context,
+                        local,
+                        bind,
+                        global,
+                        local.value_event_fk,
+                        numeric_value,
+                        indices,
+                        index_count)) {
+                    continue;
+                }
+
+                if (ReserveOutputRows(global, 1) == 0) {
+                    output.SetCardinality(output_count);
+                    return;
+                }
+
+                EmitProjectedRow(
+                    bind,
+                    global,
+                    output,
+                    output_count++,
+                    local.value_event_fk,
+                    local.value_source_id,
+                    local.value_entry_id,
+                    numeric_value,
+                    indices,
+                    index_count);
             }
-            if (ReserveOutputRows(global, 1) == 0) {
-                output.SetCardinality(output_count);
-                return;
-            }
-            EmitProjectedRow(bind, global, output, output_count++, local.value_event_fk,
-                             local.value_source_id, local.value_entry_id, numeric_value, indices, index_count);
         }
     }
+
     output.SetCardinality(output_count);
 }
-
 
 InsertionOrderPreservingMap<string> DatasetScanExplain::Bound(
     TableFunctionToStringInput &input) const {

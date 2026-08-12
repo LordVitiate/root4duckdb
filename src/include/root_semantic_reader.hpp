@@ -147,6 +147,35 @@ struct RootPrimitiveValue {
             "Unsupported primitive ROOT type: " + raw_type);
     }
 
+    static RootPrimitiveValue FromDouble(
+        double value, const std::string &raw_type) {
+        switch (RootTypeToLogicalType(raw_type).id()) {
+        case LogicalTypeId::BOOLEAN:
+        case LogicalTypeId::UTINYINT:
+        case LogicalTypeId::USMALLINT:
+        case LogicalTypeId::UINTEGER:
+            return Unsigned(static_cast<uint64_t>(value));
+
+        case LogicalTypeId::TINYINT:
+        case LogicalTypeId::SMALLINT:
+        case LogicalTypeId::INTEGER:
+            return Signed(static_cast<int64_t>(value));
+
+        case LogicalTypeId::FLOAT:
+        case LogicalTypeId::DOUBLE:
+            return Floating(value);
+
+        case LogicalTypeId::BIGINT:
+        case LogicalTypeId::UBIGINT:
+            throw InternalException(
+                "Lossy double-to-64-bit ROOT primitive conversion was attempted");
+
+        default:
+            throw NotImplementedException(
+                "Unsupported ROOT primitive type: " + raw_type);
+        }
+    }
+
     int64_t AsSigned() const {
         switch (kind) {
         case RootPrimitiveKind::SIGNED:

@@ -95,6 +95,81 @@ RootPathReadResult RootPathReader::TryReadSerialized(
     return {true, true, false};
 }
 
+RootPathReadResult RootPathReader::TryReadSerialized(
+    uint64_t entry, RootEntryReader &object_entry,
+    std::vector<RootPrimitiveValue> &values,
+    std::vector<int32_t> &flat_indices,
+    bool collect_indices) {
+
+    std::vector<double> decoded_values;
+
+    const auto result = TryReadSerialized(
+        entry,
+        object_entry,
+        decoded_values,
+        flat_indices,
+        collect_indices);
+
+    values.clear();
+
+    if (!result.serialized) {
+        return result;
+    }
+
+    const auto logical_type =
+        RootTypeToScanLogicalType(
+            serialized_plan.value_type,
+            false,
+            true);
+
+    values.reserve(decoded_values.size());
+
+    for (const double value : decoded_values) {
+        switch (logical_type.id()) {
+        case LogicalTypeId::BOOLEAN:
+            values.push_back(
+                RootPrimitiveValue::Unsigned(
+                    value != 0.0 ? 1 : 0));
+            break;
+
+        case LogicalTypeId::TINYINT:
+        case LogicalTypeId::SMALLINT:
+        case LogicalTypeId::INTEGER:
+            values.push_back(
+                RootPrimitiveValue::Signed(
+                    static_cast<int64_t>(value)));
+            break;
+
+        case LogicalTypeId::UTINYINT:
+        case LogicalTypeId::USMALLINT:
+        case LogicalTypeId::UINTEGER:
+            values.push_back(
+                RootPrimitiveValue::Unsigned(
+                    static_cast<uint64_t>(value)));
+            break;
+
+        case LogicalTypeId::FLOAT:
+        case LogicalTypeId::DOUBLE:
+            values.push_back(
+                RootPrimitiveValue::Floating(value));
+            break;
+
+        case LogicalTypeId::BIGINT:
+        case LogicalTypeId::UBIGINT:
+            throw InternalException(
+                "64-bit integer reached double-backed serialized "
+                "transport despite lossless guard");
+
+        default:
+            throw NotImplementedException(
+                "Unsupported serialized ROOT numeric type " +
+                logical_type.ToString());
+        }
+    }
+
+    return result;
+}
+
 void RootPathReader::Reset() {
     serialized_reader.Reset();
     tree = nullptr;
@@ -120,6 +195,59 @@ void RootPathReader::CollectFlat(
     std::vector<int32_t> &flat_indices) const {
     OffsetValueReader::CollectFlat(
         object, levels, index_depth, values, flat_indices);
+}
+
+void RootPathReader::CollectTypedValues(
+    void *object,
+    std::vector<RootPrimitiveValue> &values) const {
+
+    ReadResult result;
+
+    OffsetValueReader::CollectDirect(
+        object,
+        levels,
+        -1,
+        0,
+        result);
+
+    values = std::move(result.numbers);
+}
+
+void RootPathReader::CollectTypedFlat(
+    void *object,
+    std::vector<RootPrimitiveValue> &values,
+    std::vector<int32_t> &flat_indices) const {
+
+    ReadResult result;
+
+    OffsetValueReader::CollectDirect(
+        object,
+        levels,
+        -1,
+        0,
+        result);
+
+    values = std::move(result.numbers);
+
+    flat_indices.clear();
+    flat_indices.reserve(
+        result.vector_indices.size() * index_depth);
+
+    for (const auto &indices : result.vector_indices) {
+        if (indices.size() != index_depth) {
+            throw IOException(
+                "ROOT container depth mismatch in typed path reader: "
+                "expected " +
+                std::to_string(index_depth) +
+                ", got " +
+                std::to_string(indices.size()));
+        }
+
+        for (const auto index : indices) {
+            flat_indices.push_back(
+                static_cast<int32_t>(index));
+        }
+    }
 }
 
 void RootPathReader::CollectDirect(void *object, int64_t max_values,

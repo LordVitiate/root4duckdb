@@ -268,7 +268,7 @@ feature_checks: dict[str, list[str]] = {
         "RootEntryReader object_entry",
         "RootPathReader reader",
         "path.reader.TryReadSerialized",
-        "path.reader.CollectValues",
+        "path.reader.CollectTypedValues",
     ],
     "src/root_dataset_catalog.cpp": [
         "RootDatasetCatalog::ResolveSources",

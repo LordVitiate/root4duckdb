@@ -88,19 +88,35 @@ struct BasketAccumulator {
         : basket_id(id), bloom(bloom_bytes, bloom_fpr) {
     }
 
-    void Add(double value) {
+    void Add(
+        const RootPrimitiveValue &value,
+        bool statistics_enabled) {
         ++value_count;
-        if (std::isnan(value)) {
-            ++nan_count;
-        } else if (std::isinf(value)) {
-            if (value > 0) ++pos_inf_count;
-            else ++neg_inf_count;
-        } else {
-            min_value = std::min(min_value, value);
-            max_value = std::max(max_value, value);
-            bloom.Add(value);
-            ++finite_count;
+
+        if (!statistics_enabled) {
+            return;
         }
+
+        const double number = value.AsDouble();
+
+        if (std::isnan(number)) {
+            ++nan_count;
+            return;
+        }
+
+        if (std::isinf(number)) {
+            if (number > 0) {
+                ++pos_inf_count;
+            } else {
+                ++neg_inf_count;
+            }
+            return;
+        }
+
+        min_value = std::min(min_value, number);
+        max_value = std::max(max_value, number);
+        bloom.Add(number);
+        ++finite_count;
     }
 
     uint32_t basket_id = 0;
@@ -128,6 +144,7 @@ struct IndexedPathPlan {
     std::string column_id;
     std::vector<BasketAccumulator> baskets;
     idx_t active_basket = 0;
+    bool statistics_double_safe = true;
 };
 
 void ApplyRootBasketMetadata(BasketAccumulator &basket, TBasket *root_basket) {
@@ -162,13 +179,15 @@ IndexedPathPlan PreparePath(const RootIndexBuildOptions &options,
     plan.logical_path = logical_path;
     auto parsed = ParsePath(logical_path);
     auto levels = PathResolver::Resolve(root_class, parsed.fields);
-    if (!levels.back().is_primitive ||
-        !IsLosslessDoubleBackedType(levels.back().type)) {
+    if (!levels.back().is_primitive) {
         throw NotImplementedException(
-            "Indexed ROOT paths currently require a numeric leaf up to 32-bit integer plus FLOAT/DOUBLE; "
+            "Indexed ROOT paths require a primitive numeric leaf; "
             "unsupported leaf type for " + logical_path + ": " +
             levels.back().type);
     }
+
+    plan.statistics_double_safe =
+        IsLosslessDoubleBackedType(levels.back().type);
     plan.schema_id = SchemaFingerprint(parsed.root_class, levels);
     plan.column_id = ColumnId(plan.schema_id, logical_path);
     plan.reader.Resolve(nullptr, object_branch, root_class,
@@ -322,7 +341,7 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
             if (started.fallback_activated) ++fallback_path_count;
         }
 
-        std::vector<double> values;
+        std::vector<RootPrimitiveValue> values;
         std::vector<int32_t> indices;
         RootEntryReader object_entry(object_reader);
         for (uint64_t entry = 0; entry < total_entries; ++entry) {
@@ -366,9 +385,13 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
                         ++basket.null_count;
                         continue;
                     }
-                    path.reader.CollectValues(object, values);
+                    path.reader.CollectTypedValues(object, values);
                 }
-                for (const double value : values) basket.Add(value);
+                for (const auto &value : values) {
+                    basket.Add(
+                        value,
+                        path.statistics_double_safe);
+                }
             }
         }
 
@@ -436,7 +459,10 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(
                 row.nan_count = basket.nan_count;
                 row.pos_inf_count = basket.pos_inf_count;
                 row.neg_inf_count = basket.neg_inf_count;
-                row.bloom_filter = basket.bloom.SerializeAndRelease();
+                row.bloom_filter =
+                    path.statistics_double_safe
+                        ? basket.bloom.SerializeAndRelease()
+                        : std::string{};
                 metadata.baskets.push_back(std::move(row));
                 flat_value_begin += basket.value_count;
                 total_values += basket.value_count;

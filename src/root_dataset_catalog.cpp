@@ -39,6 +39,25 @@ bool IsInternalIcebergRelation(const std::string &source) {
            source.size() >= 2 && source.back() == ')';
 }
 
+bool IsIndexedNumericType(const LogicalType &type) {
+    switch (type.id()) {
+    case LogicalTypeId::BOOLEAN:
+    case LogicalTypeId::TINYINT:
+    case LogicalTypeId::UTINYINT:
+    case LogicalTypeId::SMALLINT:
+    case LogicalTypeId::USMALLINT:
+    case LogicalTypeId::INTEGER:
+    case LogicalTypeId::UINTEGER:
+    case LogicalTypeId::BIGINT:
+    case LogicalTypeId::UBIGINT:
+    case LogicalTypeId::FLOAT:
+    case LogicalTypeId::DOUBLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
 std::vector<std::string> SplitIndexNames(const std::string &signature) {
     std::vector<std::string> result;
     std::stringstream stream(signature);
@@ -327,12 +346,13 @@ DatasetSchemaSet RootDatasetCatalog::LoadSchemas(
         result.schemas.push_back(std::move(schema));
     }
     result.index_names = SplitIndexNames(*common_signature);
-    if (!IsLosslessDoubleBackedType(*common_type)) {
+    result.value_type = RootTypeToLogicalType(*common_type);
+
+    if (!IsIndexedNumericType(result.value_type)) {
         throw NotImplementedException(
-            "The indexed lakehouse path currently supports numeric leaves up to 32-bit integers plus FLOAT/DOUBLE; "
+            "The indexed lakehouse path requires a primitive numeric leaf; "
             "unsupported leaf type: " + *common_type);
     }
-    result.value_type = RootTypeToLogicalType(*common_type);
     return result;
 }
 
@@ -357,12 +377,19 @@ std::vector<SchemaBinding> RootDatasetCatalog::LoadPathSchemas(
         }
         lookup[schema.schema_id] = i;
     }
-    if (!common_type || !IsLosslessDoubleBackedType(*common_type)) {
+    if (!common_type) {
         throw NotImplementedException(
-            "Path predicates currently require numeric indexed leaves: " +
+            "Path predicates require a numeric indexed leaf: " +
             logical_path);
     }
+
     value_type = RootTypeToLogicalType(*common_type);
+
+    if (!IsIndexedNumericType(value_type)) {
+        throw NotImplementedException(
+            "Path predicates require a primitive numeric indexed leaf: " +
+            logical_path);
+    }
     return schemas;
 }
 

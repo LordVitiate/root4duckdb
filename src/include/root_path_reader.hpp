@@ -47,11 +47,23 @@ public:
         uint64_t entry, RootEntryReader &object_entry,
         std::vector<double> &values, std::vector<int32_t> &flat_indices,
         bool collect_indices = true);
+    RootPathReadResult TryReadSerialized(
+        uint64_t entry, RootEntryReader &object_entry,
+        std::vector<RootPrimitiveValue> &values,
+        std::vector<int32_t> &flat_indices,
+        bool collect_indices = true);
     void Reset();
 
     void CollectValues(void *object, std::vector<double> &values) const;
     void CollectFlat(void *object, std::vector<double> &values,
                      std::vector<int32_t> &flat_indices) const;
+    void CollectTypedValues(
+        void *object,
+        std::vector<RootPrimitiveValue> &values) const;
+    void CollectTypedFlat(
+        void *object,
+        std::vector<RootPrimitiveValue> &values,
+        std::vector<int32_t> &flat_indices) const;
     void CollectDirect(void *object, int64_t max_values, int64_t event_id,
                        ReadResult &result) const;
 
