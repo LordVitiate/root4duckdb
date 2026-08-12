@@ -28,6 +28,7 @@ struct RootScalarActual {
     static RootScalarActual Null(const LogicalType &type);
     static RootScalarActual Event(uint64_t value);
     static RootScalarActual Signed(int64_t value, const LogicalType &type = LogicalType::BIGINT);
+    static RootScalarActual Unsigned(uint64_t value, const LogicalType &type = LogicalType::UBIGINT);
     static RootScalarActual Index(std::optional<int32_t> value);
     static RootScalarActual String(std::string value);
     static RootScalarActual Numeric(const LogicalType &type, double value);

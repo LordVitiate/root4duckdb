@@ -40,6 +40,15 @@ RootScalarActual RootScalarActual::Signed(int64_t value, const LogicalType &logi
     return result;
 }
 
+RootScalarActual RootScalarActual::Unsigned(
+    uint64_t value, const LogicalType &logical_type) {
+    RootScalarActual result;
+    result.type = logical_type;
+    result.unsigned_value = value;
+    result.numeric = static_cast<double>(value);
+    return result;
+}
+
 RootScalarActual RootScalarActual::Index(std::optional<int32_t> value) {
     RootScalarActual result;
     result.type = LogicalType::INTEGER;

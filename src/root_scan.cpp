@@ -306,7 +306,7 @@ private:
         ClientContext &context, const RootScanBindData &bind_data,
         RootScanGlobalState &global, RootScanLocalState &local,
         DataChunk &output);
-    bool WriteNumericValue(Vector &vector, idx_t row, double value);
+    bool WriteNumericValue(Vector &vector, idx_t row, const rootlake::RootPrimitiveValue &value);
     std::optional<int32_t> ResolveCachedIndexValue(
         const RootScanBindData &bind_data,
         const RootScanLocalState &local, idx_t column_index,
@@ -322,7 +322,7 @@ private:
     bool PassesDirectBranchFilters(
         ClientContext &context, const RootScanBindData &bind_data,
         const RootScanGlobalState &global, RootScanLocalState &local,
-        uint64_t entry, double value);
+        uint64_t entry, const rootlake::RootPrimitiveValue &value);
     void ProcessDirectBranch(
         ClientContext &context, const RootScanBindData &bind_data,
         RootScanGlobalState &global, RootScanLocalState &local,
@@ -1380,37 +1380,94 @@ void RootScanExecutor::ProcessBrowseMode(
     output.SetCardinality(count);
 }
 
+static rootlake::RootScalarActual PrimitiveScalarActual(
+    const LogicalType &logical_type,
+    const rootlake::RootPrimitiveValue &value)
+{
+    switch (value.kind)
+    {
+        case rootlake::RootPrimitiveKind::SIGNED:
+            return rootlake::RootScalarActual::Signed(
+                value.signed_value, logical_type);
+
+        case rootlake::RootPrimitiveKind::UNSIGNED:
+            return rootlake::RootScalarActual::Unsigned(
+                value.unsigned_value, logical_type);
+
+        case rootlake::RootPrimitiveKind::FLOATING:
+            return rootlake::RootScalarActual::Numeric(
+                logical_type, value.floating_value);
+    }
+
+    return rootlake::RootScalarActual::Null(logical_type);
+}
+
 bool RootScanExecutor::WriteNumericValue(
-    Vector& vector, idx_t row, double value)
+    Vector& vector, idx_t row,
+    const rootlake::RootPrimitiveValue& value)
 {
     switch (vector.GetType().id())
     {
         case LogicalTypeId::TINYINT:
-            FlatVector::GetData<int8_t>(vector)[row] = static_cast<int8_t>(value); break;
+            FlatVector::GetData<int8_t>(vector)[row] =
+                static_cast<int8_t>(value.AsSigned());
+            break;
+
         case LogicalTypeId::UTINYINT:
-            FlatVector::GetData<uint8_t>(vector)[row] = static_cast<uint8_t>(value); break;
+            FlatVector::GetData<uint8_t>(vector)[row] =
+                static_cast<uint8_t>(value.AsUnsigned());
+            break;
+
         case LogicalTypeId::SMALLINT:
-            FlatVector::GetData<int16_t>(vector)[row] = static_cast<int16_t>(value); break;
+            FlatVector::GetData<int16_t>(vector)[row] =
+                static_cast<int16_t>(value.AsSigned());
+            break;
+
         case LogicalTypeId::USMALLINT:
-            FlatVector::GetData<uint16_t>(vector)[row] = static_cast<uint16_t>(value); break;
+            FlatVector::GetData<uint16_t>(vector)[row] =
+                static_cast<uint16_t>(value.AsUnsigned());
+            break;
+
         case LogicalTypeId::INTEGER:
-            FlatVector::GetData<int32_t>(vector)[row] = static_cast<int32_t>(value); break;
+            FlatVector::GetData<int32_t>(vector)[row] =
+                static_cast<int32_t>(value.AsSigned());
+            break;
+
         case LogicalTypeId::UINTEGER:
-            FlatVector::GetData<uint32_t>(vector)[row] = static_cast<uint32_t>(value); break;
+            FlatVector::GetData<uint32_t>(vector)[row] =
+                static_cast<uint32_t>(value.AsUnsigned());
+            break;
+
         case LogicalTypeId::BIGINT:
-            FlatVector::GetData<int64_t>(vector)[row] = static_cast<int64_t>(value); break;
+            FlatVector::GetData<int64_t>(vector)[row] =
+                value.AsSigned();
+            break;
+
         case LogicalTypeId::UBIGINT:
-            FlatVector::GetData<uint64_t>(vector)[row] = static_cast<uint64_t>(value); break;
+            FlatVector::GetData<uint64_t>(vector)[row] =
+                value.AsUnsigned();
+            break;
+
         case LogicalTypeId::FLOAT:
-            FlatVector::GetData<float>(vector)[row] = static_cast<float>(value); break;
+            FlatVector::GetData<float>(vector)[row] =
+                static_cast<float>(value.AsDouble());
+            break;
+
         case LogicalTypeId::DOUBLE:
-            FlatVector::GetData<double>(vector)[row] = value; break;
+            FlatVector::GetData<double>(vector)[row] =
+                value.AsDouble();
+            break;
+
         case LogicalTypeId::BOOLEAN:
-            FlatVector::GetData<bool>(vector)[row] = value != 0.0; break;
+            FlatVector::GetData<bool>(vector)[row] =
+                value.AsBool();
+            break;
+
         default:
             FlatVector::Validity(vector).SetInvalid(row);
             return false;
     }
+
     FlatVector::Validity(vector).SetValid(row);
     return true;
 }
@@ -1467,7 +1524,7 @@ rootlake::RootScalarActual RootScanExecutor::CachedScalar(
     const auto& result = lstate.cached_results[col_idx];
     if (elem_idx >= result.size()) return rootlake::RootScalarActual::Null(logical_type);
     if (result.is_string_flag[elem_idx]) return rootlake::RootScalarActual::String(result.strings[elem_idx]);
-    return rootlake::RootScalarActual::Numeric(logical_type, result.numbers[elem_idx]);
+    return PrimitiveScalarActual(logical_type, result.numbers[elem_idx]);
 }
 
 bool RootScanExecutor::PassesCachedFilters(
@@ -1488,7 +1545,7 @@ bool RootScanExecutor::PassesCachedFilters(
 bool RootScanExecutor::PassesDirectBranchFilters(
     ClientContext& context, const RootScanBindData& bind_data,
     const RootScanGlobalState& gstate, RootScanLocalState& lstate,
-    uint64_t entry, double value)
+    uint64_t entry, const rootlake::RootPrimitiveValue &value)
 {
     if (!gstate.filters) return true;
     const auto value_type = rootlake::RootTypeToScanLogicalType(
@@ -1501,7 +1558,7 @@ bool RootScanExecutor::PassesDirectBranchFilters(
         if (column == 0 || column == COLUMN_IDENTIFIER_ROW_ID) {
             actual = rootlake::RootScalarActual::Signed(entry);
         } else if (column == 1) {
-            actual = rootlake::RootScalarActual::Numeric(value_type, value);
+            actual = PrimitiveScalarActual(value_type, value);
         } else if (column == bind_data.source_id_column) {
             actual = rootlake::RootScalarActual::Event(lstate.file_task.source_id);
         } else if (column == bind_data.source_path_column) {
@@ -1548,7 +1605,9 @@ void RootScanExecutor::ProcessDirectBranch(
             break;
         }
 
-        const double val = lstate.direct_leaf->GetValue();
+        const auto val = rootlake::RootPrimitiveValue::FromPointer(
+            lstate.direct_leaf->GetValuePointer(),
+            bind_data.direct_branch_info.type_name);
         ++lstate.local_current_row;
         if (!PassesDirectBranchFilters(context, bind_data, gstate, lstate, entry, val)) continue;
 
@@ -1758,7 +1817,7 @@ void RootScanExecutor::ProcessCachedEntry(
             }
             else
             {
-                const double val = res.numbers[elem_idx];
+                const auto& val = res.numbers[elem_idx];
                 if (!WriteNumericValue(vec, out_count, val))
                 {
                     continue;

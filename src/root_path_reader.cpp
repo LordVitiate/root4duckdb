@@ -32,6 +32,14 @@ RootPathReaderStartResult RootPathReader::StartSerialized(
     fallback_recorded = false;
 
     if (options.reader_mode == RootReaderMode::OBJECT) return {};
+    if (rejection_reason.empty() &&
+        serialized_plan.supported &&
+        !IsLosslessDoubleBackedType(serialized_plan.value_type)) {
+        rejection_reason =
+            "serialized reader uses double-backed numeric transport for " +
+            serialized_plan.value_type +
+            "; universal object reader is required for lossless decoding";
+    }
     if (rejection_reason.empty() && !serialized_plan.supported) {
         rejection_reason = serialized_plan.reason.empty()
                                ? "serialized reader is unavailable"

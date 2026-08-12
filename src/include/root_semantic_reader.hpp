@@ -52,6 +52,149 @@ LogicalType RootTypeToScanLogicalType(const std::string &raw_type,
                                       bool is_string, bool is_primitive);
 bool IsLosslessDoubleBackedType(const std::string &raw_type);
 double ReadPrimitiveAsDouble(void *ptr, const std::string &raw_type);
+enum class RootPrimitiveKind : uint8_t {
+    SIGNED,
+    UNSIGNED,
+    FLOATING
+};
+
+struct RootPrimitiveValue {
+    RootPrimitiveKind kind = RootPrimitiveKind::FLOATING;
+    int64_t signed_value = 0;
+    uint64_t unsigned_value = 0;
+    double floating_value = 0.0;
+
+    static RootPrimitiveValue Signed(int64_t value) {
+        RootPrimitiveValue result;
+        result.kind = RootPrimitiveKind::SIGNED;
+        result.signed_value = value;
+        return result;
+    }
+
+    static RootPrimitiveValue Unsigned(uint64_t value) {
+        RootPrimitiveValue result;
+        result.kind = RootPrimitiveKind::UNSIGNED;
+        result.unsigned_value = value;
+        return result;
+    }
+
+    static RootPrimitiveValue Floating(double value) {
+        RootPrimitiveValue result;
+        result.kind = RootPrimitiveKind::FLOATING;
+        result.floating_value = value;
+        return result;
+    }
+
+    static RootPrimitiveValue FromPointer(
+        void *pointer, const std::string &raw_type) {
+        if (!pointer) {
+            return Floating(0.0);
+        }
+
+        const auto type = PrimitiveBaseType(raw_type);
+
+        if (type == "Bool_t" || type == "bool" || type == "O") {
+            return Unsigned(*reinterpret_cast<bool *>(pointer) ? 1 : 0);
+        }
+
+        if (type == "Char_t" || type == "char" || type == "b") {
+            return Signed(*reinterpret_cast<int8_t *>(pointer));
+        }
+        if (type == "UChar_t" || type == "unsigned char" || type == "B") {
+            return Unsigned(*reinterpret_cast<uint8_t *>(pointer));
+        }
+
+        if (type == "Short_t" || type == "short" || type == "S") {
+            return Signed(*reinterpret_cast<int16_t *>(pointer));
+        }
+        if (type == "UShort_t" || type == "unsigned short" || type == "s") {
+            return Unsigned(*reinterpret_cast<uint16_t *>(pointer));
+        }
+
+        if (type == "Int_t" || type == "int" || type == "I") {
+            return Signed(*reinterpret_cast<int32_t *>(pointer));
+        }
+        if (type == "UInt_t" || type == "unsigned int" || type == "i") {
+            return Unsigned(*reinterpret_cast<uint32_t *>(pointer));
+        }
+
+        if (type == "Long_t" || type == "long") {
+            return Signed(static_cast<int64_t>(
+                *reinterpret_cast<long *>(pointer)));
+        }
+        if (type == "ULong_t" || type == "unsigned long") {
+            return Unsigned(static_cast<uint64_t>(
+                *reinterpret_cast<unsigned long *>(pointer)));
+        }
+
+        if (type == "Long64_t" || type == "long long" || type == "L") {
+            return Signed(*reinterpret_cast<int64_t *>(pointer));
+        }
+        if (type == "ULong64_t" ||
+            type == "unsigned long long" ||
+            type == "l") {
+            return Unsigned(*reinterpret_cast<uint64_t *>(pointer));
+        }
+
+        if (type == "Float_t" || type == "float" || type == "F") {
+            return Floating(*reinterpret_cast<float *>(pointer));
+        }
+        if (type == "Double_t" || type == "double" || type == "D") {
+            return Floating(*reinterpret_cast<double *>(pointer));
+        }
+
+        throw NotImplementedException(
+            "Unsupported primitive ROOT type: " + raw_type);
+    }
+
+    int64_t AsSigned() const {
+        switch (kind) {
+        case RootPrimitiveKind::SIGNED:
+            return signed_value;
+        case RootPrimitiveKind::UNSIGNED:
+            return static_cast<int64_t>(unsigned_value);
+        case RootPrimitiveKind::FLOATING:
+            return static_cast<int64_t>(floating_value);
+        }
+        return 0;
+    }
+
+    uint64_t AsUnsigned() const {
+        switch (kind) {
+        case RootPrimitiveKind::SIGNED:
+            return static_cast<uint64_t>(signed_value);
+        case RootPrimitiveKind::UNSIGNED:
+            return unsigned_value;
+        case RootPrimitiveKind::FLOATING:
+            return static_cast<uint64_t>(floating_value);
+        }
+        return 0;
+    }
+
+    double AsDouble() const {
+        switch (kind) {
+        case RootPrimitiveKind::SIGNED:
+            return static_cast<double>(signed_value);
+        case RootPrimitiveKind::UNSIGNED:
+            return static_cast<double>(unsigned_value);
+        case RootPrimitiveKind::FLOATING:
+            return floating_value;
+        }
+        return 0.0;
+    }
+
+    bool AsBool() const {
+        switch (kind) {
+        case RootPrimitiveKind::SIGNED:
+            return signed_value != 0;
+        case RootPrimitiveKind::UNSIGNED:
+            return unsigned_value != 0;
+        case RootPrimitiveKind::FLOATING:
+            return floating_value != 0.0;
+        }
+        return false;
+    }
+};
 
 struct PathLevel {
     std::string name;
@@ -94,7 +237,7 @@ bool SelectSemanticPath(TClass *root_class, const ParsedPath &path,
 
 struct ReadResult {
     std::vector<std::string> strings;
-    std::vector<double> numbers;
+    std::vector<RootPrimitiveValue> numbers;
     std::vector<bool> is_string_flag;
     std::vector<int64_t> event_ids;
     std::vector<std::vector<int>> vector_indices;
@@ -105,6 +248,9 @@ struct ReadResult {
     bool empty() const { return strings.empty(); }
     void Clear();
     void AddString(const std::string &value, int64_t event_id,
+                   const std::vector<int32_t> &indices,
+                   const std::vector<std::string> &index_names);
+    void AddNumber(const RootPrimitiveValue &value, int64_t event_id,
                    const std::vector<int32_t> &indices,
                    const std::vector<std::string> &index_names);
     void AddNumber(double value, int64_t event_id,

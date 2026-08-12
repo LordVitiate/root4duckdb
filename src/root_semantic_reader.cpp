@@ -89,22 +89,6 @@ void CollectImmediateChildren(TClass *klass, const std::string &prefix,
     active_bases.erase(class_name);
 }
 
-double ReadDirectPrimitive(void *pointer, const std::string &raw_type) {
-    if (!pointer) return 0;
-    const auto type = PrimitiveBaseType(raw_type);
-    if (type == "Float_t" || type == "float") return *reinterpret_cast<float *>(pointer);
-    if (type == "Double_t" || type == "double") return *reinterpret_cast<double *>(pointer);
-    if (type == "Int_t" || type == "int") return *reinterpret_cast<int *>(pointer);
-    if (type == "Long64_t" || type == "long long") return *reinterpret_cast<long long *>(pointer);
-    if (type == "Bool_t" || type == "bool") return *reinterpret_cast<bool *>(pointer) ? 1.0 : 0.0;
-    if (type == "Char_t" || type == "char") return *reinterpret_cast<char *>(pointer);
-    if (type == "UChar_t" || type == "unsigned char") return *reinterpret_cast<unsigned char *>(pointer);
-    if (type == "Short_t" || type == "short") return *reinterpret_cast<short *>(pointer);
-    if (type == "UShort_t" || type == "unsigned short") return *reinterpret_cast<unsigned short *>(pointer);
-    if (type == "UInt_t" || type == "unsigned int") return *reinterpret_cast<unsigned int *>(pointer);
-    if (type == "ULong_t" || type == "unsigned long") return *reinterpret_cast<unsigned long *>(pointer);
-    return 0;
-}
 
 std::string ReadRootString(void *pointer, const std::string &raw_type) {
     if (!pointer) return {};
@@ -200,7 +184,7 @@ struct DirectSink {
     void Number(void *pointer, const std::string &type,
                 const std::vector<int32_t> &indices,
                 const std::vector<std::string> &names) {
-        result.AddNumber(ReadDirectPrimitive(pointer, type), event_id, indices, names);
+        result.AddNumber(RootPrimitiveValue::FromPointer(pointer, type), event_id, indices, names);
     }
     void String(void *pointer, const std::string &type,
                 const std::vector<int32_t> &indices,
@@ -574,7 +558,7 @@ LogicalType RootTypeToScanLogicalType(const std::string &raw_type,
                                       bool is_string, bool is_primitive) {
     if (is_string || !is_primitive) return LogicalType::VARCHAR;
 
-    const auto &type = raw_type;
+    const auto type = PrimitiveBaseType(raw_type);
     if (type == "Bool_t" || type == "bool" || type == "O") return LogicalType::BOOLEAN;
     if (type == "Char_t" || type == "char" || type == "b") return LogicalType::TINYINT;
     if (type == "UChar_t" || type == "unsigned char" || type == "B") return LogicalType::UTINYINT;
@@ -582,7 +566,7 @@ LogicalType RootTypeToScanLogicalType(const std::string &raw_type,
     if (type == "UShort_t" || type == "unsigned short" || type == "s") return LogicalType::USMALLINT;
     if (type == "Int_t" || type == "int" || type == "I") return LogicalType::INTEGER;
     if (type == "UInt_t" || type == "unsigned int" || type == "i") return LogicalType::UINTEGER;
-    if (type == "Long64_t" || type == "long long" || type == "L") return LogicalType::BIGINT;
+    if (type == "Long_t" || type == "long" || type == "Long64_t" || type == "long long" || type == "L") return LogicalType::BIGINT;
     if (type == "ULong_t" || type == "unsigned long" ||
         type == "ULong64_t" || type == "unsigned long long" ||
         type == "l") return LogicalType::UBIGINT;
@@ -609,22 +593,7 @@ bool IsLosslessDoubleBackedType(const std::string &raw_type) {
 }
 
 double ReadPrimitiveAsDouble(void *pointer, const std::string &raw_type) {
-    if (!pointer) return 0;
-    const auto type = PrimitiveBaseType(raw_type);
-    if (type == "Float_t" || type == "float" || type == "F") return *reinterpret_cast<float *>(pointer);
-    if (type == "Double_t" || type == "double" || type == "D") return *reinterpret_cast<double *>(pointer);
-    if (type == "Int_t" || type == "int" || type == "I") return *reinterpret_cast<int32_t *>(pointer);
-    if (type == "UInt_t" || type == "unsigned int" || type == "i") return *reinterpret_cast<uint32_t *>(pointer);
-    if (type == "Long64_t" || type == "long long" || type == "L") return static_cast<double>(*reinterpret_cast<int64_t *>(pointer));
-    if (type == "ULong64_t" || type == "unsigned long long" || type == "l") return static_cast<double>(*reinterpret_cast<uint64_t *>(pointer));
-    if (type == "Long_t" || type == "long") return static_cast<double>(*reinterpret_cast<long *>(pointer));
-    if (type == "ULong_t" || type == "unsigned long") return static_cast<double>(*reinterpret_cast<unsigned long *>(pointer));
-    if (type == "Short_t" || type == "short" || type == "S") return *reinterpret_cast<int16_t *>(pointer);
-    if (type == "UShort_t" || type == "unsigned short" || type == "s") return *reinterpret_cast<uint16_t *>(pointer);
-    if (type == "Char_t" || type == "char" || type == "b") return *reinterpret_cast<int8_t *>(pointer);
-    if (type == "UChar_t" || type == "unsigned char" || type == "B") return *reinterpret_cast<uint8_t *>(pointer);
-    if (type == "Bool_t" || type == "bool" || type == "O") return *reinterpret_cast<bool *>(pointer) ? 1.0 : 0.0;
-    throw NotImplementedException("Unsupported primitive ROOT type: " + raw_type);
+    return RootPrimitiveValue::FromPointer(pointer, raw_type).AsDouble();
 }
 
 namespace {
@@ -903,14 +872,14 @@ void ReadResult::AddString(const std::string &value, int64_t event_id,
                            const std::vector<int32_t> &indices,
                            const std::vector<std::string> &index_names) {
     strings.push_back(value);
-    numbers.push_back(0);
+    numbers.emplace_back();
     is_string_flag.push_back(true);
     event_ids.push_back(event_id);
     vector_indices.emplace_back(indices.begin(), indices.end());
     if (vector_names.empty()) vector_names = index_names;
 }
 
-void ReadResult::AddNumber(double value, int64_t event_id,
+void ReadResult::AddNumber(const RootPrimitiveValue &value, int64_t event_id,
                            const std::vector<int32_t> &indices,
                            const std::vector<std::string> &index_names) {
     strings.emplace_back();
@@ -919,6 +888,13 @@ void ReadResult::AddNumber(double value, int64_t event_id,
     event_ids.push_back(event_id);
     vector_indices.emplace_back(indices.begin(), indices.end());
     if (vector_names.empty()) vector_names = index_names;
+}
+
+void ReadResult::AddNumber(double value, int64_t event_id,
+                           const std::vector<int32_t> &indices,
+                           const std::vector<std::string> &index_names) {
+    AddNumber(RootPrimitiveValue::Floating(value),
+              event_id, indices, index_names);
 }
 
 void OffsetValueReader::CollectValues(void *root_object,
