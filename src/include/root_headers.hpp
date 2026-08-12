@@ -4,6 +4,13 @@
 // identifiers named BIT. Every ROOT header used by the extension is parsed
 // inside this boundary before the macro is removed for DuckDB headers.
 #include "Rtypes.h"
+#include "TArrayD.h"
+#include "TAxis.h"
+#include "TH1.h"
+#include "TProfile.h"
+#include "TProfile2D.h"
+#include "TProfile3D.h"
+#include "TObject.h"
 #include "TBuffer.h"
 #include "TBufferFile.h"
 #include "TBasket.h"

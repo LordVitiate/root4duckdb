@@ -37,6 +37,7 @@
 #include "include/root_direct_scheduler.hpp"
 #include "include/root_file_opener.hpp"
 #include "include/root_filter.hpp"
+#include "include/root_histogram_reader.hpp"
 #include "include/root_input_resolver.hpp"
 #include "include/root_lake_common.hpp"
 #include "include/root_path_reader.hpp"
@@ -123,9 +124,12 @@ struct RootScanBindData : public TableFunctionData
     bool is_direct_branch_mode = false;
     bool is_primitive_tree_mode = false;
     bool is_empty_mode = false;
+    bool is_histogram_mode = false;
     rootlake::RootDictionaryCleanupMode dictionary_cleanup_mode = rootlake::RootDictionaryCleanupMode::FULL;
     std::vector<std::string> browse_children;
     RootPrimitiveBranch direct_branch_info;
+    rootlake::RootHistogramBinding histogram_binding;
+    std::unique_ptr<TH1> histogram_object;
     rootlake::RootReaderMode reader_mode = rootlake::RootReaderMode::AUTO;
     uint32_t raw_validation_entries = 4;
     uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
@@ -166,9 +170,11 @@ struct RootScanGlobalState : public GlobalTableFunctionState
     uint64_t event_lower = 0;
     uint64_t event_upper = std::numeric_limits<uint64_t>::max();
     bool event_range_impossible = false;
+    bool histogram_mode = false;
 
     idx_t MaxThreads() const override
     {
+        if (histogram_mode) return 1;
         if (file_scheduler) return file_scheduler->MaxThreads();
         return RootEntryScheduler::EstimateOptimalThreads(scheduled_rows);
     }
@@ -306,6 +312,12 @@ public:
         DataChunk &output);
 
 private:
+    void ProcessHistogramMode(
+        ClientContext &context,
+        const RootScanBindData &bind_data,
+        RootScanGlobalState &global,
+        RootScanLocalState &local,
+        DataChunk &output);
     void ProcessBrowseMode(
         ClientContext &context, const RootScanBindData &bind_data,
         RootScanGlobalState &global, RootScanLocalState &local,
@@ -833,61 +845,192 @@ void RootScanBinder::ConfigureOptions(
 void RootScanBinder::BindRootBrowse(
     RootScanBindData &bind_data,
     std::vector<std::string> &return_names,
-    std::vector<LogicalType> &return_types) {
-    auto file = OpenRepresentativeFile(bind_data);
-    TTree *tree = rootlake::FindTree(file.get(), "", "");
-    if (!tree) throw IOException("No TTree found in ROOT file.");
+    std::vector<LogicalType> &return_types)
+{
+    auto file =
+        OpenRepresentativeFile(bind_data);
 
-    auto *branches = tree->GetListOfBranches();
-    for (int index = 0; branches && index < branches->GetEntries(); ++index) {
-        auto *element = dynamic_cast<TBranchElement *>(branches->At(index));
-        if (element && element->GetClassName()) {
-            bind_data.browse_children.push_back(
-                "/" + std::string(element->GetClassName()));
-            continue;
-        }
-        auto *branch = dynamic_cast<TBranch *>(branches->At(index));
-        if (branch) {
-            bind_data.browse_children.push_back(
-                "/" + std::string(branch->GetName()));
+    std::set<std::string> children;
+
+    TIter next_key(file->GetListOfKeys());
+
+    while (auto *key =
+               dynamic_cast<TKey *>(next_key())) {
+        const std::string class_name =
+            key->GetClassName();
+
+        if (class_name != "TTree") {
+            children.insert(
+                "/" +
+                std::string(key->GetName()));
         }
     }
-    std::sort(bind_data.browse_children.begin(),
-              bind_data.browse_children.end());
-    bind_data.browse_children.erase(
-        std::unique(bind_data.browse_children.begin(),
-                    bind_data.browse_children.end()),
-        bind_data.browse_children.end());
+
+    TTree *tree =
+        rootlake::FindTree(
+            file.get(),
+            "",
+            "");
+
+    if (tree) {
+        auto *branches =
+            tree->GetListOfBranches();
+
+        for (int index = 0;
+             branches &&
+             index < branches->GetEntries();
+             ++index) {
+
+            auto *element =
+                dynamic_cast<TBranchElement *>(
+                    branches->At(index));
+
+            if (element &&
+                element->GetClassName()) {
+                children.insert(
+                    "/" +
+                    std::string(
+                        element->GetClassName()));
+                continue;
+            }
+
+            auto *branch =
+                dynamic_cast<TBranch *>(
+                    branches->At(index));
+
+            if (branch) {
+                children.insert(
+                    "/" +
+                    std::string(
+                        branch->GetName()));
+            }
+        }
+    }
+
+    if (children.empty()) {
+        throw IOException(
+            "No readable ROOT objects were found in file");
+    }
+
+    bind_data.browse_children.assign(
+        children.begin(),
+        children.end());
+
     bind_data.is_browse_mode = true;
+
     return_names.emplace_back("path");
-    return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
+
+    return_types.emplace_back(
+        LogicalType(
+            LogicalTypeId::VARCHAR));
 }
 
 void RootScanBinder::BindRequestedPath(
-    RootScanBindData &bind_data, TableFunctionBindInput &input,
-    bool dictionary_loaded, std::vector<std::string> &return_names,
-    std::vector<LogicalType> &return_types) {
+    RootScanBindData &bind_data,
+    TableFunctionBindInput &input,
+    bool dictionary_loaded,
+    std::vector<std::string> &return_names,
+    std::vector<LogicalType> &return_types)
+{
     const std::string path_prefix_raw =
-        input.named_parameters["path_prefix"].ToString();
-    RootDebug("BIND.PATH", "path_prefix=" + path_prefix_raw);
-    const auto requested_path = rootlake::ParsePathPrefix(path_prefix_raw);
-    if (!requested_path.fields.empty() && !dictionary_loaded) {
-        throw InvalidInputException(
-            "Semantic ROOT path '" + path_prefix_raw +
-            "' requires dictionary := '/path/to/libDictionary.so'. "
-            "Binding complex classes from embedded StreamerInfo without a runtime dictionary is disabled because ROOT may construct unsafe emulated classes.");
-    }
-    auto file = OpenRepresentativeFile(bind_data);
-    TTree *tree = rootlake::FindTree(file.get(), "", "");
-    if (!tree) throw IOException("No TTree found in ROOT file.");
+        input.named_parameters[
+            "path_prefix"].ToString();
 
-    if (!BindSemanticPath(bind_data, file.get(), path_prefix_raw,
-                          return_names, return_types)) {
-        BindPrimitiveCompatibility(bind_data, *file, *tree,
-                                   path_prefix_raw, return_names,
-                                   return_types);
+    RootDebug(
+        "BIND.PATH",
+        "path_prefix=" + path_prefix_raw);
+
+    auto file =
+        OpenRepresentativeFile(bind_data);
+
+    if (rootlake::TryBindRootHistogram(
+            *file,
+            path_prefix_raw,
+            bind_data.histogram_binding,
+            bind_data.histogram_object)) {
+
+        if (bind_data.IsMultiFile()) {
+            throw NotImplementedException(
+                "ROOT histogram object mode currently "
+                "accepts one ROOT file per read_root() call");
+        }
+
+        bind_data.is_histogram_mode = true;
+
+        bind_data.total_rows =
+            bind_data.histogram_binding.row_count;
+
+        const auto &schema =
+            bind_data.histogram_binding.schema;
+
+        return_names = schema.names;
+        return_types = schema.types;
+
+        RootDebug(
+            "BIND.HISTOGRAM",
+            "path=" +
+                bind_data.histogram_binding.object_path +
+            " class=" +
+                bind_data.histogram_binding.class_name +
+            " view=" +
+                rootlake::RootHistogramViewName(
+                    bind_data.histogram_binding.view) +
+            " rows=" +
+                std::to_string(
+                    bind_data.histogram_binding.row_count));
+
+        return;
     }
-    AddMultiFileIdentityColumns(bind_data, return_names, return_types);
+
+    const auto requested_path =
+        rootlake::ParsePathPrefix(
+            path_prefix_raw);
+
+    if (!requested_path.fields.empty() &&
+        !dictionary_loaded) {
+        throw InvalidInputException(
+            "Semantic ROOT path '" +
+            path_prefix_raw +
+            "' requires dictionary := "
+            "'/path/to/libDictionary.so'. "
+            "Binding complex classes from embedded "
+            "StreamerInfo without a runtime dictionary "
+            "is disabled because ROOT may construct "
+            "unsafe emulated classes.");
+    }
+
+    TTree *tree =
+        rootlake::FindTree(
+            file.get(),
+            "",
+            "");
+
+    if (!tree) {
+        throw IOException(
+            "No TTree found in ROOT file and requested "
+            "path is not a supported ROOT analysis object.");
+    }
+
+    if (!BindSemanticPath(
+            bind_data,
+            file.get(),
+            path_prefix_raw,
+            return_names,
+            return_types)) {
+
+        BindPrimitiveCompatibility(
+            bind_data,
+            *file,
+            *tree,
+            path_prefix_raw,
+            return_names,
+            return_types);
+    }
+
+    AddMultiFileIdentityColumns(
+        bind_data,
+        return_names,
+        return_types);
 }
 
 std::vector<RootPrimitiveBranch> RootScanBinder::CollectPrimitiveBranches(
@@ -1052,6 +1195,7 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(
     auto global_state = make_uniq<RootScanGlobalState>();
 
     global_state->browse_offset = 0;
+    global_state->histogram_mode = bind_data.is_histogram_mode;
     if (input.filters) global_state->filters = input.filters->Copy();
     global_state->scan_column_ids = input.column_ids;
     if (input.projection_ids.empty()) {
@@ -1067,12 +1211,17 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(
     }
     global_state->total_rows = bind_data.total_rows;
     global_state->next_row = 0;
-    if (bind_data.IsMultiFile() && !bind_data.is_browse_mode && !bind_data.is_empty_mode) {
+    if (bind_data.IsMultiFile() &&
+        !bind_data.is_browse_mode &&
+        !bind_data.is_empty_mode &&
+        !bind_data.is_histogram_mode) {
         const auto runtime = rootlake::RootRuntimeSettings::From(context, bind_data.root_paths.size());
         global_state->file_scheduler = make_uniq<rootlake::RootDirectFileScheduler>(
             bind_data.root_paths, runtime.threads);
     }
-    if (!bind_data.is_browse_mode && global_state->filters) {
+    if (!bind_data.is_browse_mode &&
+        !bind_data.is_histogram_mode &&
+        global_state->filters) {
         for (const auto &entry : global_state->filters->filters) {
             if (entry.first >= global_state->scan_column_ids.size()) continue;
             const auto full_column = global_state->scan_column_ids[entry.first];
@@ -1547,7 +1696,10 @@ unique_ptr<LocalTableFunctionState> RootScanStateFactory::CreateLocal(
     auto& bind_data = input.bind_data->Cast<RootScanBindData>();
     auto& gstate = global_state_p->Cast<RootScanGlobalState>();
     auto local_state = make_uniq<RootScanLocalState>();
-    if (!bind_data.is_empty_mode && !bind_data.is_browse_mode && !bind_data.IsMultiFile()) {
+    if (!bind_data.is_empty_mode &&
+        !bind_data.is_browse_mode &&
+        !bind_data.is_histogram_mode &&
+        !bind_data.IsMultiFile()) {
         RootScanFileManager().Open(
             bind_data, gstate, *local_state, bind_data.root_path, true);
     }
@@ -1630,6 +1782,153 @@ bool RootScanFileManager::EnsureReady(
             continue;
         }
     }
+}
+
+void RootScanExecutor::ProcessHistogramMode(
+    ClientContext &context,
+    const RootScanBindData &bind_data,
+    RootScanGlobalState &gstate,
+    RootScanLocalState &lstate,
+    DataChunk &output)
+{
+    if (!bind_data.histogram_object) {
+        throw InternalException(
+            "ROOT histogram object is unavailable");
+    }
+
+    idx_t output_count = 0;
+
+    std::vector<rootlake::RootScalarActual>
+        row_values;
+
+    while (output_count <
+           STANDARD_VECTOR_SIZE) {
+
+        if (lstate.local_current_row >=
+            lstate.local_end_row) {
+
+            RootEntryScheduler scheduler(
+                gstate.next_row,
+                gstate.total_rows,
+                gstate.coordination_mutex);
+
+            const auto batch =
+                scheduler.ClaimWork(100000);
+
+            if (!batch.HasWork()) {
+                break;
+            }
+
+            lstate.local_current_row =
+                batch.start;
+
+            lstate.local_end_row =
+                batch.end;
+        }
+
+        const auto row =
+            lstate.local_current_row++;
+
+        rootlake::MaterializeRootHistogramRow(
+            bind_data.histogram_binding,
+            *bind_data.histogram_object,
+            row,
+            row_values);
+
+        bool passes = true;
+
+        if (gstate.filters) {
+            for (const auto &filter :
+                 gstate.filters->filters) {
+
+                if (filter.first >=
+                    gstate.scan_column_ids.size()) {
+                    continue;
+                }
+
+                const auto column =
+                    gstate.scan_column_ids[
+                        filter.first];
+
+                rootlake::RootScalarActual actual;
+
+                if (column ==
+                    COLUMN_IDENTIFIER_ROW_ID) {
+                    actual =
+                        rootlake::RootScalarActual
+                            ::Unsigned(
+                                row,
+                                LogicalType(
+                                    LogicalTypeId::UBIGINT));
+
+                } else if (
+                    column <
+                    row_values.size()) {
+                    actual =
+                        row_values[column];
+
+                } else {
+                    actual =
+                        rootlake::RootScalarActual
+                            ::Null(
+                                LogicalType::SQLNULL);
+                }
+
+                if (!lstate.filter_evaluator.Evaluate(
+                        context,
+                        *filter.second,
+                        actual)) {
+                    passes = false;
+                    break;
+                }
+            }
+        }
+
+        if (!passes) {
+            continue;
+        }
+
+        for (idx_t output_index = 0;
+             output_index <
+                 gstate.output_column_ids.size();
+             ++output_index) {
+
+            const auto column =
+                gstate.output_column_ids[
+                    output_index];
+
+            auto &vector =
+                output.data[output_index];
+
+            if (column ==
+                COLUMN_IDENTIFIER_ROW_ID) {
+
+                FlatVector::GetData<int64_t>(
+                    vector)[output_count] =
+                    static_cast<int64_t>(row);
+
+                FlatVector::Validity(vector)
+                    .SetValid(output_count);
+
+            } else if (
+                column <
+                row_values.size()) {
+
+                rootlake::WriteRootHistogramActual(
+                    vector,
+                    output_count,
+                    row_values[column]);
+
+            } else {
+                FlatVector::Validity(vector)
+                    .SetInvalid(output_count);
+            }
+        }
+
+        ++output_count;
+    }
+
+    output.SetCardinality(output_count);
 }
 
 void RootScanExecutor::ProcessBrowseMode(
@@ -2699,6 +2998,17 @@ void RootScanExecutor::Execute(
     if (gstate.event_range_impossible)
     {
         output.SetCardinality(0);
+        return;
+    }
+
+    if (bind_data.is_histogram_mode)
+    {
+        ProcessHistogramMode(
+            context,
+            bind_data,
+            gstate,
+            lstate,
+            output);
         return;
     }
 

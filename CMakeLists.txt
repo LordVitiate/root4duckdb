@@ -17,6 +17,7 @@ set(ROOT4DUCKDB_ICEBERG_SOURCES
 set(EXTENSION_SOURCES
     src/root_extension.cpp
     src/root_scan.cpp
+    src/root_histogram_reader.cpp
     src/root_input_resolver.cpp
     src/root_file_opener.cpp
     src/root_direct_scheduler.cpp
