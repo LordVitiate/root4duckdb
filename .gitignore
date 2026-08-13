@@ -45,12 +45,8 @@ venv/
 Thumbs.db
 *~
 
-# Internal documentation
-/docs/
-*.md
 
 # Keep the public repository README
-!/README.md
 
 # Temporary test files and Iceberg metadata
 test/.tmp-*/
@@ -59,5 +55,4 @@ test/.tmp-*/
 test/fixtures/*.dylib
 test/fixtures/*.exe
 *.patch
-*.sql
-*.pre-
+*.pre-*

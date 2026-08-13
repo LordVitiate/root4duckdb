@@ -1,3 +1,0 @@
-root4duckdb release: 3.8.0
-duckdb: f31be57c1845a8895169fd58142040be26d433cf
-extension-ci-tools: 1f04702aae6f4e7ab45f38689fd79e765221b19e
