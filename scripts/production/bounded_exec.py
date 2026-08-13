@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from pipeline_io import write_json_atomic
 
 
 def children(pid: int) -> list[int]:
@@ -109,10 +110,7 @@ def main() -> None:
         "finished_at_ns": time.time_ns(),
     }
     target = Path(args.report)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_suffix(target.suffix + ".tmp")
-    temp.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    os.replace(temp, target)
+    write_json_atomic(target, report)
     raise SystemExit(rc)
 
 

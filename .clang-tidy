@@ -1,0 +1,11 @@
+Checks: >
+  bugprone-*,
+  performance-*,
+  portability-*,
+  readability-avoid-const-params-in-decls,
+  readability-container-size-empty,
+  readability-qualified-auto,
+  -bugprone-easily-swappable-parameters
+WarningsAsErrors: ''
+HeaderFilterRegex: 'src/.*'
+FormatStyle: file

@@ -2,18 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 from pathlib import Path
 
-
-def hash_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+from pipeline_io import sha256_file, write_json_atomic
 
 
 def main() -> None:
@@ -35,7 +27,7 @@ def main() -> None:
     schema_fingerprints: set[str] = set()
 
     dictionary = Path(plan["dictionary"])
-    if not dictionary.is_file() or hash_file(dictionary) != plan["dictionary_fingerprint"]:
+    if not dictionary.is_file() or sha256_file(dictionary) != plan["dictionary_fingerprint"]:
         raise SystemExit("dictionary is missing or stale")
 
     for chunk_id, chunk in expected.items():
@@ -58,7 +50,7 @@ def main() -> None:
                         path = directory / path
                     table_paths.append(path)
                     rel = str(path.relative_to(directory))
-                    checksum_ok &= path.is_file() and checksums.get(rel) == hash_file(path)
+                    checksum_ok &= path.is_file() and checksums.get(rel) == sha256_file(path)
                 valid = (
                     success.get("format") == "root4duckdb-chunk-success-v2"
                     and success.get("state") == "succeeded"
@@ -112,10 +104,7 @@ def main() -> None:
         "chunks": results,
     }
     output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temp = output.with_suffix(output.suffix + ".tmp")
-    temp.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    os.replace(temp, output)
+    write_json_atomic(output, report)
     print(f"[{report['state'].upper()}] {report['succeeded_chunks']}/{report['expected_chunks']} chunks; "
           f"{report['validated_sources']}/{report['expected_sources']} sources")
     if failed:

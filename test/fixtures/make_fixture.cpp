@@ -11,15 +11,16 @@
 
 namespace fs = std::filesystem;
 
-static void WriteFixture(const fs::path &path, Int_t run_base, const std::vector<std::vector<double>> &events, Int_t split_level = 99) {
+static void WriteFixture(const fs::path& path, Int_t run_base, const std::vector<std::vector<double>>& events,
+                         Int_t split_level = 99) {
     TFile file(path.string().c_str(), "RECREATE");
     if (file.IsZombie()) {
         throw std::runtime_error("Cannot create fixture ROOT file: " + path.string());
     }
 
     TTree tree("Events", "ROOT4DuckDB integration fixture");
-    auto *event = new TestEvent();
-    auto *branch = tree.Branch("TestEvent", "TestEvent", &event, 32000, split_level);
+    auto* event = new TestEvent();
+    auto* branch = tree.Branch("TestEvent", "TestEvent", &event, 32000, split_level);
     if (!branch) {
         delete event;
         throw std::runtime_error("Cannot create TestEvent object branch");
@@ -27,7 +28,7 @@ static void WriteFixture(const fs::path &path, Int_t run_base, const std::vector
     branch->SetBasketSize(256);
 
     Int_t event_index = 0;
-    for (const auto &values : events) {
+    for (const auto& values : events) {
         event->run = run_base + event_index;
         event->flags = static_cast<UChar_t>(event_index % 3);
         event->signed_code = static_cast<Char_t>(event_index - 1);
@@ -44,23 +45,19 @@ static void WriteFixture(const fs::path &path, Int_t run_base, const std::vector
         event->mapScore.emplace(static_cast<Double_t>(event_index) + 0.25, static_cast<Double_t>(event->run));
         event->mapScore.emplace(static_cast<Double_t>(event_index) + 0.75, static_cast<Double_t>(event->run) + 0.5);
         event->setCode = {event_index, event_index + 10};
-        event->nestedPairs = {
-            {{static_cast<Double_t>(event_index) + 1.5, 100 + event_index},
-             {static_cast<Double_t>(event_index) + 2.5, 200 + event_index}},
-            {{static_cast<Double_t>(event_index) + 3.5, 300 + event_index}}
-        };
+        event->nestedPairs = {{{static_cast<Double_t>(event_index) + 1.5, 100 + event_index},
+                               {static_cast<Double_t>(event_index) + 2.5, 200 + event_index}},
+                              {{static_cast<Double_t>(event_index) + 3.5, 300 + event_index}}};
         ++event_index;
         event->vecHit.clear();
         size_t hit_index = 0;
         for (double value : values) {
             event->vecHit.emplace_back(value);
-            auto &hit = event->vecHit.back();
+            auto& hit = event->vecHit.back();
             if (value == value) {
-                hit.weights = {static_cast<Float_t>(value + 0.25),
-                               static_cast<Float_t>(value + 0.75)};
+                hit.weights = {static_cast<Float_t>(value + 0.25), static_cast<Float_t>(value + 0.75)};
                 if ((hit_index % 2) == 0) {
-                    hit.refs = {static_cast<Short_t>(value),
-                                static_cast<Short_t>(value + 10.0)};
+                    hit.refs = {static_cast<Short_t>(value), static_cast<Short_t>(value + 10.0)};
                 } else {
                     hit.refs = {static_cast<Short_t>(value)};
                 }
@@ -75,7 +72,7 @@ static void WriteFixture(const fs::path &path, Int_t run_base, const std::vector
     delete event;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     if (argc != 2) {
         std::cerr << "usage: make_fixture <output-directory>\n";
         return 2;
@@ -90,7 +87,7 @@ int main(int argc, char **argv) {
         // split_level=1 keeps TestHit fields inside the persistent vecHit ancestor
         // branch. This reproduces Phast layouts where no physical leaf exists for u/uv.
         WriteFixture(output / "ancestor.root", 500, {{1.0, 2.0}, {3.0}}, 1);
-    } catch (const std::exception &ex) {
+    } catch (const std::exception& ex) {
         std::cerr << ex.what() << '\n';
         return 1;
     }

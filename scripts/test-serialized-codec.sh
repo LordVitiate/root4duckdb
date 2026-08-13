@@ -7,8 +7,9 @@ trap 'rm -rf -- "$TEST_TMP"' EXIT
 
 "${CXX:-c++}" -std=c++17 -O2 -Wall -Wextra -Werror \
     -I"$PROJECT_DIR/src/include" \
-    "$PROJECT_DIR/src/root_serialized_codec.cpp" \
-    "$PROJECT_DIR/src/root_serialized_nested_codec.cpp" \
+    "$PROJECT_DIR/src/serialized/root_serialized_codec_utils.cpp" \
+    "$PROJECT_DIR/src/serialized/root_serialized_codec.cpp" \
+    "$PROJECT_DIR/src/serialized/root_serialized_nested_codec.cpp" \
     "$PROJECT_DIR/test/serialized_codec_test.cpp" \
     -o "$TEST_TMP/serialized_codec_test"
 

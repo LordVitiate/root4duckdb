@@ -51,3 +51,13 @@ Thumbs.db
 
 # Keep the public repository README
 !/README.md
+
+# Temporary test files and Iceberg metadata
+test/.tmp-*/
+*.avro
+*.metadata.json
+test/fixtures/*.dylib
+test/fixtures/*.exe
+*.patch
+*.sql
+*.pre-

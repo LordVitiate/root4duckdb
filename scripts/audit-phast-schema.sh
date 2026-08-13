@@ -12,8 +12,8 @@ PER_PATH_TIMEOUT="${PER_PATH_TIMEOUT:-180}"
 BLOOM_BYTES="${BLOOM_BYTES:-4096}"
 RESUME="${RESUME:-1}"
 PATHS_FILE="${PATHS_FILE:-$PROJECT_DIR/test/phast/schema_paths.psv}"
+source "$PROJECT_DIR/scripts/lib/sql.sh"
 
-sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 one_line() { tr '\t\r\n' '   ' | sed 's/[[:space:]][[:space:]]*/ /g'; }
 now_ns() { date +%s%N; }
 elapsed_ms() { local a="$1" b="$2"; printf '%s' $(( (b-a)/1000000 )); }
@@ -73,8 +73,8 @@ worker() {
     rm -rf "$idx_dir"
 
     local q_root q_dict q_test q_idx sql
-    q_root="$(sql_escape "$ROOT_FILE")"; q_dict="$(sql_escape "$DICTIONARY")"
-    q_test="$(sql_escape "$test_path")"; q_idx="$(sql_escape "$idx_dir")"
+    q_root="$(root4duckdb_sql_escape "$ROOT_FILE")"; q_dict="$(root4duckdb_sql_escape "$DICTIONARY")"
+    q_test="$(root4duckdb_sql_escape "$test_path")"; q_idx="$(root4duckdb_sql_escape "$idx_dir")"
     sql="SELECT * FROM root_build_index('$q_root','$root_tree','$q_test','$q_idx', dictionary := '$q_dict', index_threads := 1, bloom_bytes := $BLOOM_BYTES, overwrite := true, allow_partial := false);"
 
     local build_sql_file="$log_dir/build.sql"
@@ -89,7 +89,7 @@ worker() {
         message=""
         if [[ -n "$failed" ]]; then
             local q_failed
-            q_failed="$(sql_escape "$failed")"
+            q_failed="$(root4duckdb_sql_escape "$failed")"
             message="$("$DUCKDB" -noheader -list -c "SELECT message FROM read_csv_auto('$q_failed', header=true) LIMIT 1;" 2>/dev/null | one_line || true)"
         fi
         if [[ -z "$message" ]]; then message="$(tail -20 "$build_log" 2>/dev/null | one_line || true)"; fi
@@ -178,8 +178,8 @@ RESULTS="$OUT/audit_results.tsv"
 printf 'ordinal\troot_tree\tsemantic_kind\tlogical_path\ttest_path\tcpp_type\tcategory\texpected_support\tparent_entity\tstatus\treason_code\tphysical_branch\troot_type\tduckdb_type\tindex_signature\tcontainer_depth\tentries\trow_count\tevents_with_values\tmin_value\tmax_value\tnull_count\tnan_count\tduplicate_key_groups\tkey_fingerprint\tdata_fingerprint\tbuild_ms\tread_ms\tindex_dir\tmessage\n' > "$RESULTS"
 find "$OUT/parts" -maxdepth 1 -type f -name '*.tsv' -print0 | sort -z | xargs -0 cat >> "$RESULTS"
 
-q_results="$(sql_escape "$RESULTS")"
-"$DUCKDB" -c "COPY (SELECT * FROM read_csv('$q_results', delim='\\t', header=true, all_varchar=true)) TO '$(sql_escape "$OUT/audit_results.parquet")' (FORMAT PARQUET, COMPRESSION ZSTD);" >/dev/null 2>&1 || true
+q_results="$(root4duckdb_sql_escape "$RESULTS")"
+"$DUCKDB" -c "COPY (SELECT * FROM read_csv('$q_results', delim='\\t', header=true, all_varchar=true)) TO '$(root4duckdb_sql_escape "$OUT/audit_results.parquet")' (FORMAT PARQUET, COMPRESSION ZSTD);" >/dev/null 2>&1 || true
 "$DUCKDB" -csv -c "SELECT status,count(*) paths FROM read_csv('$q_results',delim='\\t',header=true,all_varchar=true) GROUP BY status ORDER BY status;" > "$OUT/status_summary.csv" 2>/dev/null || true
 "$DUCKDB" -csv -c "SELECT reason_code,count(*) paths FROM read_csv('$q_results',delim='\\t',header=true,all_varchar=true) WHERE reason_code<>'' GROUP BY reason_code ORDER BY paths DESC;" > "$OUT/failure_summary.csv" 2>/dev/null || true
 "$DUCKDB" -csv -c "SELECT parent_entity,index_signature,count(*) field_count,count(DISTINCT row_count) row_count_variants,count(DISTINCT key_fingerprint) key_fingerprint_variants,string_agg(logical_path,' | ' ORDER BY logical_path) fields FROM read_csv('$q_results',delim='\\t',header=true,all_varchar=true) WHERE status IN ('OK','OK_EMPTY','UNEXPECTED_OK') AND category='numeric_scalar' GROUP BY parent_entity,index_signature HAVING count(*)>1 ORDER BY key_fingerprint_variants DESC,row_count_variants DESC,parent_entity;" > "$OUT/entity_consistency.csv" 2>/dev/null || true
@@ -189,7 +189,7 @@ q_results="$(sql_escape "$RESULTS")"
     printf '=== STATUS ===\n'; cat "$OUT/status_summary.csv" 2>/dev/null || true
     printf '\n=== FAILURE / LIMITATION CODES ===\n'; cat "$OUT/failure_summary.csv" 2>/dev/null || true
     printf '\n=== ENTITY CONSISTENCY PROBLEMS ===\n'
-    "$DUCKDB" -csv -c "SELECT * FROM read_csv_auto('$(sql_escape "$OUT/entity_consistency.csv")',header=true) WHERE row_count_variants>1 OR key_fingerprint_variants>1;" 2>/dev/null || true
+    "$DUCKDB" -csv -c "SELECT * FROM read_csv_auto('$(root4duckdb_sql_escape "$OUT/entity_consistency.csv")',header=true) WHERE row_count_variants>1 OR key_fingerprint_variants>1;" 2>/dev/null || true
     printf '\nResults: %s\n' "$RESULTS"
     printf 'Parquet: %s\n' "$OUT/audit_results.parquet"
     printf 'Bugs: %s\n' "$OUT/bugs.csv"

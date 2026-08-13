@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "root4duckdb-production"
 version = "3.8.0"
 description = "ROOT4DUCKDB production indexing, validation and Dagster orchestration"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]

@@ -9,21 +9,11 @@ import subprocess
 import time
 from pathlib import Path
 
+from pipeline_io import detected_memory_bytes
+
 
 def quote_condor(value: str) -> str:
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
-
-
-def detected_memory_bytes() -> int:
-    values: list[int] = []
-    cgroup = Path("/sys/fs/cgroup/memory.max")
-    if cgroup.is_file() and (raw := cgroup.read_text().strip()).isdigit():
-        values.append(int(raw))
-    try:
-        values.append(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
-    except (ValueError, OSError):
-        pass
-    return min(values) if values else 4 * 1024**3
 
 
 def success_valid(chunks_dir: Path, chunk_id: str, plan: dict[str, object]) -> bool:

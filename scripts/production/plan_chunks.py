@@ -7,34 +7,10 @@ import json
 import os
 from pathlib import Path
 
+from pipeline_io import canonical_json_bytes, detected_memory_bytes, sha256_file, write_json_atomic
+
 FORMAT = "root4duckdb-index-plan-v2"
 INDEX_VERSION = 12
-
-
-def detected_memory_bytes() -> int:
-    candidates: list[int] = []
-    cgroup = Path("/sys/fs/cgroup/memory.max")
-    if cgroup.is_file():
-        raw = cgroup.read_text().strip()
-        if raw.isdigit():
-            candidates.append(int(raw))
-    try:
-        candidates.append(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
-    except (ValueError, OSError):
-        pass
-    return min(candidates) if candidates else 4 * 1024**3
-
-
-def canonical_bytes(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-
-
-def hash_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def load_paths(path: Path) -> list[str]:
@@ -77,7 +53,13 @@ def main() -> None:
     if not dictionary.is_file():
         raise SystemExit(f"dictionary not found: {dictionary}")
     paths = load_paths(Path(args.paths_file))
-    if args.max_files < 0 or args.max_bytes < 0 or args.target_chunk_seconds < 0 or args.throughput_bytes_per_second < 0:
+    chunk_limits = (
+        args.max_files,
+        args.max_bytes,
+        args.target_chunk_seconds,
+        args.throughput_bytes_per_second,
+    )
+    if any(limit < 0 for limit in chunk_limits):
         raise SystemExit("chunk limits cannot be negative")
     if (args.target_chunk_seconds == 0) != (args.throughput_bytes_per_second == 0):
         raise SystemExit("target chunk seconds and measured throughput must be supplied together")
@@ -119,7 +101,7 @@ def main() -> None:
     chunks: list[dict[str, object]] = []
     current: list[dict[str, object]] = []
     current_bytes = 0
-    dictionary_fingerprint = hash_file(dictionary)
+    dictionary_fingerprint = sha256_file(dictionary)
 
     def flush() -> None:
         nonlocal current, current_bytes
@@ -133,7 +115,7 @@ def main() -> None:
             "index_version": INDEX_VERSION,
             "files": [row["source_id"] for row in current],
         }
-        chunk_id = hashlib.sha256(canonical_bytes(material)).hexdigest()[:24]
+        chunk_id = hashlib.sha256(canonical_json_bytes(material)).hexdigest()[:24]
         chunks.append({
             "chunk_id": chunk_id,
             "state": "planned",
@@ -180,12 +162,9 @@ def main() -> None:
         "chunks": chunks,
         "chunk_count": len(chunks),
     }
-    plan["fingerprint"] = hashlib.sha256(canonical_bytes(plan)).hexdigest()
+    plan["fingerprint"] = hashlib.sha256(canonical_json_bytes(plan)).hexdigest()
     output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temp = output.with_suffix(output.suffix + ".tmp")
-    temp.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
-    os.replace(temp, output)
+    write_json_atomic(output, plan)
     if args.emit_dir:
         emit = Path(args.emit_dir)
         emit.mkdir(parents=True, exist_ok=True)
