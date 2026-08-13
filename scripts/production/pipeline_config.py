@@ -6,19 +6,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+from pipeline_io import detected_memory_bytes
+
 FORMAT = "root4duckdb-production-config-v1"
-
-
-def _detected_memory_bytes() -> int:
-    values: list[int] = []
-    cgroup = Path("/sys/fs/cgroup/memory.max")
-    if cgroup.is_file() and (raw := cgroup.read_text().strip()).isdigit():
-        values.append(int(raw))
-    try:
-        values.append(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
-    except (ValueError, OSError):
-        pass
-    return min(values) if values else 4 * 1024**3
 
 
 def _resolve(base: Path, value: str | None) -> str | None:
@@ -60,7 +50,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     resources.setdefault("target_chunk_seconds", 0)
     resources.setdefault("throughput_bytes_per_second", 0)
     resources.setdefault("threads", max(1, os.cpu_count() or 1))
-    resources.setdefault("request_memory_mb", max(1, _detected_memory_bytes() // 1_000_000))
+    resources.setdefault("request_memory_mb", max(1, detected_memory_bytes() // 1_000_000))
     request_bytes = resources["request_memory_mb"] * 1_000_000
     resources.setdefault("rss_hard_limit_bytes", request_bytes * 95 // 100)
     resources.setdefault("memory_budget_bytes", request_bytes * 85 // 100)

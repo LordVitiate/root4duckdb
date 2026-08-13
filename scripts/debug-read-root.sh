@@ -4,6 +4,7 @@ set -uo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DUCKDB_BIN="${DUCKDB_BIN:-$PROJECT_DIR/build/release/duckdb}"
 OUT_DIR="${ROOT4DUCKDB_DEBUG_DIR:-$PROJECT_DIR/artifacts/debug_read_root}"
+source "$PROJECT_DIR/scripts/lib/sql.sh"
 
 usage() {
     cat <<'USAGE'
@@ -54,13 +55,9 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG="$OUT_DIR/${MODE}_${STAMP}_$$.log"
 SQL_FILE="$OUT_DIR/${MODE}_${STAMP}_$$.sql"
 
-sql_escape() {
-    printf '%s' "$1" | sed "s/'/''/g"
-}
-
-ROOT_SQL="$(sql_escape "$ROOT_FILE")"
-DICT_SQL="$(sql_escape "$DICTIONARY")"
-PATH_SQL="$(sql_escape "$SEMANTIC_PATH")"
+ROOT_SQL="$(root4duckdb_sql_escape "$ROOT_FILE")"
+DICT_SQL="$(root4duckdb_sql_escape "$DICTIONARY")"
+PATH_SQL="$(root4duckdb_sql_escape "$SEMANTIC_PATH")"
 
 case "$MODE" in
     explain)

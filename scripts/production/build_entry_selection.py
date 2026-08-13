@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
-import os
 from collections import defaultdict
 from pathlib import Path
+
+from pipeline_io import write_json_atomic
 
 
 def encode(values: list[int], min_run: int) -> dict[str, object]:
@@ -48,7 +48,11 @@ def main() -> None:
     grouped: dict[str, list[int]] = defaultdict(list)
     with Path(args.input).open(newline="") as handle:
         reader = csv.DictReader(handle, delimiter=args.delimiter)
-        if not reader.fieldnames or args.source_column not in reader.fieldnames or args.entry_column not in reader.fieldnames:
+        if (
+            not reader.fieldnames
+            or args.source_column not in reader.fieldnames
+            or args.entry_column not in reader.fieldnames
+        ):
             raise SystemExit("input is missing source_id/entry_id columns")
         for line, row in enumerate(reader, 2):
             source = (row.get(args.source_column) or "").strip()
@@ -60,10 +64,7 @@ def main() -> None:
             grouped[source].append(value)
     payload = {source: encode(values, args.min_run) for source, values in sorted(grouped.items())}
     output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temp = output.with_suffix(output.suffix + ".tmp")
-    temp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
-    os.replace(temp, output)
+    write_json_atomic(output, payload, compact=True)
     raw_count = sum(len(values) for values in grouped.values())
     range_count = sum(len(value.get("ranges", [])) for value in payload.values())
     print(f"[OK] {raw_count} entries, {len(grouped)} sources, {range_count} dense ranges -> {output}")

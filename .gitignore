@@ -51,20 +51,11 @@ Thumbs.db
 
 # Keep the public repository README
 !/README.md
-test/.tmp-root-lakehouse/
-*.avro
-*.metadata.json
-test/fixtures/*.o
-test/fixtures/*.so
 
 # Temporary test files and Iceberg metadata
-test/.tmp-root-lakehouse/
 test/.tmp-*/
 *.avro
 *.metadata.json
-*.log
-test/fixtures/*.o
-test/fixtures/*.so
 test/fixtures/*.dylib
 test/fixtures/*.exe
 *.patch

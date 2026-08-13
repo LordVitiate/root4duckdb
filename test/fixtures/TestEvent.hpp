@@ -8,13 +8,13 @@
 #include <vector>
 
 class TestBase {
-public:
+  public:
     Int_t inherited = 0;
     ClassDef(TestBase, 1);
 };
 
 class TestHit {
-public:
+  public:
     Float_t u = 0.0F;
     Float_t uv[2] = {0.0F, 0.0F};
     // Variable-width member before refs exercises member-wise prefix handling.
@@ -22,16 +22,13 @@ public:
     std::vector<Short_t> refs;
 
     TestHit() = default;
-    explicit TestHit(Double_t value) : u(static_cast<Float_t>(value)) {
-        uv[0] = static_cast<Float_t>(value);
-        uv[1] = static_cast<Float_t>(value + 0.5);
-    }
+    explicit TestHit(Double_t value);
 
     ClassDef(TestHit, 3);
 };
 
 class TestEvent : public TestBase {
-public:
+  public:
     Int_t run = 0;
     UChar_t flags = 0;
     Char_t signed_code = 0;

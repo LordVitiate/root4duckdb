@@ -4,19 +4,16 @@ from __future__ import annotations
 import argparse
 import glob
 import json
-import os
 import struct
 import subprocess
 from pathlib import Path
 from typing import Iterable
 
+from pipeline_io import canonical_json_bytes, write_json_atomic
+
 FORMAT = "root4duckdb-dataset-manifest-v2"
 FNV_OFFSET = 14695981039346656037
 FNV_PRIME = 1099511628211
-
-
-def canonical_bytes(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
 def fnv1a(data: bytes, seed: int = FNV_OFFSET) -> int:
@@ -133,12 +130,9 @@ def main() -> None:
         "file_count": len(records),
         "total_bytes": sum(int(row["size"]) for row in records),
     }
-    payload["fingerprint"] = f"{fnv1a(canonical_bytes(payload)):016x}"
+    payload["fingerprint"] = f"{fnv1a(canonical_json_bytes(payload)):016x}"
     output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temp = output.with_suffix(output.suffix + ".tmp")
-    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    os.replace(temp, output)
+    write_json_atomic(output, payload)
     print(f"[OK] {len(records)} files -> {output}")
     print(f"[OK] fingerprint={payload['fingerprint']}")
 

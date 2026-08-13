@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$PROJECT_DIR/scripts/lib/sql.sh"
 ROOT_FILE="${ROOT4DUCKDB_VERIFY_ROOT_FILE:-}"
 DICTIONARY="${ROOT4DUCKDB_VERIFY_DICTIONARY:-}"
 PATH_FLAGS="${ROOT4DUCKDB_VERIFY_FLAGS_PATH:-/PaEvent/vecParticle/flags}"
@@ -23,8 +24,9 @@ if [[ -z "$ROOT_FILE" || -z "$DICTIONARY" ]]; then
   exit 0
 fi
 
-sql_escape(){ printf '%s' "$1" | sed "s/'/''/g"; }
-ROOT_SQL="$(sql_escape "$ROOT_FILE")"; DICT_SQL="$(sql_escape "$DICTIONARY")"; PATH_SQL="$(sql_escape "$PATH_FLAGS")"
+ROOT_SQL="$(root4duckdb_sql_escape "$ROOT_FILE")"
+DICT_SQL="$(root4duckdb_sql_escape "$DICTIONARY")"
+PATH_SQL="$(root4duckdb_sql_escape "$PATH_FLAGS")"
 RESULT="$($DUCKDB -csv -noheader :memory: -c "
 SELECT count(*) AS rows_total,
        count(value) AS rows_non_null,
@@ -48,7 +50,7 @@ echo "[OK] PHAST direct read: rows=$ROWS non_null=$NON_NULL distinct=$DISTINCT e
 echo "[OK] retain cleanup exited normally (no double free)"
 
 if [[ -n "$INDEX_PATH" ]]; then
-  INDEX_SQL="$(sql_escape "$INDEX_PATH")"
+  INDEX_SQL="$(root4duckdb_sql_escape "$INDEX_PATH")"
   INDEX_RESULT="$($DUCKDB -csv -noheader :memory: -c "
 SELECT count(*), count(source_id), count(entry_id)
 FROM read_root_dataset('$INDEX_SQL', '$PATH_SQL', dictionary:='$DICT_SQL',

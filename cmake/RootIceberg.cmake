@@ -74,11 +74,15 @@ endforeach()
 list(REMOVE_DUPLICATES _r4d_iceberg_runtime_dirs)
 
 foreach(_r4d_iceberg_source IN LISTS ROOT4DUCKDB_ICEBERG_SOURCES)
+    set_property(
+        SOURCE "${_r4d_iceberg_source}"
+        PROPERTY SKIP_PRECOMPILE_HEADERS ON
+    )
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${_r4d_iceberg_source}"
+        set_property(SOURCE "${_r4d_iceberg_source}"
                      APPEND PROPERTY COMPILE_OPTIONS "-std=c++23")
     elseif(MSVC)
-        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${_r4d_iceberg_source}"
+        set_property(SOURCE "${_r4d_iceberg_source}"
                      APPEND PROPERTY COMPILE_OPTIONS "/std:c++latest")
     endif()
 endforeach()
