@@ -38,10 +38,6 @@ root4duckdb_use_shared_iceberg(${EXTENSION_NAME})
 
 if(ROOT4DUCKDB_LOADABLE_ONLY)
     root4duckdb_embed_static_iceberg(${LOADABLE_EXTENSION_NAME})
-    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
-        -static-libstdc++
-        -static-libgcc
-    )
 else()
     root4duckdb_use_shared_iceberg(${LOADABLE_EXTENSION_NAME})
 endif()
