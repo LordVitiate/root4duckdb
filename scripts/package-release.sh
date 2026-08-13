@@ -117,6 +117,10 @@ if grep -Eq \
     fail "Release extension still depends on shared Iceberg libraries"
 fi
 
+if grep -Eq 'Shared library: \[(libstdc\+\+\.so|libgcc_s\.so)' <<<"$dynamic_section"; then
+    fail "Release extension still depends on shared GCC runtime"
+fi
+
 if grep -Eq '\((RPATH|RUNPATH)\)' <<<"$dynamic_section"; then
     fail "Release extension contains RPATH or RUNPATH"
 fi
@@ -209,6 +213,13 @@ trap 'rm -rf "$stage_root"' EXIT
 
 cp "$EXTENSION" "$stage/root.duckdb_extension"
 cp "$PROJECT_DIR/LICENSE" "$stage/LICENSE"
+
+gcc_license_dir="$PROJECT_DIR/3rd/gcc-runtime"
+[[ -s "$gcc_license_dir/COPYING3" ]] || fail "GCC GPL license is missing"
+[[ -s "$gcc_license_dir/COPYING.RUNTIME" ]] || fail "GCC runtime exception is missing"
+mkdir -p "$stage/licenses/gcc-runtime"
+cp "$gcc_license_dir/COPYING3" "$stage/licenses/gcc-runtime/COPYING3"
+cp "$gcc_license_dir/COPYING.RUNTIME" "$stage/licenses/gcc-runtime/COPYING.RUNTIME"
 
 iceberg_notice="$PROJECT_DIR/.deps/iceberg-cpp/share/doc/iceberg/NOTICE"
 iceberg_license="$PROJECT_DIR/.deps/iceberg-cpp/share/doc/iceberg/LICENSE"
