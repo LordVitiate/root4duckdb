@@ -92,6 +92,9 @@ ContainerAccess PrepareContainerAccess(const PathLevel& level, TVirtualCollectio
     result.base = first;
     result.stride = stride;
     result.contiguous = true;
+    RootDebug("VECTOR.CONTIGUOUS",
+              "type=" + level.type + " size=" + std::to_string(size) +
+                  " stride=" + std::to_string(stride));
     return result;
 }
 

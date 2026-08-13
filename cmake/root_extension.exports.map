@@ -1,0 +1,7 @@
+{
+    global:
+        root_duckdb_cpp_init;
+
+    local:
+        *;
+};
