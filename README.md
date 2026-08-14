@@ -1,10 +1,6 @@
 <div align="center">
 
-<img src="assets/images/IMG_20260806_215451.jpg" alt="ROOT to SQL" width="100%">
-
-# root4duckdb
-
-**Selective SQL over ROOT data — without conversion.**
+<img src="assets/images/NewBanner.png" alt="ROOT to SQL" width="100%">
 
 <p>
   <a href="https://github.com/LordVitiate/root4duckdb/releases/latest">
@@ -17,12 +13,6 @@
 </p>
 
 </div>
-
-ROOT4DuckDB turns ROOT files into a **unified analytical data layer**.
-
-The same SQL interface works across one file, remote file sets and indexed datasets. ROOT remains the source of truth: event data are neither converted nor duplicated.
-
-> **Request the ROOT data you need; ROOT4DuckDB reads it using the most efficient safe path available.**
 
 ## Latest news 🔥
 
