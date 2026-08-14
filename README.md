@@ -21,6 +21,8 @@
 
 ## Quick start
 
+<img src="./assets/images/root4duckdb-demo.gif" alt="ROOT4DuckDB Demo" width="600"/>
+
 The current binary release requires:
 
 - Linux x86-64 with glibc 2.34 or newer;
