@@ -102,12 +102,18 @@ RootEntryReader::RootEntryReader(RootObjectReader& reader_p) : reader(reader_p) 
 void RootEntryReader::Begin(uint64_t entry_p) {
     entry = entry_p;
     object = nullptr;
+    loaded_source = nullptr;
     loaded = false;
 }
 
 void* RootEntryReader::Read() {
-    if (!loaded) {
-        object = reader.Read(entry);
+    return ReadFrom(reader);
+}
+
+void* RootEntryReader::ReadFrom(RootObjectReader& source) {
+    if (!loaded || loaded_source != &source) {
+        object = source.Read(entry);
+        loaded_source = &source;
         loaded = true;
         ++load_count;
     }
@@ -116,6 +122,7 @@ void* RootEntryReader::Read() {
 
 void RootEntryReader::Invalidate() {
     object = nullptr;
+    loaded_source = nullptr;
     loaded = false;
 }
 
@@ -147,20 +154,26 @@ void RootObjectContext::Bind(TTree* tree_p, TBranch* branch_p, TClass* root_clas
     if (!tree || !branch || !root_class) {
         throw InvalidInputException("Cannot bind null ROOT tree/branch/class");
     }
-    RootDebug("OBJECT.BEFORE_NEW", "class=" + class_name);
-    owned_object = root_class->New();
-    if (!owned_object) {
-        throw IOException("TClass::New failed for " + class_name);
-    }
-    address_slot = owned_object;
-    branch->SetAutoDelete(kFALSE);
-    branch->SetAddress(&address_slot);
-    RootDebug("OBJECT.BOUND", "class=" + class_name);
+    // Binding is intentionally metadata-only.  Serialized scans must not pay
+    // for a top-level C++ object unless validation or fallback actually asks
+    // for RootObjectReader::Read().
+    RootDebug("OBJECT.LAZY_BOUND", "class=" + class_name);
 }
 
 void* RootObjectContext::Read(uint64_t entry) {
-    if (!tree || !branch || !address_slot) {
+    if (!tree || !branch || !root_class) {
         return nullptr;
+    }
+    if (!address_slot) {
+        RootDebug("OBJECT.BEFORE_NEW", "class=" + class_name);
+        owned_object = root_class->New();
+        if (!owned_object) {
+            throw IOException("TClass::New failed for " + class_name);
+        }
+        address_slot = owned_object;
+        branch->SetAutoDelete(kFALSE);
+        branch->SetAddress(&address_slot);
+        RootDebug("OBJECT.BOUND", "class=" + class_name);
     }
     const auto bytes = tree->GetEntry(static_cast<Long64_t>(entry));
     return bytes < 0 ? nullptr : address_slot;

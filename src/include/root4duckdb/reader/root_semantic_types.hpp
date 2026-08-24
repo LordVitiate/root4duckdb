@@ -1,5 +1,7 @@
 #pragma once
 
+#include "root4duckdb/reader/root_primitive_value.hpp"
+
 #include "duckdb.hpp"
 
 #include <cstdint>
@@ -46,33 +48,15 @@ std::string PrimitiveBaseType(const std::string& raw_type);
 uint32_t PrimitiveTypeSize(const std::string& raw_type);
 std::string ArrayDimensionsText(const std::vector<uint32_t>& dimensions);
 bool IsPrimitiveType(const std::string& raw_type);
+/// Resolves enum typedefs and other named basic fields from ROOT's persistent
+/// streamer type code while preserving already-recognized primitive spelling.
+std::string StreamerPrimitiveType(int type_code, const std::string& raw_type);
 bool IsStringType(const std::string& raw_type);
 std::string ExtractInnerType(const std::string& container_type);
 LogicalType RootTypeToLogicalType(const std::string& raw_type);
 LogicalType RootTypeToScanLogicalType(const std::string& raw_type, bool is_string, bool is_primitive);
 bool IsLosslessDoubleBackedType(const std::string& raw_type);
 double ReadPrimitiveAsDouble(void* pointer, const std::string& raw_type);
-
-enum class RootPrimitiveKind : uint8_t { SIGNED, UNSIGNED, FLOATING };
-
-/// Exact primitive value used when a double would lose 64-bit integers.
-struct RootPrimitiveValue {
-    RootPrimitiveKind kind = RootPrimitiveKind::FLOATING;
-    int64_t signed_value = 0;
-    uint64_t unsigned_value = 0;
-    double floating_value = 0.0;
-
-    static RootPrimitiveValue Signed(int64_t value);
-    static RootPrimitiveValue Unsigned(uint64_t value);
-    static RootPrimitiveValue Floating(double value);
-    static RootPrimitiveValue FromPointer(void* pointer, const std::string& raw_type);
-    static RootPrimitiveValue FromDouble(double value, const std::string& raw_type);
-
-    int64_t AsSigned() const;
-    uint64_t AsUnsigned() const;
-    double AsDouble() const;
-    bool AsBool() const;
-};
 
 /// One resolved semantic step through a ROOT object or container.
 struct PathLevel {

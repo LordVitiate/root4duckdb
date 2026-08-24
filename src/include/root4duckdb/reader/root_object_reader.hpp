@@ -94,6 +94,8 @@ class RootEntryReader {
     /// @{
     void Begin(uint64_t entry);
     void* Read();
+    /// Reads the cached entry from an address-isolated object source.
+    void* ReadFrom(RootObjectReader& source);
     void Invalidate();
     uint64_t LoadCount() const;
     /// @}
@@ -102,6 +104,7 @@ class RootEntryReader {
     RootObjectReader& reader;
     uint64_t entry = 0;
     void* object = nullptr;
+    RootObjectReader* loaded_source = nullptr;
     bool loaded = false;
     uint64_t load_count = 0;
 };

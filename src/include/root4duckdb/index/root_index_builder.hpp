@@ -19,7 +19,7 @@ struct RootIndexBuildOptions {
     double bloom_false_positive_rate = 0.01;
     uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
     RootReaderMode reader_mode = RootReaderMode::AUTO;
-    uint32_t raw_validation_entries = 4;
+    uint32_t raw_validation_entries = 0;
     uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
     uint64_t raw_max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
     RootDictionaryCleanupMode dictionary_cleanup_mode = RootDictionaryCleanupMode::FULL;

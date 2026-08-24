@@ -4,6 +4,7 @@
 #include "root4duckdb/serialized/root_serialized_reader.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,11 +13,12 @@ namespace duckdb::rootlake {
 /// Serialized-first reader limits and fallback policy.
 struct RootPathReaderOptions {
     RootReaderMode reader_mode = RootReaderMode::AUTO;
-    uint32_t validation_entries = 4;
+    uint32_t validation_entries = 0;
     uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
     uint64_t max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
     uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
     bool enable_all_branches_on_fallback = false;
+    RootDictionaryCleanupMode dictionary_cleanup_mode = RootDictionaryCleanupMode::FULL;
     std::string operation = "read";
 };
 
@@ -38,6 +40,7 @@ class RootPathReader {
     /// @name Ownership
     /// @{
     RootPathReader();
+    ~RootPathReader();
     RootPathReader(const RootPathReader&) = delete;
     RootPathReader& operator=(const RootPathReader&) = delete;
     RootPathReader(RootPathReader&&) noexcept;
@@ -48,8 +51,7 @@ class RootPathReader {
     /// @{
     void Resolve(TTree* tree, TBranch* object_branch, TClass* root_class, ParsedPath path,
                  std::vector<PathLevel> levels);
-    RootPathReaderStartResult StartSerialized(void* root_object_scratch, RootPathReaderOptions options,
-                                              std::string rejection_reason = {});
+    RootPathReaderStartResult StartSerialized(RootPathReaderOptions options, std::string rejection_reason = {});
     RootPathReadResult TryReadSerialized(uint64_t entry, RootEntryReader& object_entry, std::vector<double>& values,
                                          std::vector<int32_t>& flat_indices, bool collect_indices = true);
     RootPathReadResult TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
@@ -84,6 +86,7 @@ class RootPathReader {
     /// @}
 
   private:
+    bool BindIsolatedValidationReader(std::string& failure_reason);
     bool ActivateFallback(const std::string& reason);
 
     TTree* tree = nullptr;
@@ -95,6 +98,8 @@ class RootPathReader {
     RootPathReaderOptions options;
     SerializedReadPlan serialized_plan;
     SerializedBasketReader serialized_reader;
+    std::unique_ptr<TFile> validation_file;
+    RootObjectReader validation_reader;
     bool serialized_active = false;
     bool fallback_recorded = false;
     uint32_t validation_remaining = 0;

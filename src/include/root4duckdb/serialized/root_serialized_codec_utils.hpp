@@ -23,6 +23,8 @@ uint64_t ReadBE64(const uint8_t* pointer);
 uint32_t PrimitiveWidth(SerializedPrimitiveKind kind);
 /// Decodes one primitive into the common numeric representation.
 bool DecodePrimitive(const uint8_t* pointer, SerializedPrimitiveKind kind, double& value);
+/// Decodes one primitive without routing 64-bit integers through double.
+bool DecodePrimitiveExact(const uint8_t* pointer, SerializedPrimitiveKind kind, RootPrimitiveValue& value);
 /// Normalizes ROOT and C++ primitive type spelling.
 std::string NormalizePrimitiveType(std::string type);
 

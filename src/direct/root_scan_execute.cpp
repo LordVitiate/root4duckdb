@@ -16,7 +16,7 @@ std::vector<std::string> RootScanExecutor::SplitIndexSignature(const std::string
 
 void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column, uint64_t entry,
                                                    const rootlake::SerializedReadPlan& plan,
-                                                   const std::vector<double>& values,
+                                                   const std::vector<rootlake::RootPrimitiveValue>& values,
                                                    const std::vector<int32_t>& flat_indices,
                                                    rootlake::ReadResult& result) {
     result.Clear();

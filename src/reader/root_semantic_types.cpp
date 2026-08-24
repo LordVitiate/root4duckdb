@@ -259,6 +259,53 @@ bool IsPrimitiveType(const std::string& raw_type) {
     return std::find(primitive_types.begin(), primitive_types.end(), type) != primitive_types.end();
 }
 
+std::string StreamerPrimitiveType(int type_code, const std::string& raw_type) {
+    if (IsPrimitiveType(raw_type)) {
+        return PrimitiveBaseType(raw_type);
+    }
+    // ROOT adds kOffsetL/kOffsetP to the basic code for persistent arrays and
+    // pointers.  Pointer rejection remains the streamer's responsibility.
+    while (type_code >= 20 && type_code < 60) {
+        type_code -= 20;
+    }
+    switch (type_code) {
+    case 1:
+        return "Char_t";
+    case 2:
+        return "Short_t";
+    case 3:
+    case 6:
+        return "Int_t";
+    case 4:
+        return "Long_t";
+    case 5:
+        return "Float_t";
+    case 8:
+        return "Double_t";
+    case 9:
+        return "Double_t";
+    case 11:
+        return "UChar_t";
+    case 12:
+        return "UShort_t";
+    case 13:
+    case 15:
+        return "UInt_t";
+    case 14:
+        return "ULong_t";
+    case 16:
+        return "Long64_t";
+    case 17:
+        return "ULong64_t";
+    case 18:
+        return "Bool_t";
+    case 19:
+        return "Float_t";
+    default:
+        return TrimType(raw_type);
+    }
+}
+
 bool IsStringType(const std::string& raw_type) {
     const auto type = TrimType(raw_type);
     return type == "string" || type == "TString";

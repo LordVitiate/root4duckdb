@@ -114,7 +114,7 @@ struct RootScanBindData : public TableFunctionData {
     rootlake::RootHistogramBinding histogram_binding;
     std::unique_ptr<TH1> histogram_object;
     rootlake::RootReaderMode reader_mode = rootlake::RootReaderMode::AUTO;
-    uint32_t raw_validation_entries = 4;
+    uint32_t raw_validation_entries = 0;
     uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
     uint64_t raw_max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
     uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
@@ -169,7 +169,7 @@ struct RootScanLocalState : public LocalTableFunctionState {
 
     rootlake::RootPathReader path_reader;
     idx_t serialized_column = DConstants::INVALID_INDEX;
-    std::vector<double> serialized_values;
+    std::vector<rootlake::RootPrimitiveValue> serialized_values;
     std::vector<int32_t> serialized_indices;
     uint64_t reported_serialized_baskets = 0;
     uint64_t reported_serialized_compressed_bytes = 0;
@@ -273,7 +273,8 @@ class RootScanExecutor final {
                             RootScanLocalState& local, DataChunk& output, idx_t& output_count);
     std::vector<std::string> SplitIndexSignature(const std::string& signature);
     void MaterializeSerializedResult(const RootScanColumn& column, uint64_t entry,
-                                     const rootlake::SerializedReadPlan& plan, const std::vector<double>& values,
+                                     const rootlake::SerializedReadPlan& plan,
+                                     const std::vector<rootlake::RootPrimitiveValue>& values,
                                      const std::vector<int32_t>& flat_indices, rootlake::ReadResult& result);
     CacheResult ReadAndCacheEntry(const RootScanBindData& bind_data, RootScanGlobalState& global,
                                   RootScanLocalState& local, DataChunk& output, idx_t& output_count);

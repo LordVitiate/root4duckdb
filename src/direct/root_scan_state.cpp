@@ -386,7 +386,8 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
             reader_options.max_values_per_entry = bind_data.raw_max_values_per_entry;
             reader_options.tree_cache_bytes = bind_data.tree_cache_bytes;
             reader_options.enable_all_branches_on_fallback = true;
-            local_state->path_reader.StartSerialized(object_reader.CurrentObject(), std::move(reader_options));
+            reader_options.dictionary_cleanup_mode = bind_data.dictionary_cleanup_mode;
+            local_state->path_reader.StartSerialized(std::move(reader_options));
             local_state->serialized_column = col_idx;
         } else if (bind_data.reader_mode == rootlake::RootReaderMode::SERIALIZED) {
             throw InvalidInputException("reader_mode='serialized' cannot bind ROOT object context for " +

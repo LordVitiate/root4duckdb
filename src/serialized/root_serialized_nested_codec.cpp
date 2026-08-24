@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <limits>
+#include <type_traits>
 
 namespace duckdb::rootlake {
 
@@ -24,7 +25,8 @@ bool ValidateLayout(const SerializedEntryLayout& layout, SerializedPrimitiveKind
     return true;
 }
 
-void Fail(std::vector<double>& values, std::vector<int32_t>& indices, std::string& reason, const char* message) {
+template <class VALUE>
+void Fail(std::vector<VALUE>& values, std::vector<int32_t>& indices, std::string& reason, const char* message) {
     values.clear();
     indices.clear();
     reason = message;
@@ -32,11 +34,12 @@ void Fail(std::vector<double>& values, std::vector<int32_t>& indices, std::strin
 
 } // namespace
 
-bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t entry_size, size_t column_offset,
-                                                 uint64_t outer_count, const SerializedEntryLayout& layout,
-                                                 uint64_t max_values_per_entry, std::vector<double>& values,
-                                                 std::vector<int32_t>& flat_indices, std::string& failure_reason,
-                                                 bool collect_indices) {
+template <class VALUE>
+bool DecodeNestedPrimitiveColumn(const uint8_t* bytes, size_t entry_size, size_t column_offset,
+                                 uint64_t outer_count, const SerializedEntryLayout& layout,
+                                 uint64_t max_values_per_entry, std::vector<VALUE>& values,
+                                 std::vector<int32_t>& flat_indices, std::string& failure_reason,
+                                 bool collect_indices) {
     values.clear();
     flat_indices.clear();
     failure_reason.clear();
@@ -110,8 +113,17 @@ bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t en
             flat_indices.reserve(flat_indices.size() + inner_count * 2);
         }
         for (uint64_t inner = 0; inner < inner_count; ++inner) {
-            double value = 0;
-            if (!serialized_codec::DecodePrimitive(bytes + cursor + inner * layout.value_bytes, kind, value)) {
+            VALUE value{};
+            const bool decoded = [&] {
+                if constexpr (std::is_same_v<VALUE, RootPrimitiveValue>) {
+                    return serialized_codec::DecodePrimitiveExact(bytes + cursor + inner * layout.value_bytes, kind,
+                                                                  value);
+                } else {
+                    return serialized_codec::DecodePrimitive(bytes + cursor + inner * layout.value_bytes, kind,
+                                                             value);
+                }
+            }();
+            if (!decoded) {
                 Fail(values, flat_indices, failure_reason,
                      "unsupported primitive decoder for nested serialized vector");
                 return false;
@@ -131,6 +143,25 @@ bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t en
         return false;
     }
     return true;
+}
+
+bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t entry_size, size_t column_offset,
+                                                 uint64_t outer_count, const SerializedEntryLayout& layout,
+                                                 uint64_t max_values_per_entry, std::vector<double>& values,
+                                                 std::vector<int32_t>& flat_indices, std::string& failure_reason,
+                                                 bool collect_indices) {
+    return DecodeNestedPrimitiveColumn(bytes, entry_size, column_offset, outer_count, layout, max_values_per_entry,
+                                       values, flat_indices, failure_reason, collect_indices);
+}
+
+bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t entry_size, size_t column_offset,
+                                                 uint64_t outer_count, const SerializedEntryLayout& layout,
+                                                 uint64_t max_values_per_entry,
+                                                 std::vector<RootPrimitiveValue>& values,
+                                                 std::vector<int32_t>& flat_indices, std::string& failure_reason,
+                                                 bool collect_indices) {
+    return DecodeNestedPrimitiveColumn(bytes, entry_size, column_offset, outer_count, layout, max_values_per_entry,
+                                       values, flat_indices, failure_reason, collect_indices);
 }
 
 } // namespace duckdb::rootlake

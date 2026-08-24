@@ -175,8 +175,8 @@ void ApplySerializedBasketMetadata(BasketAccumulator& basket, const SerializedBa
     }
 }
 
-IndexedPathPlan PreparePath(const RootIndexBuildOptions& options, TBranch* object_branch, TClass* root_class,
-                            uint64_t total_entries, const std::string& logical_path) {
+IndexedPathPlan PreparePath(const RootIndexBuildOptions& options, TTree* tree, TBranch* object_branch,
+                            TClass* root_class, uint64_t total_entries, const std::string& logical_path) {
     IndexedPathPlan plan;
     plan.logical_path = logical_path;
     auto parsed = ParsePath(logical_path);
@@ -190,7 +190,7 @@ IndexedPathPlan PreparePath(const RootIndexBuildOptions& options, TBranch* objec
     plan.statistics_double_safe = IsLosslessDoubleBackedType(levels.back().type);
     plan.schema_id = SchemaFingerprint(parsed.root_class, levels);
     plan.column_id = ColumnId(plan.schema_id, logical_path);
-    plan.reader.Resolve(nullptr, object_branch, root_class, std::move(parsed), std::move(levels));
+    plan.reader.Resolve(tree, object_branch, root_class, std::move(parsed), std::move(levels));
     auto* physical_branch = plan.reader.PhysicalBranch();
     if (!physical_branch) {
         throw InvalidInputException("No persistent branch can provide entry ranges for " + logical_path);
@@ -285,7 +285,8 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
         std::vector<IndexedPathPlan> paths;
         paths.reserve(options.logical_paths.size());
         for (const auto& logical_path : options.logical_paths) {
-            paths.push_back(PreparePath(options, object_branch, root_class, total_entries, logical_path));
+            paths.push_back(
+                PreparePath(options, tree, object_branch, root_class, total_entries, logical_path));
         }
 
         std::vector<TBranch*> projected_branches;
@@ -318,9 +319,10 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
             reader_options.max_entry_bytes = options.raw_max_entry_bytes;
             reader_options.max_values_per_entry = options.raw_max_values_per_entry;
             reader_options.tree_cache_bytes = options.tree_cache_bytes;
+            reader_options.dictionary_cleanup_mode = options.dictionary_cleanup_mode;
             reader_options.operation = "index";
-            const auto started = path.reader.StartSerialized(object_reader.CurrentObject(), std::move(reader_options),
-                                                             std::move(rejection));
+            const auto started =
+                path.reader.StartSerialized(std::move(reader_options), std::move(rejection));
             if (started.serialized_active) {
                 ++serialized_path_count;
             }

@@ -109,8 +109,9 @@ void DatasetScanExecutor::OpenTaskFile(const DatasetBindData& bind, DatasetGloba
     reader_options.max_values_per_entry = bind.raw_max_values_per_entry;
     reader_options.tree_cache_bytes = bind.tree_cache_bytes;
     reader_options.enable_all_branches_on_fallback = true;
-    const auto started = local.path_reader.StartSerialized(local.object_reader.CurrentObject(),
-                                                           std::move(reader_options), std::move(serialized_rejection));
+    reader_options.dictionary_cleanup_mode = bind.dictionary_cleanup_mode;
+    const auto started =
+        local.path_reader.StartSerialized(std::move(reader_options), std::move(serialized_rejection));
     if (started.fallback_activated) {
         global.fallback_files.fetch_add(1);
     }

@@ -175,6 +175,7 @@ std::vector<PathLevel> ResolvePath(TClass* root_class, const std::vector<std::st
         PathLevel level;
         level.name = field;
         level.type = element->GetTypeName();
+        level.type = StreamerPrimitiveType(element->GetType(), level.type);
         level.offset_in_parent = match->offset;
         level.cumulative_offset = cumulative + level.offset_in_parent;
         level.is_primitive = IsPrimitiveType(level.type);

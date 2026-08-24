@@ -40,7 +40,7 @@ print(match.group(0))
 }
 
 rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR/data" "$WORK_DIR/build"
+mkdir -p "$WORK_DIR/data" "$WORK_DIR/build" "$WORK_DIR/legacy"
 
 ROOT_CFLAGS="$(root-config --cflags)"
 ROOT_LIBS="$(root-config --libs)"
@@ -73,6 +73,34 @@ rootcling \
     $ROOT_LIBS
 
 "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
+
+rootcling \
+    -f "$WORK_DIR/build/LegacyTestEventDict.cpp" \
+    -c \
+    -I"$FIXTURE_DIR" \
+    "$FIXTURE_DIR/LegacyTestEvent.hpp" \
+    "$FIXTURE_DIR/LegacyTestEventLinkDef.h"
+
+# shellcheck disable=SC2086
+"$CXX_BIN" -std=c++17 -O2 -fPIC -shared \
+    $ROOT_CFLAGS \
+    -I"$FIXTURE_DIR" \
+    "$FIXTURE_DIR/LegacyTestEvent.cpp" \
+    "$WORK_DIR/build/LegacyTestEventDict.cpp" \
+    -o "$WORK_DIR/build/libLegacyTestEvent.so" \
+    $ROOT_LIBS
+
+# shellcheck disable=SC2086
+"$CXX_BIN" -std=c++17 -O2 \
+    $ROOT_CFLAGS \
+    -I"$FIXTURE_DIR" \
+    "$FIXTURE_DIR/make_legacy_fixture.cpp" \
+    -L"$WORK_DIR/build" -lLegacyTestEvent \
+    -Wl,-rpath,"$WORK_DIR/build" \
+    -o "$WORK_DIR/build/make_legacy_fixture" \
+    $ROOT_LIBS
+
+"$WORK_DIR/build/make_legacy_fixture" "$WORK_DIR/legacy/legacy.root"
 printf '%s\n' "$WORK_DIR/data/a.root" "$WORK_DIR/data/b.root" > "$WORK_DIR/data/two-files.list"
 
 # Bind-only regression: EXPLAIN invokes table-function bind but must not
@@ -242,6 +270,26 @@ FROM read_root(
     reader_mode := 'serialized',
     raw_validation_entries := 2
 );
+SELECT count(*) = 3 AND abs(sum(u) - 6.0) < 0.00001 AS serialized_versioned_fixed_member_ok
+FROM read_root(
+    '$WORK_DIR/legacy/legacy.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/u',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 6
+       AND abs(sum(uv) - 13.5) < 0.00001
+       AND min(vecHit_idx) = 0 AND max(vecHit_idx) = 1
+       AND min(uv_idx) = 0 AND max(uv_idx) = 1
+       AS serialized_versioned_fixed_array_ok
+FROM read_root(
+    '$WORK_DIR/legacy/legacy.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/uv',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
 SELECT count(*) = 5
        AND sum(refs) = 30
        AND min(vecHit_idx) = 0 AND max(vecHit_idx) = 1
@@ -254,10 +302,244 @@ FROM read_root(
     reader_mode := 'serialized',
     raw_validation_entries := 2
 );
+SELECT count(*) = 6
+       AND sum(labels) = 312
+       AND min(vecHit_idx) = 0 AND max(vecHit_idx) = 1
+       AND min(labels_idx) = 0 AND max(labels_idx) = 1
+       AS serialized_nested_set_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/labels/value',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND sum(kind) = 1 AS serialized_named_enum_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/kind',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 12
+       AND sum(refs) = 78
+       AND min(vecLayer_idx) = 0 AND max(vecLayer_idx) = 1
+       AND min(groups_idx) = 0 AND max(groups_idx) = 1
+       AND min(hits_idx) = 0 AND max(hits_idx) = 0
+       AND min(refs_idx) = 0 AND max(refs_idx) = 1
+       AS serialized_arbitrary_depth_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecLayer/groups/hits/refs/value',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND sum(run) = 303 AS serialized_split_scalar_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/run',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 18 AND abs(sum(matrix) - 225.0) < 0.00001 AS serialized_root_fixed_array_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/matrix',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND abs(sum(x) - 3003.0) < 0.00001 AS serialized_split_inline_object_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/point/x',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 2 AND abs(sum(x) - 2001.0) < 0.00001 AS serialized_member_inline_object_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/point/x',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 5 AND abs(sum(u) - 53.0) < 0.00001 AS serialized_split_vector_leaf_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/u',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND sum(big_signed) = 27021597764222982::HUGEINT AS serialized_int64_exact_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/big_signed',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND sum(big_unsigned) = 27021597764225982::HUGEINT AS serialized_uint64_exact_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/big_unsigned',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND abs(sum(compressed_float) - 6.75) < 0.01 AS serialized_float16_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/compressed_float',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND abs(sum(compressed_double) - 303.375) < 0.01 AS serialized_double32_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/compressed_double',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 2 AND sum(run) = 801 AS serialized_unsplit_root_scalar_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/run',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 2 AND abs(sum(x) - 2001.0) < 0.00001 AS serialized_unsplit_inline_object_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/point/x',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 12 AND abs(sum(matrix) - 90.0) < 0.00001 AS serialized_unsplit_fixed_array_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/matrix',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 4 AND abs(sum(key) - 4.0) < 0.00001 AS serialized_map_key_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/mapScore/key',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 4 AND abs(sum(mapScore) - 1603.0) < 0.00001 AS serialized_map_value_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/mapScore/value',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 4 AND sum(setCode) = 22 AS serialized_set_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/setCode/value',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 6 AND abs(sum(first) - 18.0) < 0.00001 AS serialized_pair_first_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/nestedPairs/value/value/first',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 6 AND sum(second) = 1203 AS serialized_pair_second_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/nestedPairs/value/value/second',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 2 AND abs(sum(score) - 6002.0) < 0.00001 AS serialized_custom_member_ok
+FROM read_root(
+    '$WORK_DIR/data/packed.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/custom/score',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND sum(exact_id) = 27021597764222980::HUGEINT AS serialized_nested_int64_exact_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/exact_id',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND sum(exact_uid) = 27021597764225980::HUGEINT AS serialized_nested_uint64_exact_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/exact_uid',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND abs(sum(compressed) - 6.0) < 0.01 AS serialized_nested_float16_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/compressed',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 3 AND abs(sum(compressed_wide) - 6.375) < 0.01 AS serialized_nested_double32_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/compressed_wide',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 6 AND abs(sum(key) - 9.0) < 0.00001 AS serialized_split_map_key_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/mapScore/key',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 6 AND abs(sum(mapScore) - 607.5) < 0.00001 AS serialized_split_map_value_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/mapScore/value',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 6 AND sum(setCode) = 36 AS serialized_split_set_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/setCode/value',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
 SQL
 
 DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
-if [[ "$DIRECT_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue' ]]; then
+if [[ "$DIRECT_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected direct semantic read result: $DIRECT_RESULT" >&2
     exit 1
 fi
@@ -297,7 +579,8 @@ SELECT event_id, vecHit_idx, u
 FROM read_root(
     '$WORK_DIR/data/a.root',
     dictionary := '$WORK_DIR/build/libTestEvent.so',
-    path_prefix := '/TestEvent/vecHit/u'
+    path_prefix := '/TestEvent/vecHit/u',
+    reader_mode := 'object'
 )
 ORDER BY event_id, vecHit_idx;
 SQL
@@ -312,7 +595,8 @@ SELECT event_id, vecHit_idx, u
 FROM read_root(
     '$WORK_DIR/data/a.root',
     dictionary := '$WORK_DIR/build/libTestEvent.so',
-    path_prefix := '/TestEvent/vecHit/u'
+    path_prefix := '/TestEvent/vecHit/u',
+    reader_mode := 'object'
 )
 ORDER BY event_id, vecHit_idx;
 SQL
