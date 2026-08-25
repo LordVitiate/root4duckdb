@@ -2,13 +2,13 @@
 
 namespace duckdb {
 
-void RootScanBinder::AddEventIdColumn(RootScanBindData& bind_data, std::vector<std::string>& return_names,
+void RootScanBinder::AddEntryIdColumn(RootScanBindData& bind_data, std::vector<std::string>& return_names,
                                       std::vector<LogicalType>& return_types) {
-    return_names.emplace_back("event_id");
+    return_names.emplace_back("entry_id");
     return_types.emplace_back(LogicalType(LogicalTypeId::BIGINT));
 
     RootScanColumn col;
-    col.name = "event_id";
+    col.name = "entry_id";
     bind_data.columns.emplace_back(std::move(col));
 }
 
@@ -108,7 +108,7 @@ void RootScanBinder::BindDirectPrimitives(RootScanBindData& bind_data, const std
         resolved_columns.emplace_back(std::move(resolved));
     }
 
-    AddEventIdColumn(bind_data, return_names, return_types);
+    AddEntryIdColumn(bind_data, return_names, return_types);
 
     const std::string root_class_name = rootlake::ParsePathPrefix(path_prefix).root_class;
     for (const auto& index_name : ordered_index_names) {
@@ -155,7 +155,7 @@ void RootScanBinder::BindEmptyResult(RootScanBindData& bind_data, const std::str
                                      std::vector<std::string>& return_names, std::vector<LogicalType>& return_types) {
     bind_data.SelectEmptyMode();
     bind_data.total_rows = 0;
-    AddEventIdColumn(bind_data, return_names, return_types);
+    AddEntryIdColumn(bind_data, return_names, return_types);
     if (!path_prefix.empty()) {
         std::string clean_prefix = path_prefix;
         if (clean_prefix.back() == '/') {
@@ -247,11 +247,12 @@ bool RootScanBinder::BindSemanticPath(RootScanBindData& bind_data, TFile* file, 
     }
 
     if (!selection.child_paths.empty()) {
-        BindBrowseMode(bind_data, selection.bind_prefix, selection.child_paths, return_names, return_types);
-        RootDebug("SEMANTIC.SUCCESS", "mode=browse children=" + std::to_string(selection.child_paths.size()));
-        return true;
+        throw InvalidInputException("read_root relation '" + rootlake::NormalizePath(path_prefix_raw) +
+                                    "' has no immediate primitive/string columns; use root_describe(...) "
+                                    "to inspect the next logical level");
     }
-    return false;
+    throw InvalidInputException("read_root relation '" + rootlake::NormalizePath(path_prefix_raw) +
+                                "' exposes no readable immediate primitive/string columns");
 }
 
 std::unique_ptr<TFile> RootScanBinder::OpenRepresentativeFile(RootScanBindData& bind_data) {
@@ -334,7 +335,7 @@ unique_ptr<FunctionData> RootScanBinder::Bind(ClientContext& context, TableFunct
 void RootScanBinder::ConfigureOptions(RootScanBindData& bind_data, ClientContext& context,
                                       TableFunctionBindInput& input) {
     bind_data.input_specification = input.inputs[0].ToString();
-    bind_data.root_paths = rootlake::ResolveRootInputs(context, bind_data.input_specification);
+    bind_data.root_paths = rootlake::RootInputResolver(context).Resolve(bind_data.input_specification);
     bind_data.root_path = bind_data.root_paths.front();
     auto reader_mode = input.named_parameters.find("reader_mode");
     if (reader_mode != input.named_parameters.end()) {
@@ -540,7 +541,7 @@ void RootScanBinder::BindPrimitiveCompatibility(RootScanBindData& bind_data, TFi
             bind_data.tree_name = target_tree->GetName();
             bind_data.total_rows = static_cast<uint64_t>(std::max<Long64_t>(0, target_tree->GetEntries()));
 
-            AddEventIdColumn(bind_data, return_names, return_types);
+            AddEntryIdColumn(bind_data, return_names, return_types);
 
             for (const auto& branch : tree_primitives) {
                 RootScanColumn column;
@@ -578,20 +579,9 @@ void RootScanBinder::BindPrimitiveCompatibility(RootScanBindData& bind_data, TFi
         if (branch.name != target_name) {
             continue;
         }
-        bind_data.SelectDirectBranchMode(branch);
-        bind_data.tree_name = tree.GetName();
-        bind_data.total_rows = tree.GetEntries();
-        AddEventIdColumn(bind_data, return_names, return_types);
-
-        RootScanColumn column;
-        column.name = branch.name;
-        column.branch_name = branch.name;
-        column.root_type = branch.type_name;
-        column.is_string = rootlake::IsStringType(branch.type_name);
-        bind_data.columns.push_back(std::move(column));
-        return_names.emplace_back(branch.name);
-        return_types.emplace_back(rootlake::RootTypeToScanLogicalType(branch.type_name, false, true));
-        return;
+        throw InvalidInputException("read_root path_prefix must select a TTree/object/collection, not primitive "
+                                    "branch '" + branch.name + "'; select path_prefix := '/" + tree.GetName() +
+                                    "' and project the '" + branch.name + "' SQL column instead");
     }
 
     BindEmptyResult(bind_data, path_prefix, return_names, return_types);

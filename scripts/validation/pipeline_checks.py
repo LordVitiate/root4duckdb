@@ -180,8 +180,9 @@ def _check_shared_pipeline(validator: ProjectValidator) -> None:
     validator.require_tokens("direct serialized-first contract", direct, (
         "rootlake::RootObjectReader",
         "rootlake::RootPathReader",
-        "lstate.path_reader.TryReadSerialized",
-        "lstate.path_reader.SerializedActive",
+        "serialized.path_reader.TryReadSerialized",
+        "serialized.path_reader.SerializedActive",
+        "serialized_columns",
     ))
 
     consumers = {

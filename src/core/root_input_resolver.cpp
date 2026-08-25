@@ -16,7 +16,9 @@
 namespace duckdb::rootlake {
 namespace fs = std::filesystem;
 
-static std::string TrimInput(std::string value) {
+namespace {
+
+std::string TrimInput(std::string value) {
     const auto begin = value.find_first_not_of(" \t\r\n");
     if (begin == std::string::npos) {
         return {};
@@ -25,28 +27,7 @@ static std::string TrimInput(std::string value) {
     return value.substr(begin, end - begin + 1);
 }
 
-bool IsRootFileName(const std::string& path) {
-    const auto slash = path.find_last_of("/\\");
-    const auto name = path.substr(slash == std::string::npos ? 0 : slash + 1);
-    const auto root = name.rfind(".root");
-    if (root == std::string::npos) {
-        return false;
-    }
-    const auto suffix = name.substr(root + 5);
-    if (suffix.empty()) {
-        return true;
-    }
-    if (suffix.front() != '.' || suffix.size() == 1) {
-        return false;
-    }
-    return std::all_of(suffix.begin() + 1, suffix.end(), [](unsigned char value) { return std::isdigit(value); });
-}
-
-bool HasRootGlob(const std::string& path) {
-    return path.find_first_of("*?[") != std::string::npos;
-}
-
-static std::vector<std::string> ParseSpecifications(const std::string& raw) {
+std::vector<std::string> ParseSpecifications(const std::string& raw) {
     const auto input = TrimInput(raw);
     if (input.empty()) {
         return {};
@@ -82,7 +63,7 @@ static std::vector<std::string> ParseSpecifications(const std::string& raw) {
     return result;
 }
 
-static std::vector<std::string> ReadList(const std::string& path) {
+std::vector<std::string> ReadLocalList(const std::string& path) {
     std::ifstream input(path);
     if (!input) {
         throw IOException("Cannot open ROOT URI list: " + path);
@@ -98,20 +79,66 @@ static std::vector<std::string> ReadList(const std::string& path) {
     return result;
 }
 
-static bool IsImplicitList(const std::string& path) {
+bool IsImplicitList(const std::string& path) {
+    if (RootInputResolver::IsRemoteUri(path)) {
+        return false;
+    }
     const auto extension = fs::path(path).extension().string();
     if (extension != ".txt" && extension != ".list" && extension != ".manifest" && extension != ".uris") {
         return false;
     }
     std::error_code error;
-    if (!fs::is_regular_file(fs::path(path), error)) {
-        return false;
-    }
-    return true;
+    return fs::is_regular_file(fs::path(path), error) && !error;
 }
 
-std::vector<std::string> ResolveRootInputs(ClientContext& context, const std::string& raw) {
-    auto& file_system = FileSystem::GetFileSystem(context);
+std::string RemoteGlobFailure(const std::string& pattern, const std::string& detail) {
+    std::string message = "Cannot expand remote ROOT glob '" + pattern + "'";
+    if (!detail.empty()) {
+        message += ": " + detail;
+    }
+    message += ". Exact remote URIs are opened by ROOT; wildcard expansion requires a DuckDB filesystem "
+               "backend that can list that URI scheme. Use an explicit JSON/comma list or a local @list of URIs "
+               "when listing is unavailable.";
+    return message;
+}
+
+} // namespace
+
+RootInputResolver::RootInputResolver(ClientContext& context) : context_(context) {
+}
+
+bool RootInputResolver::IsRootFileName(const std::string& path) {
+    const auto slash = path.find_last_of("/\\");
+    const auto name = path.substr(slash == std::string::npos ? 0 : slash + 1);
+    const auto root = name.rfind(".root");
+    if (root == std::string::npos) {
+        return false;
+    }
+    const auto suffix = name.substr(root + 5);
+    if (suffix.empty()) {
+        return true;
+    }
+    if (suffix.front() != '.' || suffix.size() == 1) {
+        return false;
+    }
+    return std::all_of(suffix.begin() + 1, suffix.end(), [](unsigned char value) { return std::isdigit(value); });
+}
+
+bool RootInputResolver::HasGlob(const std::string& path) {
+    return path.find_first_of("*?[") != std::string::npos;
+}
+
+bool RootInputResolver::IsRemoteUri(const std::string& path) {
+    const auto scheme = path.find("://");
+    return scheme != std::string::npos && scheme > 0;
+}
+
+bool RootInputResolver::IsS3Uri(const std::string& path) {
+    return path.rfind("s3://", 0) == 0 || path.rfind("davix://", 0) == 0;
+}
+
+std::vector<std::string> RootInputResolver::Resolve(const std::string& raw) const {
+    auto& file_system = FileSystem::GetFileSystem(context_);
     std::deque<std::string> pending;
     for (auto& item : ParseSpecifications(raw)) {
         pending.push_back(std::move(item));
@@ -139,51 +166,65 @@ std::vector<std::string> ResolveRootInputs(ClientContext& context, const std::st
         std::string list_path;
         if (spec.front() == '@') {
             list_path = spec.substr(1);
+            if (IsRemoteUri(list_path)) {
+                throw InvalidInputException("ROOT @lists must be local files; their entries may contain remote URIs");
+            }
         } else if (IsImplicitList(spec)) {
             list_path = spec;
         }
         if (!list_path.empty()) {
-            auto nested = ReadList(list_path);
+            auto nested = ReadLocalList(list_path);
             for (auto it = nested.rbegin(); it != nested.rend(); ++it) {
                 pending.push_front(std::move(*it));
             }
             continue;
         }
 
-        // The overwhelmingly common explicit input needs no existence probe.
-        // This is essential for remote lists: bind must not perform one stat or
-        // open per URI before DuckDB's workers can start.
-        if (!HasRootGlob(spec) && (IsRootFileName(spec) || spec.find("://") != std::string::npos)) {
+        // Exact paths and URIs are intentionally not probed during resolution.
+        // For s3:// and davix:// this keeps credentials in ROOT/.rootrc or the
+        // process environment instead of copying secrets into SQL text/plans.
+        if (!HasGlob(spec) && (RootInputResolver::IsRootFileName(spec) || IsRemoteUri(spec))) {
             append(spec);
             continue;
         }
 
         std::string pattern = spec;
         bool directory_input = false;
-        std::error_code error;
-        if (fs::is_directory(fs::path(spec), error)) {
-            directory_input = true;
-            pattern = (fs::path(spec) / "*.root*").string();
+        if (!IsRemoteUri(spec)) {
+            std::error_code error;
+            if (fs::is_directory(fs::path(spec), error) && !error) {
+                directory_input = true;
+                pattern = (fs::path(spec) / "*.root*").string();
+            }
         }
 
-        auto matches = file_system.Glob(pattern);
         std::vector<std::string> matched_files;
-        matched_files.reserve(matches.size());
-        for (auto& entry : matches) {
-            // An explicit user glob is authoritative. Directory shorthand is
-            // the only expansion that applies the conventional ROOT suffix.
-            if (!directory_input || IsRootFileName(entry.path)) {
-                matched_files.push_back(std::move(entry.path));
+        try {
+            auto matches = file_system.Glob(pattern);
+            matched_files.reserve(matches.size());
+            for (auto& entry : matches) {
+                if (!directory_input || RootInputResolver::IsRootFileName(entry.path)) {
+                    matched_files.push_back(std::move(entry.path));
+                }
             }
+        } catch (const std::exception& exception) {
+            if (IsRemoteUri(pattern) && HasGlob(pattern)) {
+                throw IOException(RemoteGlobFailure(pattern, exception.what()));
+            }
+            throw;
         }
         std::sort(matched_files.begin(), matched_files.end());
         for (const auto& path : matched_files) {
             append(path);
         }
 
-        // Exact remote paths and missing exact local paths must reach the open
-        // stage: silently dropping them would make a multi-file result partial.
-        if (matched_files.empty() && !HasRootGlob(spec)) {
+        if (matched_files.empty() && IsRemoteUri(spec) && HasGlob(spec)) {
+            throw IOException(RemoteGlobFailure(spec, "the filesystem backend returned no matches"));
+        }
+
+        // Missing exact local paths reach the common open stage so multi-file
+        // scans report them through the same unavailable-source telemetry.
+        if (matched_files.empty() && !HasGlob(spec)) {
             append(spec);
         }
     }
@@ -192,6 +233,18 @@ std::vector<std::string> ResolveRootInputs(ClientContext& context, const std::st
         throw IOException("No ROOT files matched input specification: " + raw);
     }
     return files;
+}
+
+std::vector<std::string> ResolveRootInputs(ClientContext& context, const std::string& input) {
+    return RootInputResolver(context).Resolve(input);
+}
+
+bool IsRootFileName(const std::string& path) {
+    return RootInputResolver::IsRootFileName(path);
+}
+
+bool HasRootGlob(const std::string& path) {
+    return RootInputResolver::HasGlob(path);
 }
 
 } // namespace duckdb::rootlake

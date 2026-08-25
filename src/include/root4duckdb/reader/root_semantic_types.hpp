@@ -76,7 +76,20 @@ struct PathLevel {
     TClass* element_class = nullptr;
 };
 
-/// Primitive children selected when browsing a non-leaf semantic path.
+/// One immediate child returned by metadata-only semantic browsing.
+struct SemanticPathChild {
+    std::string path;
+    std::string name;
+    std::string kind;
+    std::string root_type;
+    bool is_primitive = false;
+    bool is_string = false;
+    bool is_container = false;
+    bool is_fixed_array = false;
+    bool is_pointer = false;
+};
+
+/// Primitive children selected when binding a relation path.
 struct SemanticPathSelection {
     std::string bind_prefix;
     std::vector<std::string> primitive_paths;
@@ -88,7 +101,7 @@ struct ReadResult {
     std::vector<std::string> strings;
     std::vector<RootPrimitiveValue> numbers;
     std::vector<bool> is_string_flag;
-    std::vector<int64_t> event_ids;
+    std::vector<int64_t> entry_ids;
     std::vector<std::vector<int>> vector_indices;
     std::vector<std::string> vector_names;
     std::string source_path;
@@ -96,11 +109,11 @@ struct ReadResult {
     size_t size() const;
     bool empty() const;
     void Clear();
-    void AddString(const std::string& value, int64_t event_id, const std::vector<int32_t>& indices,
+    void AddString(const std::string& value, int64_t entry_id, const std::vector<int32_t>& indices,
                    const std::vector<std::string>& index_names);
-    void AddNumber(const RootPrimitiveValue& value, int64_t event_id, const std::vector<int32_t>& indices,
+    void AddNumber(const RootPrimitiveValue& value, int64_t entry_id, const std::vector<int32_t>& indices,
                    const std::vector<std::string>& index_names);
-    void AddNumber(double value, int64_t event_id, const std::vector<int32_t>& indices,
+    void AddNumber(double value, int64_t entry_id, const std::vector<int32_t>& indices,
                    const std::vector<std::string>& index_names);
 };
 

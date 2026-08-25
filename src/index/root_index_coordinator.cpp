@@ -253,7 +253,7 @@ unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& co
     state->dictionary_fingerprint = bind.dictionary_fingerprint;
 
     LoadRootDictionary(bind.dictionary);
-    const auto files = ResolveRootInputs(context, bind.root_glob);
+    const auto files = RootInputResolver(context).Resolve(bind.root_glob);
     const auto index_options = ConfigureRuntime(context, bind, *state, files);
     const auto dataset_id = DatasetId(bind, files);
     fs::path staging_root;

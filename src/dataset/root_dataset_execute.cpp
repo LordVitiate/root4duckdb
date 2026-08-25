@@ -1,5 +1,7 @@
 #include "root4duckdb/dataset/root_dataset_scan_internal.hpp"
 
+#include "root4duckdb/core/root_file_opener.hpp"
+
 namespace duckdb::rootlake {
 
 void DatasetScanExecutor::ValidateAccessPlan(const SchemaBinding& schema, const std::vector<PathLevel>& actual) const {
@@ -49,11 +51,12 @@ void DatasetScanExecutor::OpenTaskFile(const DatasetBindData& bind, DatasetGloba
     local.reported_serialized_baskets = 0;
     local.reported_serialized_compressed_bytes = 0;
     local.reported_serialized_entry_bytes = 0;
-    local.file.reset(TFile::Open(task.root_uri.c_str(), "READ"));
+    auto opened = OpenRootFile(task.root_uri);
     global.opened_files.fetch_add(1);
-    if (!local.file || local.file->IsZombie()) {
-        throw IOException("Failed to open ROOT file: " + task.root_uri);
+    if (!opened) {
+        throw IOException("Failed to open ROOT file: " + task.root_uri + ": " + opened.error);
     }
+    local.file = std::move(opened.file);
     auto schema_it = bind.schema_lookup.find(task.schema_id);
     if (schema_it == bind.schema_lookup.end()) {
         throw IOException("Unknown schema_id in task: " + task.schema_id);

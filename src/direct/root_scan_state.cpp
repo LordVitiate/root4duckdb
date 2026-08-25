@@ -16,17 +16,24 @@ RootEntryScheduler::WorkBatch RootEntryScheduler::ClaimWork(uint64_t preferred_b
         return {0, 0};
     }
 
+    if (preferred_batch_size == 0) {
+        preferred_batch_size = DEFAULT_BATCH_SIZE;
+    }
     WorkBatch batch;
     batch.start = next_row_;
-    batch.end = std::min(next_row_ + preferred_batch_size, total_rows_);
+    const auto remaining = total_rows_ - next_row_;
+    const auto count = std::min(preferred_batch_size, remaining);
+    batch.end = next_row_ + count;
     next_row_ = batch.end;
     return batch;
 }
 
-idx_t RootEntryScheduler::EstimateOptimalThreads(uint64_t total_rows) {
-    constexpr uint64_t ROWS_PER_THREAD = 500000;
-    const idx_t threads = static_cast<idx_t>(total_rows / ROWS_PER_THREAD);
-    return std::max<idx_t>(1, threads);
+idx_t RootEntryScheduler::EstimateWorkUnits(uint64_t total_rows, uint64_t batch_size) {
+    if (total_rows == 0 || batch_size == 0) {
+        return 1;
+    }
+    const auto units = 1 + ((total_rows - 1) / batch_size);
+    return static_cast<idx_t>(std::min<uint64_t>(units, std::numeric_limits<idx_t>::max()));
 }
 
 bool RootScanBindData::IsMultiFile() const {
@@ -103,13 +110,7 @@ RootScanBindData::~RootScanBindData() noexcept {
 }
 
 idx_t RootScanGlobalState::MaxThreads() const {
-    if (force_single_thread) {
-        return 1;
-    }
-    if (file_scheduler) {
-        return file_scheduler->MaxThreads();
-    }
-    return RootEntryScheduler::EstimateOptimalThreads(scheduled_rows);
+    return force_single_thread ? 1 : std::max<idx_t>(1, worker_limit);
 }
 
 RootScanLocalState::~RootScanLocalState() = default;
@@ -138,28 +139,25 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
     }
     global_state->total_rows = bind_data.total_rows;
     global_state->next_row = 0;
-    if (bind_data.IsMultiFile() && !bind_data.IsBrowseMode() && !bind_data.IsEmptyMode() &&
-        !bind_data.IsHistogramMode()) {
-        const auto runtime = rootlake::RootRuntimeSettings::From(context, bind_data.root_paths.size());
-        global_state->file_scheduler =
-            make_uniq<rootlake::RootDirectFileScheduler>(bind_data.root_paths, runtime.threads);
-    }
     if (!bind_data.IsBrowseMode() && !bind_data.IsHistogramMode() && global_state->filters) {
         for (const auto& entry : global_state->filters->filters) {
             if (entry.first >= global_state->scan_column_ids.size()) {
                 continue;
             }
             const auto full_column = global_state->scan_column_ids[entry.first];
-            if (full_column == bind_data.source_id_column && global_state->file_scheduler) {
+            if (full_column == bind_data.source_id_column && bind_data.IsMultiFile()) {
                 const auto source_range = rootlake::ExtractRootUnsignedRange(*entry.second);
                 if (!source_range.known) {
                     continue;
                 }
                 if (source_range.impossible) {
-                    global_state->event_range_impossible = true;
+                    global_state->entry_range_impossible = true;
                     break;
                 }
-                global_state->file_scheduler->SetSourceRange(source_range.lower, source_range.upper);
+                global_state->source_lower = std::max(global_state->source_lower, source_range.lower);
+                if (source_range.upper != std::numeric_limits<uint64_t>::max()) {
+                    global_state->source_upper = std::min(global_state->source_upper, source_range.upper);
+                }
                 continue;
             }
             if (full_column != 0 && full_column != COLUMN_IDENTIFIER_ROW_ID) {
@@ -170,16 +168,16 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
                 continue;
             }
             if (range.impossible) {
-                global_state->event_range_impossible = true;
+                global_state->entry_range_impossible = true;
                 if (!bind_data.IsMultiFile()) {
                     global_state->next_row = bind_data.total_rows;
                     global_state->total_rows = bind_data.total_rows;
                 }
                 break;
             }
-            global_state->event_lower = std::max(global_state->event_lower, range.lower);
+            global_state->entry_lower = std::max(global_state->entry_lower, range.lower);
             if (range.upper != std::numeric_limits<uint64_t>::max()) {
-                global_state->event_upper = std::min(global_state->event_upper, range.upper);
+                global_state->entry_upper = std::min(global_state->entry_upper, range.upper);
             }
             if (!bind_data.IsMultiFile()) {
                 global_state->next_row = std::max(global_state->next_row, range.lower);
@@ -191,6 +189,20 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
     }
     global_state->scheduled_rows =
         global_state->total_rows >= global_state->next_row ? global_state->total_rows - global_state->next_row : 0;
+
+    if (!bind_data.IsBrowseMode() && !bind_data.IsEmptyMode() && !bind_data.IsHistogramMode()) {
+        const idx_t work_units = bind_data.IsMultiFile()
+                                     ? std::max<idx_t>(1, bind_data.root_paths.size())
+                                     : RootEntryScheduler::EstimateWorkUnits(global_state->scheduled_rows);
+        const auto runtime = rootlake::RootRuntimeSettings::From(
+            context, std::max<idx_t>(1, bind_data.root_paths.size()), 0, work_units);
+        global_state->worker_limit = runtime.threads;
+        if (bind_data.IsMultiFile()) {
+            global_state->file_scheduler =
+                make_uniq<rootlake::RootDirectFileScheduler>(bind_data.root_paths, global_state->worker_limit);
+            global_state->file_scheduler->SetSourceRange(global_state->source_lower, global_state->source_upper);
+        }
+    }
     return std::move(global_state);
 }
 
@@ -298,12 +310,12 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
             const auto entries = static_cast<uint64_t>(std::max<Long64_t>(0, tree->GetEntries()));
 
             local_state->local_current_row =
-                gstate.event_range_impossible ? entries : std::min(entries, gstate.event_lower);
+                gstate.entry_range_impossible ? entries : std::min(entries, gstate.entry_lower);
 
             local_state->local_end_row = entries;
 
-            if (gstate.event_upper != std::numeric_limits<uint64_t>::max()) {
-                local_state->local_end_row = std::min(entries, gstate.event_upper + 1);
+            if (gstate.entry_upper != std::numeric_limits<uint64_t>::max()) {
+                local_state->local_end_row = std::min(entries, gstate.entry_upper + 1);
             }
 
             local_state->file_active = true;
@@ -357,10 +369,10 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         if (gstate.file_scheduler) {
             const auto entries = static_cast<uint64_t>(std::max<Long64_t>(0, tree->GetEntries()));
             local_state->local_current_row =
-                gstate.event_range_impossible ? entries : std::min(entries, gstate.event_lower);
+                gstate.entry_range_impossible ? entries : std::min(entries, gstate.entry_lower);
             local_state->local_end_row = entries;
-            if (gstate.event_upper != std::numeric_limits<uint64_t>::max()) {
-                local_state->local_end_row = std::min(entries, gstate.event_upper + 1);
+            if (gstate.entry_upper != std::numeric_limits<uint64_t>::max()) {
+                local_state->local_end_row = std::min(entries, gstate.entry_upper + 1);
             }
             local_state->file_active = true;
             gstate.file_scheduler->ObserveSchema("primitive:" + direct_branch_info.type_name);
@@ -423,45 +435,71 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         }
     }
     if (serialized_candidates.empty()) {
+        // An index-only projection needs one representative value column to
+        // recover the collection shape; decoding every sibling is wasteful.
         for (idx_t col_idx = 0; col_idx < bind_data.columns.size(); ++col_idx) {
             const auto& col = bind_data.columns[col_idx];
             if (!col.is_virtual_index && !col.is_string && !col.levels.empty() && !col.logical_path.empty()) {
                 serialized_candidates.push_back(col_idx);
+                break;
             }
         }
     }
 
-    if (serialized_candidates.size() == 1) {
-        const auto col_idx = serialized_candidates.front();
+    std::vector<TBranch*> projected_branches;
+    TTree* projection_tree = nullptr;
+    bool all_candidates_projectable = !serialized_candidates.empty();
+    local_state->serialized_columns.reserve(serialized_candidates.size());
+    for (const auto col_idx : serialized_candidates) {
         const auto& col = bind_data.columns[col_idx];
         auto reader_it = local_state->root_readers.find(col.branch_name);
-        if (reader_it != local_state->root_readers.end()) {
-            auto& object_reader = reader_it->second;
-            auto parsed = rootlake::ParsePath(col.logical_path);
-            local_state->path_reader.Resolve(object_reader.Tree(), object_reader.ObjectBranch(),
-                                             object_reader.RootClass(), std::move(parsed), col.levels);
-            const auto projection =
-                local_state->path_reader.PhysicalMode() == "ancestor"
-                    ? rootlake::ApplyBranchProjection(object_reader.Tree(), {local_state->path_reader.PhysicalBranch()},
-                                                      bind_data.root_access.tree_cache_bytes)
-                    : rootlake::BranchProjectionResult{};
-            if (!projection.applied) {
-                rootlake::EnableAllBranches(object_reader.Tree(), bind_data.root_access.tree_cache_bytes);
+        if (reader_it == local_state->root_readers.end()) {
+            all_candidates_projectable = false;
+            if (bind_data.root_access.reader_mode == rootlake::RootReaderMode::SERIALIZED) {
+                throw InvalidInputException("reader_mode='serialized' cannot bind ROOT object context for " +
+                                            col.logical_path);
             }
-            auto reader_options = bind_data.root_access;
-            reader_options.enable_all_branches_on_fallback = true;
-            local_state->path_reader.StartSerialized(std::move(reader_options));
-            local_state->serialized_column = col_idx;
-        } else if (bind_data.root_access.reader_mode == rootlake::RootReaderMode::SERIALIZED) {
-            throw InvalidInputException("reader_mode='serialized' cannot bind ROOT object context for " +
-                                        col.logical_path);
-        } else {
             rootlake::WarnRootFallbackOnce(col.logical_path, "unknown", "ROOT object context is unavailable");
+            continue;
         }
-    } else if (bind_data.root_access.reader_mode == rootlake::RootReaderMode::SERIALIZED &&
-               serialized_candidates.size() > 1) {
-        throw InvalidInputException(
-            "reader_mode='serialized' requires exactly one materialized logical ROOT value column");
+
+        RootSerializedColumnState state;
+        state.column_id = col_idx;
+        auto& object_reader = reader_it->second;
+        if (!projection_tree) {
+            projection_tree = object_reader.Tree();
+        } else if (projection_tree != object_reader.Tree()) {
+            all_candidates_projectable = false;
+        }
+        auto parsed = rootlake::ParsePath(col.logical_path);
+        state.path_reader.Resolve(object_reader.Tree(), object_reader.ObjectBranch(), object_reader.RootClass(),
+                                  std::move(parsed), col.levels);
+        if (state.path_reader.PhysicalMode() == "ancestor") {
+            projected_branches.push_back(state.path_reader.PhysicalBranch());
+        } else {
+            all_candidates_projectable = false;
+        }
+        local_state->serialized_columns.emplace_back(std::move(state));
+    }
+
+    if (!local_state->serialized_columns.empty()) {
+        const auto projection =
+            all_candidates_projectable
+                ? rootlake::ApplyBranchProjection(projection_tree, projected_branches,
+                                                  bind_data.root_access.tree_cache_bytes)
+                : rootlake::BranchProjectionResult{};
+        if (!projection.applied) {
+            for (auto& [root_class_name, reader] : local_state->root_readers) {
+                (void)root_class_name;
+                rootlake::EnableAllBranches(reader.Tree(), bind_data.root_access.tree_cache_bytes);
+            }
+        }
+
+        auto reader_options = bind_data.root_access;
+        reader_options.enable_all_branches_on_fallback = true;
+        for (auto& state : local_state->serialized_columns) {
+            state.path_reader.StartSerialized(reader_options);
+        }
     }
 
     for (const auto& col : bind_data.columns) {
@@ -478,15 +516,26 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
                 std::max<Long64_t>(0, local_state->root_readers.begin()->second.Tree()->GetEntries()));
         }
         local_state->local_current_row =
-            gstate.event_range_impossible ? entries : std::min(entries, gstate.event_lower);
+            gstate.entry_range_impossible ? entries : std::min(entries, gstate.entry_lower);
         local_state->local_end_row = entries;
-        if (gstate.event_upper != std::numeric_limits<uint64_t>::max()) {
-            local_state->local_end_row = std::min(entries, gstate.event_upper + 1);
+        if (gstate.entry_upper != std::numeric_limits<uint64_t>::max()) {
+            local_state->local_end_row = std::min(entries, gstate.entry_upper + 1);
         }
         local_state->file_active = true;
-        const auto fingerprint = local_state->path_reader.SerializedPlan().schema_fingerprint.empty()
-                                     ? std::string("object:") + bind_data.tree_name
-                                     : local_state->path_reader.SerializedPlan().schema_fingerprint;
+        std::string fingerprint;
+        for (const auto& state : local_state->serialized_columns) {
+            const auto& column_fingerprint = state.path_reader.SerializedPlan().schema_fingerprint;
+            if (column_fingerprint.empty()) {
+                continue;
+            }
+            if (!fingerprint.empty()) {
+                fingerprint += '|';
+            }
+            fingerprint += column_fingerprint;
+        }
+        if (fingerprint.empty()) {
+            fingerprint = std::string("object:") + bind_data.tree_name;
+        }
         gstate.file_scheduler->ObserveSchema(fingerprint);
     }
 }
@@ -498,7 +547,7 @@ unique_ptr<LocalTableFunctionState> RootScanStateFactory::CreateLocal(TableFunct
     auto local_state = make_uniq<RootScanLocalState>();
     if (!bind_data.IsEmptyMode() && !bind_data.IsBrowseMode() && !bind_data.IsHistogramMode() &&
         !bind_data.IsMultiFile()) {
-        RootScanFileManager().Open(bind_data, gstate, *local_state, bind_data.root_path, true);
+        RootScanFileManager().Open(bind_data, gstate, *local_state, bind_data.root_path, false);
     }
     return std::move(local_state);
 }
@@ -510,13 +559,7 @@ void RootScanFileManager::Reset(RootScanGlobalState& gstate, RootScanLocalState&
             local_state.file_task,
             static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
     }
-    local_state.path_reader.Reset();
-    local_state.serialized_column = DConstants::INVALID_INDEX;
-    local_state.serialized_values.clear();
-    local_state.serialized_indices.clear();
-    local_state.reported_serialized_baskets = 0;
-    local_state.reported_serialized_compressed_bytes = 0;
-    local_state.reported_serialized_entry_bytes = 0;
+    local_state.serialized_columns.clear();
     local_state.cached_results.clear();
     local_state.has_cached_entry = false;
     local_state.current_entry = std::numeric_limits<uint64_t>::max();

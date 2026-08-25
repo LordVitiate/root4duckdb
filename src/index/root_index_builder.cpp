@@ -3,6 +3,7 @@
 #include "root4duckdb/index/root_bloom.hpp"
 #include "root4duckdb/reader/root_branch_projection.hpp"
 #include "root4duckdb/core/root_lake_common.hpp"
+#include "root4duckdb/core/root_file_opener.hpp"
 #include "root4duckdb/reader/root_path_reader.hpp"
 #include "root4duckdb/core/root_headers.hpp"
 
@@ -236,10 +237,11 @@ RootIndexFilePlan InspectRootIndexFile(const RootIndexBuildOptions& options, con
     RootIndexFilePlan plan;
     plan.path = path;
     try {
-        std::unique_ptr<TFile> file(TFile::Open(path.c_str(), "READ"));
-        if (!file || file->IsZombie()) {
-            throw IOException("ROOT file is zombie");
+        auto opened = OpenRootFile(path);
+        if (!opened) {
+            throw IOException("Failed to open ROOT file: " + path + ": " + opened.error);
         }
+        auto file = std::move(opened.file);
         const auto parsed = ParsePath(options.logical_paths.front());
         auto* tree = FindTree(file.get(), options.tree_name, parsed.root_class);
         if (!tree) {
@@ -263,10 +265,11 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
     RootIndexBuildStatus status;
     status.file_path = root_path;
     try {
-        std::unique_ptr<TFile> file(TFile::Open(root_path.c_str(), "READ"));
-        if (!file || file->IsZombie()) {
-            throw IOException("ROOT file is zombie");
+        auto opened = OpenRootFile(root_path);
+        if (!opened) {
+            throw IOException("Failed to open ROOT file: " + root_path + ": " + opened.error);
         }
+        auto file = std::move(opened.file);
 
         const auto root_path_spec = ParsePath(options.logical_paths.front());
         RootObjectReader object_reader;

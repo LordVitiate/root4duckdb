@@ -16,7 +16,8 @@ struct RootRuntimeSettings {
     uint32_t bloom_bytes = 0;
 
     /// Resolves explicit settings and resource-aware defaults.
-    static RootRuntimeSettings From(ClientContext& context, idx_t file_count, idx_t basket_count_hint = 0);
+    static RootRuntimeSettings From(ClientContext& context, idx_t file_count, idx_t basket_count_hint = 0,
+                                    idx_t work_unit_count = 0);
 };
 
 /// Registers extension-wide ROOT execution settings.

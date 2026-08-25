@@ -100,7 +100,7 @@ ContainerAccess PrepareContainerAccess(const PathLevel& level, TVirtualCollectio
 
 struct DirectSink {
     int64_t max_values;
-    int64_t event_id;
+    int64_t entry_id;
     ReadResult& result;
 
     bool Full() const {
@@ -111,11 +111,11 @@ struct DirectSink {
     }
     void Number(void* pointer, const std::string& type, const std::vector<int32_t>& indices,
                 const std::vector<std::string>& names) {
-        result.AddNumber(RootPrimitiveValue::FromPointer(pointer, type), event_id, indices, names);
+        result.AddNumber(RootPrimitiveValue::FromPointer(pointer, type), entry_id, indices, names);
     }
     void String(void* pointer, const std::string& type, const std::vector<int32_t>& indices,
                 const std::vector<std::string>& names) {
-        result.AddString(ReadRootString(pointer, type), event_id, indices, names);
+        result.AddString(ReadRootString(pointer, type), entry_id, indices, names);
     }
 };
 
@@ -282,8 +282,8 @@ void OffsetValueReader::CollectFlat(void* root_object, const std::vector<PathLev
 }
 
 void OffsetValueReader::CollectDirect(void* root_object, const std::vector<PathLevel>& levels, int64_t max_values,
-                                      int64_t event_id, ReadResult& out) {
-    DirectSink sink{max_values, event_id, out};
+                                      int64_t entry_id, ReadResult& out) {
+    DirectSink sink{max_values, entry_id, out};
     RunTraversal(root_object, levels, sink);
 }
 

@@ -83,7 +83,7 @@ class RootPathReader {
     void CollectTypedValues(void* object, std::vector<RootPrimitiveValue>& values) const;
     void CollectTypedFlat(void* object, std::vector<RootPrimitiveValue>& values,
                           std::vector<int32_t>& flat_indices) const;
-    void CollectDirect(void* object, int64_t max_values, int64_t event_id, ReadResult& result) const;
+    void CollectDirect(void* object, int64_t max_values, int64_t entry_id, ReadResult& result) const;
     /// @}
 
     /// @name Reader state

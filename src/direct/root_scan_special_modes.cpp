@@ -20,7 +20,7 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
 
             RootEntryScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
 
-            const auto batch = scheduler.ClaimWork(100000);
+            const auto batch = scheduler.ClaimWork();
 
             if (!batch.HasWork()) {
                 break;

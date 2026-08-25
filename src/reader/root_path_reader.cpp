@@ -2,6 +2,7 @@
 
 #include "root4duckdb/core/root_debug.hpp"
 #include "root4duckdb/core/root_headers.hpp"
+#include "root4duckdb/core/root_file_opener.hpp"
 #include "root4duckdb/reader/root_branch_projection.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -360,8 +361,8 @@ void RootPathReader::CollectTypedFlat(void* object, std::vector<RootPrimitiveVal
     }
 }
 
-void RootPathReader::CollectDirect(void* object, int64_t max_values, int64_t event_id, ReadResult& result) const {
-    OffsetValueReader::CollectDirect(object, levels, max_values, event_id, result);
+void RootPathReader::CollectDirect(void* object, int64_t max_values, int64_t entry_id, ReadResult& result) const {
+    OffsetValueReader::CollectDirect(object, levels, max_values, entry_id, result);
 }
 
 const SerializedReadCounters& RootPathReader::SerializedCounters() const {
@@ -382,10 +383,11 @@ bool RootPathReader::BindIsolatedValidationReader(std::string& failure_reason) {
     }
 
     try {
-        validation_file.reset(TFile::Open(source_name.c_str(), "READ"));
+        auto opened = OpenRootFile(source_name);
+        validation_file = std::move(opened.file);
         if (!validation_file || validation_file->IsZombie()) {
             validation_file.reset();
-            failure_reason = "serialized validation cannot open an isolated ROOT file context";
+            failure_reason = "serialized validation cannot open an isolated ROOT file context: " + opened.error;
             return false;
         }
         validation_reader.Bind(validation_file.get(), tree_name, path.root_class, options.dictionary_cleanup_mode);

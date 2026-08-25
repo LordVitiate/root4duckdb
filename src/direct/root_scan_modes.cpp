@@ -101,7 +101,7 @@ rootlake::RootScalarActual RootScanExecutor::CachedScalar(const RootScanBindData
         return rootlake::RootScalarActual::Null(LogicalType::SQLNULL);
     }
     const auto& column = bind_data.columns[col_idx];
-    if (column.name == "event_id" && column.levels.empty()) {
+    if (column.name == "entry_id" && column.levels.empty()) {
         return rootlake::RootScalarActual::Signed(static_cast<int64_t>(entry));
     }
     if (col_idx == bind_data.source_id_column) {
@@ -230,7 +230,7 @@ void RootScanExecutor::ProcessPrimitiveTree(ClientContext& context, const RootSc
 
             RootEntryScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
 
-            const auto batch = scheduler.ClaimWork(100000);
+            const auto batch = scheduler.ClaimWork();
 
             if (!batch.HasWork()) {
                 break;
@@ -361,7 +361,7 @@ void RootScanExecutor::ProcessDirectBranch(ClientContext& context, const RootSca
                 break;
             }
             RootEntryScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
-            auto batch = scheduler.ClaimWork(100000);
+            auto batch = scheduler.ClaimWork();
             if (!batch.HasWork()) {
                 break;
             }
@@ -447,7 +447,7 @@ void RootScanExecutor::ProcessCachedEntry(ClientContext& context, const RootScan
 
             const auto& col = bind_data.columns[col_idx];
 
-            if (col.name == "event_id" && col.levels.empty()) {
+            if (col.name == "entry_id" && col.levels.empty()) {
                 FlatVector::GetData<int64_t>(vec)[out_count] = static_cast<int64_t>(entry);
                 FlatVector::Validity(vec).SetValid(out_count);
                 continue;

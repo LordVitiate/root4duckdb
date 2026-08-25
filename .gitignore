@@ -46,11 +46,12 @@ Thumbs.db
 *~
 
 # Internal documentation
-/docs/
+/docs/*
 *.md
 
-# Keep the public repository README
+# Keep the public README and the maintained architecture contract.
 !/README.md
+!/docs/SOURCES_PATHS_AND_PARALLELISM.md
 
 # Temporary test files and Iceberg metadata
 test/.tmp-*/
