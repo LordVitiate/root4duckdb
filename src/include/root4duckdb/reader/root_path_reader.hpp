@@ -68,6 +68,7 @@ class RootPathReader {
     void Resolve(TTree* tree, TBranch* object_branch, TClass* root_class, ParsedPath path,
                  std::vector<PathLevel> levels);
     RootPathReaderStartResult StartSerialized(RootPathReaderOptions options, std::string rejection_reason = {});
+    void SetSerializedBasketCache(std::shared_ptr<SerializedBasketCache> cache);
     RootPathReadResult TryReadSerialized(uint64_t entry, RootEntryReader& object_entry, std::vector<double>& values,
                                          std::vector<int32_t>& flat_indices, bool collect_indices = true);
     RootPathReadResult TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
@@ -113,6 +114,7 @@ class RootPathReader {
     idx_t index_depth = 0;
     RootPathReaderOptions options;
     SerializedReadPlan serialized_plan;
+    std::shared_ptr<SerializedBasketCache> serialized_basket_cache;
     SerializedBasketReader serialized_reader;
     std::unique_ptr<TFile> validation_file;
     RootObjectReader validation_reader;

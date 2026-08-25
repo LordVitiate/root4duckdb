@@ -2,6 +2,7 @@
 
 #include "root4duckdb/core/root_lake_common.hpp"
 #include "root4duckdb/reader/root_semantic_reader.hpp"
+#include "root4duckdb/serialized/root_serialized_basket_cache.hpp"
 #include "root4duckdb/serialized/root_serialized_codec.hpp"
 
 #include <cstddef>
@@ -147,17 +148,6 @@ struct SerializedReadCounters {
     uint64_t serialized_bytes = 0;
 };
 
-/// Physical metadata for the currently loaded basket.
-struct SerializedBasketInfo {
-    int32_t basket_number = -1;
-    uint64_t entry_begin = 0;
-    uint64_t entry_end = 0;
-    uint64_t physical_offset = 0;
-    uint32_t key_length = 0;
-    uint32_t compressed_size = 0;
-    uint32_t uncompressed_size = 0;
-};
-
 /// Owns one serialized basket decode state.
 class SerializedBasketReader {
   public:
@@ -174,7 +164,8 @@ class SerializedBasketReader {
     /// @name Decode lifecycle
     /// @{
     void Bind(TBranch* branch, SerializedReadPlan plan, uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL,
-              uint64_t max_values_per_entry = 10ULL * 1024ULL * 1024ULL);
+              uint64_t max_values_per_entry = 10ULL * 1024ULL * 1024ULL,
+              std::shared_ptr<SerializedBasketCache> shared_basket_cache = {});
     /// Detaches branch-local ROOT addresses without discarding metrics/plan state.
     void ReleaseBindings() noexcept;
     void Reset() noexcept;
@@ -233,6 +224,7 @@ class SerializedBasketReader {
     std::vector<std::max_align_t> leaf_scratch;
     uint64_t leaf_scratch_capacity = 0;
     bool leaf_make_class = false;
+    std::shared_ptr<SerializedBasketCache> shared_basket_cache;
     int32_t resolved_element_version = -1;
     std::vector<int> resolved_prefix_element_ids;
     std::unique_ptr<TStreamerInfoActions::TActionSequence> cached_action_sequence;

@@ -190,9 +190,14 @@ RootPathReaderStartResult RootPathReader::StartSerialized(RootPathReaderOptions 
         return {activated ? RootPathStartRoute::OBJECT_FALLBACK : RootPathStartRoute::OBJECT_ONLY};
     }
 
-    serialized_reader.Bind(physical_branch, serialized_plan, options.max_entry_bytes, options.max_values_per_entry);
+    serialized_reader.Bind(physical_branch, serialized_plan, options.max_entry_bytes, options.max_values_per_entry,
+                           serialized_basket_cache);
     serialized_active = true;
     return {RootPathStartRoute::SERIALIZED};
+}
+
+void RootPathReader::SetSerializedBasketCache(std::shared_ptr<SerializedBasketCache> cache) {
+    serialized_basket_cache = std::move(cache);
 }
 
 RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
@@ -304,6 +309,7 @@ RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryRe
 
 void RootPathReader::Reset() {
     serialized_reader.Reset();
+    serialized_basket_cache.reset();
     validation_reader.Reset();
     validation_file.reset();
     tree = nullptr;

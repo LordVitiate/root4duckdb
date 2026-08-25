@@ -447,6 +447,7 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
     }
 
     std::vector<TBranch*> projected_branches;
+    std::unordered_map<TBranch*, std::shared_ptr<rootlake::SerializedBasketCache>> serialized_basket_caches;
     TTree* projection_tree = nullptr;
     bool all_candidates_projectable = !serialized_candidates.empty();
     local_state->serialized_columns.reserve(serialized_candidates.size());
@@ -474,6 +475,15 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         auto parsed = rootlake::ParsePath(col.logical_path);
         state.path_reader.Resolve(object_reader.Tree(), object_reader.ObjectBranch(), object_reader.RootClass(),
                                   std::move(parsed), col.levels);
+        if (auto* physical_branch = state.path_reader.PhysicalBranch()) {
+            auto cache_it = serialized_basket_caches.find(physical_branch);
+            if (cache_it == serialized_basket_caches.end()) {
+                auto cache = std::make_shared<rootlake::SerializedBasketCache>();
+                cache->Bind(physical_branch);
+                cache_it = serialized_basket_caches.emplace(physical_branch, std::move(cache)).first;
+            }
+            state.path_reader.SetSerializedBasketCache(cache_it->second);
+        }
         if (state.path_reader.PhysicalMode() == "ancestor") {
             projected_branches.push_back(state.path_reader.PhysicalBranch());
         } else {

@@ -43,6 +43,7 @@ SerializedBasketReader& SerializedBasketReader::operator=(SerializedBasketReader
     leaf_scratch = std::move(other.leaf_scratch);
     leaf_scratch_capacity = other.leaf_scratch_capacity;
     leaf_make_class = other.leaf_make_class;
+    shared_basket_cache = std::move(other.shared_basket_cache);
     resolved_element_version = other.resolved_element_version;
     resolved_prefix_element_ids = std::move(other.resolved_prefix_element_ids);
     cached_action_sequence = std::move(other.cached_action_sequence);
@@ -76,9 +77,14 @@ const SerializedReadCounters& SerializedBasketReader::Counters() const {
 }
 
 void SerializedBasketReader::Bind(TBranch* branch_p, SerializedReadPlan plan_p, uint64_t max_entry_bytes_p,
-                                  uint64_t max_values_per_entry_p) {
+                                  uint64_t max_values_per_entry_p,
+                                  std::shared_ptr<SerializedBasketCache> shared_basket_cache_p) {
     Reset();
     branch = branch_p;
+    shared_basket_cache = std::move(shared_basket_cache_p);
+    if (shared_basket_cache) {
+        shared_basket_cache->Bind(branch);
+    }
     plan = std::move(plan_p);
     layout = {};
     layout.value_type = plan.value_type;
@@ -159,6 +165,7 @@ void SerializedBasketReader::Reset() noexcept {
     outer_collection_scratch = nullptr;
     owns_outer_collection_scratch = false;
     leaf = nullptr;
+    shared_basket_cache.reset();
     resolved_element_version = -1;
     resolved_prefix_element_ids.clear();
     cached_action_sequence.reset();
@@ -266,6 +273,27 @@ bool SerializedBasketReader::LoadBasket(uint64_t entry, std::string& failure_rea
 
 bool SerializedBasketReader::EntrySlice(uint64_t entry, const uint8_t*& begin, size_t& size,
                                         std::string& failure_reason) {
+    if (shared_basket_cache) {
+        bool loaded_new_basket = false;
+        uint64_t compressed_bytes = 0;
+        if (!shared_basket_cache->EntrySlice(entry, max_entry_bytes, begin, size, loaded_new_basket,
+                                             compressed_bytes, failure_reason)) {
+            return false;
+        }
+        if (loaded_new_basket) {
+            ++counters.baskets;
+            counters.compressed_bytes += compressed_bytes;
+            SerializedBasketInfo info;
+            if (shared_basket_cache->CurrentBasketInfo(info)) {
+                RootDebug("SERIALIZED.BASKET_SHARED",
+                          "path=" + plan.logical_path + " basket=" + std::to_string(info.basket_number) +
+                              " entries=" + std::to_string(info.entry_begin) + ".." +
+                              std::to_string(info.entry_end) + " compressed_bytes=" +
+                              std::to_string(compressed_bytes));
+            }
+        }
+        return true;
+    }
     if (!LoadBasket(entry, failure_reason)) {
         return false;
     }
@@ -648,6 +676,9 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
 }
 
 bool SerializedBasketReader::CurrentBasketInfo(SerializedBasketInfo& info) const {
+    if (shared_basket_cache) {
+        return shared_basket_cache->CurrentBasketInfo(info);
+    }
     if (!branch || !basket || current_basket < 0) {
         return false;
     }
