@@ -31,23 +31,23 @@ unique_ptr<FunctionData> RootIndexBinder::Bind(TableFunctionBindInput& input, ve
     }
     it = input.named_parameters.find("reader_mode");
     if (it != input.named_parameters.end()) {
-        result->reader_mode = ParseRootReaderMode(it->second.ToString());
+        result->root_access.reader_mode = ParseRootReaderMode(it->second.ToString());
     }
     it = input.named_parameters.find("raw_validation_entries");
     if (it != input.named_parameters.end()) {
-        result->raw_validation_entries = it->second.GetValue<uint32_t>();
+        result->root_access.validation_entries = it->second.GetValue<uint32_t>();
     }
     it = input.named_parameters.find("raw_max_entry_bytes");
     if (it != input.named_parameters.end()) {
-        result->raw_max_entry_bytes = it->second.GetValue<uint64_t>();
+        result->root_access.max_entry_bytes = it->second.GetValue<uint64_t>();
     }
     it = input.named_parameters.find("raw_max_values_per_entry");
     if (it != input.named_parameters.end()) {
-        result->raw_max_values_per_entry = it->second.GetValue<uint64_t>();
+        result->root_access.max_values_per_entry = it->second.GetValue<uint64_t>();
     }
     it = input.named_parameters.find("tree_cache_bytes");
     if (it != input.named_parameters.end()) {
-        result->tree_cache_bytes = it->second.GetValue<uint64_t>();
+        result->root_access.tree_cache_bytes = it->second.GetValue<uint64_t>();
     }
     it = input.named_parameters.find("bloom_bytes");
     if (it != input.named_parameters.end()) {
@@ -100,7 +100,7 @@ unique_ptr<FunctionData> RootIndexBinder::Bind(TableFunctionBindInput& input, ve
     if (it != input.named_parameters.end()) {
         dictionary_cleanup = it->second.ToString();
     }
-    result->dictionary_cleanup_mode = ParseDictionaryCleanupMode(dictionary_cleanup);
+    result->root_access.dictionary_cleanup_mode = ParseDictionaryCleanupMode(dictionary_cleanup);
     it = input.named_parameters.find("overwrite");
     if (it != input.named_parameters.end()) {
         result->overwrite = it->second.GetValue<bool>();
@@ -207,12 +207,7 @@ unique_ptr<FunctionData> RootIndexBinder::Bind(TableFunctionBindInput& input, ve
     if (result->has_metadata_flush_bytes && result->metadata_flush_bytes < 16ULL * 1024ULL * 1024ULL) {
         throw InvalidInputException("metadata_flush_bytes must be at least 16 MiB");
     }
-    if (result->raw_max_entry_bytes < 12) {
-        throw InvalidInputException("raw_max_entry_bytes must be at least 12");
-    }
-    if (result->raw_max_values_per_entry == 0) {
-        throw InvalidInputException("raw_max_values_per_entry must be positive");
-    }
+    result->root_access.Validate();
 
     return_names = {"file_path",
                     "file_id",

@@ -1,8 +1,7 @@
 #pragma once
 
 #include "root4duckdb/index/root_index_metadata.hpp"
-#include "root4duckdb/reader/root_semantic_reader.hpp"
-#include "root4duckdb/serialized/root_serialized_reader.hpp"
+#include "root4duckdb/reader/root_path_reader.hpp"
 
 #include <cstdint>
 #include <set>
@@ -17,12 +16,7 @@ struct RootIndexBuildOptions {
     std::vector<std::string> logical_paths;
     uint32_t bloom_bytes = 0;
     double bloom_false_positive_rate = 0.01;
-    uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
-    RootReaderMode reader_mode = RootReaderMode::AUTO;
-    uint32_t raw_validation_entries = 4;
-    uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
-    uint64_t raw_max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
-    RootDictionaryCleanupMode dictionary_cleanup_mode = RootDictionaryCleanupMode::FULL;
+    RootAccessOptions root_access;
 };
 
 /// File-level build outcome and counters.

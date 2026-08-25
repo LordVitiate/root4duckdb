@@ -4,7 +4,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$PROJECT_DIR/scripts/lib/sql.sh"
 ROOT_FILE="${ROOT4DUCKDB_VERIFY_ROOT_FILE:-}"
 DICTIONARY="${ROOT4DUCKDB_VERIFY_DICTIONARY:-}"
-PATH_FLAGS="${ROOT4DUCKDB_VERIFY_FLAGS_PATH:-/PaEvent/vecParticle/flags}"
+PATH_FLAGS="${ROOT4DUCKDB_VERIFY_FLAGS_PATH:-/PaEvent/vecParticle}"
 FIRST_ENTRIES="${ROOT4DUCKDB_VERIFY_FIRST_ENTRIES:-5000}"
 EXPECTED_FIRST_ROWS="${ROOT4DUCKDB_VERIFY_EXPECTED_FIRST_ROWS:-}"
 INDEX_PATH="${ROOT4DUCKDB_VERIFY_INDEX_PATH:-}"
@@ -31,12 +31,12 @@ RESULT="$($DUCKDB -csv -noheader :memory: -c "
 SELECT count(*) AS rows_total,
        count(value) AS rows_non_null,
        count(DISTINCT value) AS distinct_values,
-       min(event_id) AS min_event_id,
-       max(event_id) AS max_event_id
+       min(entry_id) AS min_entry_id,
+       max(entry_id) AS max_entry_id
 FROM (
- SELECT event_id, flags AS value
+ SELECT entry_id, flags AS value
  FROM read_root('$ROOT_SQL', dictionary:='$DICT_SQL', dictionary_cleanup:='retain', path_prefix:='$PATH_SQL')
- WHERE event_id < $FIRST_ENTRIES
+ WHERE entry_id < $FIRST_ENTRIES
 );" 2>verify-phast.err)"
 IFS=',' read -r ROWS NON_NULL DISTINCT MIN_EVENT MAX_EVENT <<<"$RESULT"
 [[ "$ROWS" =~ ^[0-9]+$ && "$NON_NULL" == "$ROWS" && "$DISTINCT" -gt 0 ]] || {

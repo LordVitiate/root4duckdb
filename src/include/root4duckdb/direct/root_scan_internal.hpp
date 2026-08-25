@@ -19,6 +19,7 @@
 #include <string>
 #include <unordered_map>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -60,6 +61,27 @@ struct RootPrimitiveBranch {
     TLeaf* leaf = nullptr;
 };
 
+struct RootSemanticScanMode {};
+struct RootPrimitiveTreeScanMode {};
+struct RootEmptyScanMode {};
+
+struct RootBrowseScanMode {
+    std::vector<std::string> children;
+};
+
+struct RootDirectBranchScanMode {
+    RootPrimitiveBranch branch;
+};
+
+struct RootHistogramScanMode {
+    rootlake::RootHistogramBinding binding;
+    std::unique_ptr<TH1> object;
+};
+
+/// Exactly one direct-scan strategy selected at bind time.
+using RootScanMode = std::variant<RootSemanticScanMode, RootBrowseScanMode, RootDirectBranchScanMode,
+                                  RootPrimitiveTreeScanMode, RootHistogramScanMode, RootEmptyScanMode>;
+
 /// One logical output column in the direct scan plan.
 struct RootScanColumn {
     std::string name;
@@ -87,8 +109,11 @@ class RootEntryScheduler {
 
     RootEntryScheduler(uint64_t& next_row, uint64_t total_rows, std::mutex& mutex);
 
-    WorkBatch ClaimWork(uint64_t preferred_batch_size = 100000);
-    [[nodiscard]] static idx_t EstimateOptimalThreads(uint64_t total_rows);
+    static constexpr uint64_t DEFAULT_BATCH_SIZE = 65536;
+
+    WorkBatch ClaimWork(uint64_t preferred_batch_size = DEFAULT_BATCH_SIZE);
+    [[nodiscard]] static idx_t EstimateWorkUnits(uint64_t total_rows,
+                                                 uint64_t batch_size = DEFAULT_BATCH_SIZE);
 };
 
 /// Immutable bind-time plan for read_root.
@@ -103,26 +128,28 @@ struct RootScanBindData : public TableFunctionData {
     uint64_t total_rows = 0;
     std::vector<RootScanColumn> columns;
 
-    bool is_browse_mode = false;
-    bool is_direct_branch_mode = false;
-    bool is_primitive_tree_mode = false;
-    bool is_empty_mode = false;
-    bool is_histogram_mode = false;
-    rootlake::RootDictionaryCleanupMode dictionary_cleanup_mode = rootlake::RootDictionaryCleanupMode::FULL;
-    std::vector<std::string> browse_children;
-    RootPrimitiveBranch direct_branch_info;
-    rootlake::RootHistogramBinding histogram_binding;
-    std::unique_ptr<TH1> histogram_object;
-    rootlake::RootReaderMode reader_mode = rootlake::RootReaderMode::AUTO;
-    uint32_t raw_validation_entries = 4;
-    uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
-    uint64_t raw_max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
-    uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
+    RootScanMode scan_mode;
+    rootlake::RootAccessOptions root_access;
     idx_t source_id_column = DConstants::INVALID_INDEX;
     idx_t source_path_column = DConstants::INVALID_INDEX;
 
     bool IsMultiFile() const;
-    ~RootScanBindData();
+    bool IsSemanticMode() const noexcept;
+    bool IsBrowseMode() const noexcept;
+    bool IsDirectBranchMode() const noexcept;
+    bool IsPrimitiveTreeMode() const noexcept;
+    bool IsHistogramMode() const noexcept;
+    bool IsEmptyMode() const noexcept;
+    const RootBrowseScanMode* BrowseMode() const noexcept;
+    const RootDirectBranchScanMode* DirectBranchMode() const noexcept;
+    const RootHistogramScanMode* HistogramMode() const noexcept;
+    void SelectSemanticMode();
+    void SelectBrowseMode(std::vector<std::string> children);
+    void SelectDirectBranchMode(RootPrimitiveBranch branch);
+    void SelectPrimitiveTreeMode();
+    void SelectHistogramMode(rootlake::RootHistogramBinding binding, std::unique_ptr<TH1> object);
+    void SelectEmptyMode();
+    ~RootScanBindData() noexcept;
 };
 
 /// Shared scheduling and profiling state for read_root.
@@ -143,12 +170,26 @@ struct RootScanGlobalState : public GlobalTableFunctionState {
     std::atomic<uint64_t> object_validation_entries{0};
     std::atomic<uint64_t> object_fallback_entries{0};
     unique_ptr<rootlake::RootDirectFileScheduler> file_scheduler;
-    uint64_t event_lower = 0;
-    uint64_t event_upper = std::numeric_limits<uint64_t>::max();
-    bool event_range_impossible = false;
-    bool histogram_mode = false;
+    uint64_t entry_lower = 0;
+    uint64_t entry_upper = std::numeric_limits<uint64_t>::max();
+    uint64_t source_lower = 0;
+    uint64_t source_upper = std::numeric_limits<uint64_t>::max();
+    bool entry_range_impossible = false;
+    idx_t worker_limit = 1;
+    bool force_single_thread = false;
 
     idx_t MaxThreads() const override;
+};
+
+/// One serialized primitive projection owned by a single DuckDB worker.
+struct RootSerializedColumnState {
+    idx_t column_id = DConstants::INVALID_INDEX;
+    rootlake::RootPathReader path_reader;
+    std::vector<rootlake::RootPrimitiveValue> values;
+    std::vector<int32_t> indices;
+    uint64_t reported_baskets = 0;
+    uint64_t reported_compressed_bytes = 0;
+    uint64_t reported_entry_bytes = 0;
 };
 
 /// Thread-local ROOT handles and decoded row buffers.
@@ -167,13 +208,7 @@ struct RootScanLocalState : public LocalTableFunctionState {
     bool has_container_columns = false;
     rootlake::RootFilterEvaluator filter_evaluator;
 
-    rootlake::RootPathReader path_reader;
-    idx_t serialized_column = DConstants::INVALID_INDEX;
-    std::vector<double> serialized_values;
-    std::vector<int32_t> serialized_indices;
-    uint64_t reported_serialized_baskets = 0;
-    uint64_t reported_serialized_compressed_bytes = 0;
-    uint64_t reported_serialized_entry_bytes = 0;
+    std::vector<RootSerializedColumnState> serialized_columns;
 
     TBranch* direct_branch = nullptr;
     TLeaf* direct_leaf = nullptr;
@@ -207,7 +242,7 @@ class RootScanBinder final {
                                     std::vector<LogicalType>& return_types);
     std::vector<RootPrimitiveBranch> CollectPrimitiveBranches(TTree& tree);
     bool IsTreeName(TFile& file, const std::string& name);
-    void AddEventIdColumn(RootScanBindData& bind_data, std::vector<std::string>& return_names,
+    void AddEntryIdColumn(RootScanBindData& bind_data, std::vector<std::string>& return_names,
                           std::vector<LogicalType>& return_types);
     void BindDirectPrimitives(RootScanBindData& bind_data, const std::string& path_prefix,
                               const std::vector<std::string>& matching_paths, std::vector<std::string>& return_names,
@@ -273,7 +308,8 @@ class RootScanExecutor final {
                             RootScanLocalState& local, DataChunk& output, idx_t& output_count);
     std::vector<std::string> SplitIndexSignature(const std::string& signature);
     void MaterializeSerializedResult(const RootScanColumn& column, uint64_t entry,
-                                     const rootlake::SerializedReadPlan& plan, const std::vector<double>& values,
+                                     const rootlake::SerializedReadPlan& plan,
+                                     const std::vector<rootlake::RootPrimitiveValue>& values,
                                      const std::vector<int32_t>& flat_indices, rootlake::ReadResult& result);
     CacheResult ReadAndCacheEntry(const RootScanBindData& bind_data, RootScanGlobalState& global,
                                   RootScanLocalState& local, DataChunk& output, idx_t& output_count);

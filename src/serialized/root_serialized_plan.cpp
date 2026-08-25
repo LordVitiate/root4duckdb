@@ -58,8 +58,14 @@ bool FixedPrimitiveWidth(TStreamerElement* element, uint32_t& width, std::string
         reason = "pointer before projected member";
         return false;
     }
-    const std::string type = element->GetTypeName() ? element->GetTypeName() : "";
-    if (type == "Float16_t" || type == "Double32_t") {
+    int type_code = element->GetType();
+    while (type_code >= 20 && type_code < 60) {
+        type_code -= 20;
+    }
+    const std::string raw_type = element->GetTypeName() ? element->GetTypeName() : "";
+    const std::string type =
+        StreamerPrimitiveType(element->GetType(), element->GetTypeName() ? element->GetTypeName() : "");
+    if (type_code == 9 || type_code == 19 || raw_type == "Float16_t" || raw_type == "Double32_t") {
         reason = "compressed floating streamer element before projected member";
         return false;
     }
@@ -72,6 +78,258 @@ bool FixedPrimitiveWidth(TStreamerElement* element, uint32_t& width, std::string
     }
     width = primitive * static_cast<uint32_t>(length);
     return true;
+}
+
+bool StreamerContainsField(TClass* klass, const std::string& field, std::set<std::string>& active) {
+    if (!klass || !active.insert(klass->GetName()).second) {
+        return false;
+    }
+    auto* streamer = klass->GetStreamerInfo();
+    auto* elements = streamer ? streamer->GetElements() : nullptr;
+    for (int i = 0; elements && i < elements->GetEntries(); ++i) {
+        auto* element = dynamic_cast<TStreamerElement*>(elements->At(i));
+        if (element && !element->IsBase() && field == element->GetName()) {
+            active.erase(klass->GetName());
+            return true;
+        }
+    }
+    for (int i = 0; elements && i < elements->GetEntries(); ++i) {
+        auto* element = dynamic_cast<TStreamerElement*>(elements->At(i));
+        if (!element || !element->IsBase()) {
+            continue;
+        }
+        auto* base = element->GetClassPointer();
+        if (!base) {
+            base = TClass::GetClass(element->GetTypeName());
+        }
+        if (StreamerContainsField(base, field, active)) {
+            active.erase(klass->GetName());
+            return true;
+        }
+    }
+    active.erase(klass->GetName());
+    return false;
+}
+
+int RootSelectedElement(TClass* root_class, const std::string& field) {
+    auto* streamer = root_class ? root_class->GetStreamerInfo() : nullptr;
+    auto* elements = streamer ? streamer->GetElements() : nullptr;
+    for (int i = 0; elements && i < elements->GetEntries(); ++i) {
+        auto* element = dynamic_cast<TStreamerElement*>(elements->At(i));
+        if (element && !element->IsBase() && field == element->GetName()) {
+            return i;
+        }
+    }
+    for (int i = 0; elements && i < elements->GetEntries(); ++i) {
+        auto* element = dynamic_cast<TStreamerElement*>(elements->At(i));
+        if (!element || !element->IsBase()) {
+            continue;
+        }
+        auto* base = element->GetClassPointer();
+        if (!base) {
+            base = TClass::GetClass(element->GetTypeName());
+        }
+        std::set<std::string> active;
+        if (StreamerContainsField(base, field, active)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+bool IsTopObjectBranch(TBranch* branch, TClass* root_class) {
+    auto* element = dynamic_cast<TBranchElement*>(branch);
+    if (!element || !root_class) {
+        return false;
+    }
+    const std::string branch_class = element->GetClassName() ? element->GetClassName() : "";
+    // Child TBranchElement objects may still report the owning root class.
+    // GetMother() is the stable distinction: a top-level branch is its own
+    // mother, while every split child points back to the top-level branch.
+    return branch->GetMother() == branch && branch_class == root_class->GetName();
+}
+
+bool ConfigureLeafProjection(const ParsedPath& path, const std::vector<PathLevel>& levels, TBranch* branch,
+                             SerializedReadPlan& plan) {
+    auto* children = branch ? branch->GetListOfBranches() : nullptr;
+    auto* leaves = branch ? branch->GetListOfLeaves() : nullptr;
+    if (!branch || (children && children->GetEntries() != 0) || !leaves || leaves->GetEntries() != 1 ||
+        levels.empty() || !levels.back().is_primitive || levels.back().is_pointer) {
+        return false;
+    }
+    auto* leaf = dynamic_cast<TLeaf*>(leaves->At(0));
+    const std::string leaf_type = leaf && leaf->GetTypeName() ? leaf->GetTypeName() : "";
+    // ROOT exposes compressed floating leaves by their persistent typedefs,
+    // while PathResolver deliberately maps them to their decoded in-memory
+    // Float_t/Double_t types. MakeClass reads them into those native scratch
+    // types, so they are safe leaf projections even though their serialized
+    // width is variable and must never be used for prefix arithmetic.
+    const bool compressed_float_leaf = leaf_type == "Float16_t" || leaf_type == "Double32_t";
+    if (!leaf || (!IsPrimitiveType(leaf_type) && !compressed_float_leaf)) {
+        return false;
+    }
+    size_t container_depth = 0;
+    for (const auto& level : levels) {
+        container_depth += level.is_container ? 1U : 0U;
+    }
+    if (container_depth > 1) {
+        return false;
+    }
+    const auto value_type = PrimitiveBaseType(levels.back().type);
+    if (!PrimitiveTypeSize(value_type)) {
+        return false;
+    }
+    plan.Select(SerializedProjectionKind::LEAF_BRANCH);
+    plan.value_type = value_type;
+    plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
+    plan.projection_levels = levels;
+    plan.value_bytes = PrimitiveTypeSize(value_type);
+    plan.index_depth = IndexDepth(levels);
+    return true;
+}
+
+bool ConfigureCollectionBranchProjection(TClass* root_class, const ParsedPath& path,
+                                         const std::vector<PathLevel>& levels, TBranch* branch,
+                                         SerializedReadPlan& plan) {
+    auto* branch_element = dynamic_cast<TBranchElement*>(branch);
+    auto* children = branch ? branch->GetListOfBranches() : nullptr;
+    if (!root_class || !branch_element || (children && children->GetEntries() != 0) || levels.size() != 2 ||
+        !levels[0].is_container || levels[0].is_pointer || levels[0].element_class ||
+        !levels[1].is_primitive || levels[1].is_pointer || levels[1].is_container ||
+        path.fields.size() != 2 || path.fields[1] != "value" ||
+        !BranchNameEndsWithToken(branch->GetName() ? branch->GetName() : "", levels[0].name)) {
+        return false;
+    }
+    const auto container_kind = TemplatePrimaryName(levels[0].type);
+    if (container_kind != "set" && container_kind != "multiset" && container_kind != "unordered_set" &&
+        container_kind != "unordered_multiset") {
+        return false;
+    }
+    auto* proxy = branch_element->GetCollectionProxy();
+    if (!proxy && levels[0].klass) {
+        proxy = levels[0].klass->GetCollectionProxy();
+    }
+    if (!proxy || proxy->GetValueClass() || proxy->HasPointers()) {
+        return false;
+    }
+    const auto value_type = PrimitiveBaseType(levels[1].type);
+    if (!PrimitiveTypeSize(value_type)) {
+        return false;
+    }
+    auto* streamer = branch_element->GetInfo();
+    auto* elements = streamer ? streamer->GetElements() : nullptr;
+    const int selected_id = branch_element->GetID();
+    auto* selected_element = elements && selected_id >= 0 && selected_id < elements->GetEntries()
+                                 ? dynamic_cast<TStreamerElement*>(elements->At(selected_id))
+                                 : nullptr;
+    if (!selected_element || levels[0].name != selected_element->GetName()) {
+        return false;
+    }
+
+    plan.Select(SerializedProjectionKind::COLLECTION_BRANCH);
+    plan.value_type = value_type;
+    plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
+    plan.scratch_class = root_class;
+    plan.projected_member_name = selected_element->GetName();
+    plan.root_action_ids = {selected_id};
+    plan.projection_levels = levels;
+    // FillLeavesMember writes only this branch's selected action to its
+    // basket.  Decode that same action at byte zero into a private root-class
+    // scratch object; the original PathLevel offsets therefore stay intact.
+    plan.value_bytes = PrimitiveTypeSize(value_type);
+    plan.index_depth = IndexDepth(levels);
+    return true;
+}
+
+bool ConfigureInlineObjectBranchProjection(TClass* root_class, const ParsedPath& path,
+                                           const std::vector<PathLevel>& levels, TBranch* branch,
+                                           SerializedReadPlan& plan) {
+    auto* branch_element = dynamic_cast<TBranchElement*>(branch);
+    auto* children = branch ? branch->GetListOfBranches() : nullptr;
+    if (!root_class || !branch_element || branch->GetMother() == branch ||
+        (children && children->GetEntries() != 0) || levels.size() < 2 || path.fields.size() != levels.size() ||
+        levels.front().is_primitive || levels.front().is_string || levels.front().is_container ||
+        levels.front().is_pointer || !levels.front().klass || !levels.back().is_primitive ||
+        levels.back().is_pointer ||
+        !BranchNameEndsWithToken(branch->GetName() ? branch->GetName() : "", levels.front().name)) {
+        return false;
+    }
+    if (root_class->HasCustomStreamerMember() || root_class->GetStreamer() ||
+        levels.front().klass->HasCustomStreamerMember() || levels.front().klass->GetStreamer() ||
+        std::any_of(levels.begin(), levels.end(), [](const PathLevel& level) { return level.is_pointer; })) {
+        return false;
+    }
+    const auto value_type = PrimitiveBaseType(levels.back().type);
+    if (!PrimitiveTypeSize(value_type) ||
+        ClassifySerializedPrimitive(value_type) == SerializedPrimitiveKind::UNKNOWN) {
+        return false;
+    }
+    auto* streamer = branch_element->GetInfo();
+    auto* elements = streamer ? streamer->GetElements() : nullptr;
+    const int selected_id = branch_element->GetID();
+    auto* selected_element = elements && selected_id >= 0 && selected_id < elements->GetEntries()
+                                 ? dynamic_cast<TStreamerElement*>(elements->At(selected_id))
+                                 : nullptr;
+    if (!selected_element || selected_element->IsaPointer() ||
+        levels.front().name != selected_element->GetName()) {
+        return false;
+    }
+    auto* selected_class = selected_element->GetClassPointer();
+    if (!selected_class || std::string(selected_class->GetName()) != levels.front().klass->GetName()) {
+        return false;
+    }
+
+    plan.Select(SerializedProjectionKind::ROOT_SELECTED_SUBTREE);
+    plan.value_type = value_type;
+    plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
+    plan.scratch_class = root_class;
+    plan.projected_member_name = selected_element->GetName();
+    plan.root_action_ids = {selected_id};
+    plan.projection_levels = levels;
+    plan.streamer_version = static_cast<uint32_t>(std::max(0, static_cast<int>(root_class->GetClassVersion())));
+    plan.value_bytes = PrimitiveTypeSize(value_type);
+    plan.index_depth = IndexDepth(levels);
+    return true;
+}
+
+bool ConfigureRootProjection(TClass* root_class, const ParsedPath& path, const std::vector<PathLevel>& levels,
+                             SerializedReadPlan& plan, std::string& reason) {
+    if (!root_class || levels.empty() || levels.front().is_pointer || !levels.back().is_primitive) {
+        reason = "unsplit root projection requires a non-pointer numeric path";
+        return false;
+    }
+    if (root_class->HasCustomStreamerMember() || root_class->GetStreamer()) {
+        reason = "unsplit top-level class uses a custom streamer";
+        return false;
+    }
+    const int selected = RootSelectedElement(root_class, path.fields.front());
+    if (selected < 0) {
+        reason = "top-level selected member is absent from ROOT streamer actions";
+        return false;
+    }
+    plan.Select(SerializedProjectionKind::ROOT_SELECTED_SUBTREE);
+    plan.value_type = PrimitiveBaseType(levels.back().type);
+    plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
+    plan.scratch_class = root_class;
+    plan.projection_levels = levels;
+    auto* root_streamer = root_class->GetStreamerInfo();
+    auto* root_elements = root_streamer ? root_streamer->GetElements() : nullptr;
+    auto* selected_element = root_elements && selected < root_elements->GetEntries()
+                                 ? dynamic_cast<TStreamerElement*>(root_elements->At(selected))
+                                 : nullptr;
+    if (!selected_element) {
+        reason = "top-level selected ROOT action has no persistent element metadata";
+        return false;
+    }
+    plan.projected_member_name = selected_element->GetName();
+    plan.root_action_ids.reserve(static_cast<size_t>(selected + 1));
+    for (int i = 0; i <= selected; ++i) {
+        plan.root_action_ids.push_back(i);
+    }
+    plan.streamer_version = static_cast<uint32_t>(std::max(0, static_cast<int>(root_class->GetClassVersion())));
+    plan.value_bytes = PrimitiveTypeSize(plan.value_type);
+    plan.index_depth = IndexDepth(levels);
+    return plan.value_bytes != 0;
 }
 
 } // namespace
@@ -109,22 +367,37 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     plan.root_class = path.root_class;
     plan.physical_branch_name = physical_branch && physical_branch->GetName() ? physical_branch->GetName() : "";
     auto reject = [&](std::string reason) {
-        plan.supported = false;
-        plan.reason = std::move(reason);
+        plan.Reject(std::move(reason));
         return plan;
     };
 
     if (!root_class || !physical_branch) {
         return reject("missing ROOT class or physical branch");
     }
-    if (physical_branch->GetListOfBranches() && physical_branch->GetListOfBranches()->GetEntries() > 0) {
-        return reject("physical ancestor is split into persistent child branches");
-    }
     std::vector<PathLevel> levels;
     try {
         levels = PathResolver::Resolve(root_class, path.fields);
     } catch (const std::exception& ex) {
         return reject(std::string("cannot resolve serialized path: ") + ex.what());
+    }
+    if (IsTopObjectBranch(physical_branch, root_class)) {
+        std::string reason;
+        if (ConfigureRootProjection(root_class, path, levels, plan, reason)) {
+            return plan;
+        }
+        return reject(std::move(reason));
+    }
+    if (ConfigureLeafProjection(path, levels, physical_branch, plan)) {
+        return plan;
+    }
+    if (ConfigureCollectionBranchProjection(root_class, path, levels, physical_branch, plan)) {
+        return plan;
+    }
+    if (ConfigureInlineObjectBranchProjection(root_class, path, levels, physical_branch, plan)) {
+        return plan;
+    }
+    if (physical_branch->GetListOfBranches() && physical_branch->GetListOfBranches()->GetEntries() > 0) {
+        return reject("physical ancestor is split into persistent child branches");
     }
     if (levels.empty() || !levels[0].is_container || !IsContiguousVectorType(levels[0].type) || levels[0].is_pointer ||
         !levels[0].element_class) {
@@ -156,13 +429,11 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     // member column containing, for each outer object, N followed by N dense
     // primitive values. Members before that column can be variable width, so
     // the read plan records their streamer element ids for ROOT to consume.
-    if (path.fields.size() == 3) {
-        if (levels.size() != 3 || path.fields[2] != "value" || !levels[1].is_container ||
-            !IsContiguousVectorType(levels[1].type) || levels[1].is_pointer || levels[1].element_class ||
-            !levels[2].is_primitive || levels[2].is_pointer || levels[2].is_container) {
-            return reject("serialized nested projection requires "
-                          "vector<object>/vector<primitive>/value");
-        }
+    const bool nested_primitive_vector =
+        path.fields.size() == 3 && levels.size() == 3 && path.fields[2] == "value" &&
+        levels[1].is_container && IsContiguousVectorType(levels[1].type) && !levels[1].is_pointer &&
+        !levels[1].element_class && levels[2].is_primitive && !levels[2].is_pointer && !levels[2].is_container;
+    if (nested_primitive_vector) {
         TStreamerElement* target = nullptr;
         int target_index = -1;
         for (int i = 0; i < elements->GetEntries(); ++i) {
@@ -196,9 +467,7 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
             return reject("nested vector primitive type is unsupported: " + scalar_type);
         }
 
-        plan.supported = true;
-        plan.reason.clear();
-        plan.projection_kind = SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR;
+        plan.Select(SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR);
         plan.container_name = levels[0].name;
         plan.element_class = element_class->GetName();
         plan.projected_member_name = path.fields[1];
@@ -206,7 +475,6 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
         plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
         plan.outer_container_class = levels[0].klass;
         plan.outer_element_class = element_class;
-        plan.outer_container_offset = levels[0].offset_in_parent;
         for (int i = 0; i < target_index; ++i) {
             plan.prefix_element_ids.push_back(i);
         }
@@ -217,7 +485,7 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
         return plan;
     }
 
-    if (path.fields.size() == 4) {
+    if (path.fields.size() >= 3) {
         std::string failure_reason;
         if (ConfigureSerializedDeepProjection(path, levels, element_class, plan, failure_reason)) {
             return plan;
@@ -228,11 +496,19 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     if (path.fields.size() != 2 || levels.size() != 2) {
         return reject("serialized reader requires vector<object>/primitive-member or "
                       "vector<object>/vector<primitive>/value or "
-                      "vector<object>/vector<object>/vector<primitive>/value");
+                      "vector<object>/<inline subtree>/.../primitive");
     }
     if (!levels[1].is_primitive || levels[1].is_pointer || levels[1].is_container) {
         return reject("terminal field is not a fixed primitive member");
     }
+
+    auto selected_subtree_or_reject = [&](std::string fixed_reason) {
+        std::string selected_reason;
+        if (ConfigureSerializedDeepProjection(path, levels, element_class, plan, selected_reason)) {
+            return plan;
+        }
+        return reject(std::move(fixed_reason) + "; selected action projection: " + selected_reason);
+    };
 
     uint64_t prefix_width = 0;
     TStreamerElement* target = nullptr;
@@ -257,12 +533,12 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
                 prefix_width += 10;
                 continue;
             }
-            return reject("unsupported base class before projected member: " + base_type);
+            return selected_subtree_or_reject("unsupported base class before projected member: " + base_type);
         }
         uint32_t element_width = 0;
         std::string reason;
         if (!FixedPrimitiveWidth(element, element_width, reason)) {
-            return reject(reason);
+            return selected_subtree_or_reject(reason);
         }
         prefix_width += element_width;
         if (prefix_width > std::numeric_limits<uint32_t>::max()) {
@@ -270,27 +546,31 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
         }
     }
     if (!target) {
-        return reject("terminal member is inherited or absent from element streamer");
+        return selected_subtree_or_reject("terminal member is inherited or absent from element streamer");
     }
 
     uint32_t target_width = 0;
     std::string target_reason;
     if (!FixedPrimitiveWidth(target, target_width, target_reason)) {
-        return reject(target_reason);
+        return selected_subtree_or_reject(target_reason);
     }
     std::vector<uint32_t> dimensions;
     const auto array_length = FixedArrayLength(target, &dimensions);
-    const auto scalar_width = PrimitiveTypeSize(target->GetTypeName());
+    const auto persistent_target_type =
+        StreamerPrimitiveType(target->GetType(), target->GetTypeName() ? target->GetTypeName() : "");
+    const auto scalar_width = PrimitiveTypeSize(persistent_target_type);
     if (!array_length || !scalar_width || target_width != array_length * scalar_width) {
         return reject("terminal member has unsupported persistent width");
     }
 
-    plan.supported = true;
-    plan.reason.clear();
+    plan.Select(SerializedProjectionKind::FIXED_MEMBER);
     plan.container_name = levels[0].name;
     plan.element_class = element_class->GetName();
-    plan.value_type = PrimitiveBaseType(target->GetTypeName());
+    plan.projected_member_name = target->GetName();
+    plan.value_type = PrimitiveBaseType(persistent_target_type);
     plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
+    plan.outer_container_class = levels[0].klass;
+    plan.outer_element_class = element_class;
     plan.streamer_version = static_cast<uint32_t>(std::max(0, static_cast<int>(element_class->GetClassVersion())));
     plan.bytes_before_value_per_element = static_cast<uint32_t>(prefix_width);
     plan.value_bytes = scalar_width;
@@ -298,6 +578,100 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     plan.array_dimensions = std::move(dimensions);
     plan.index_depth = 1 + (array_length > 1 ? std::max<idx_t>(1, plan.array_dimensions.size()) : 0);
     return plan;
+}
+
+bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
+                                  SerializedEntryLayout& resolved_layout, std::string& failure_reason) {
+    if (!plan.Is(SerializedProjectionKind::FIXED_MEMBER) || !plan.outer_element_class ||
+        plan.projected_member_name.empty() || element_version < 0) {
+        failure_reason = "serialized fixed projection has no versioned member metadata";
+        return false;
+    }
+    auto* streamer = plan.outer_element_class->GetStreamerInfo(element_version);
+    auto* elements = streamer ? streamer->GetElements() : nullptr;
+    if (!elements) {
+        failure_reason = "ROOT has no TStreamerInfo for serialized fixed element version " +
+                         std::to_string(element_version);
+        return false;
+    }
+
+    uint64_t prefix_width = 0;
+    TStreamerElement* target = nullptr;
+    for (int i = 0; i < elements->GetEntries(); ++i) {
+        auto* element = dynamic_cast<TStreamerElement*>(elements->At(i));
+        if (!element) {
+            failure_reason = "serialized fixed element version has invalid streamer metadata";
+            return false;
+        }
+        if (!element->IsBase() && plan.projected_member_name == element->GetName()) {
+            target = element;
+            break;
+        }
+        if (element->IsBase()) {
+            std::string base_type = TrimType(element->GetTypeName() ? element->GetTypeName() : "");
+            if (base_type.empty() || base_type == "BASE") {
+                base_type = TrimType(element->GetName() ? element->GetName() : "");
+            }
+            if (base_type != "TObject") {
+                failure_reason = "unsupported base class before versioned fixed member: " + base_type;
+                return false;
+            }
+            prefix_width += 10;
+            continue;
+        }
+        uint32_t element_width = 0;
+        std::string width_reason;
+        if (!FixedPrimitiveWidth(element, element_width, width_reason)) {
+            failure_reason = "versioned fixed member prefix is not arithmetic: " + width_reason;
+            return false;
+        }
+        prefix_width += element_width;
+        if (prefix_width > std::numeric_limits<uint32_t>::max()) {
+            failure_reason = "versioned fixed member prefix exceeds 32-bit offset";
+            return false;
+        }
+    }
+    if (!target) {
+        failure_reason = "projected fixed member is absent from serialized element version " +
+                         std::to_string(element_version);
+        return false;
+    }
+
+    uint32_t target_width = 0;
+    std::string target_reason;
+    if (!FixedPrimitiveWidth(target, target_width, target_reason)) {
+        failure_reason = "versioned fixed target is not arithmetic: " + target_reason;
+        return false;
+    }
+    std::vector<uint32_t> dimensions;
+    const auto array_length = FixedArrayLength(target, &dimensions);
+    const auto target_type = StreamerPrimitiveType(
+        target->GetType(), target->GetTypeName() ? target->GetTypeName() : "");
+    const auto scalar_width = PrimitiveTypeSize(target_type);
+    const auto target_kind = ClassifySerializedPrimitive(PrimitiveBaseType(target_type));
+    const auto planned_kind = ClassifySerializedPrimitive(plan.value_type);
+    if (!array_length || !scalar_width || target_width != array_length * scalar_width ||
+        target_kind == SerializedPrimitiveKind::UNKNOWN || target_kind != planned_kind ||
+        scalar_width != plan.value_bytes || array_length != plan.fixed_array_length ||
+        dimensions != plan.array_dimensions) {
+        failure_reason = "projected fixed member changed type or shape in serialized element version " +
+                         std::to_string(element_version);
+        return false;
+    }
+
+    resolved_layout = {};
+    resolved_layout.value_type = plan.value_type;
+    resolved_layout.primitive_kind = planned_kind;
+    resolved_layout.bytes_before_value_per_element = static_cast<uint32_t>(prefix_width);
+    resolved_layout.value_bytes = plan.value_bytes;
+    resolved_layout.fixed_array_length = plan.fixed_array_length;
+    resolved_layout.array_dimensions = plan.array_dimensions;
+    resolved_layout.index_depth = static_cast<size_t>(plan.index_depth);
+    RootDebug("SERIALIZED.FIXED_SCHEMA", "path=" + plan.logical_path +
+                                             " file_version=" + std::to_string(element_version) +
+                                             " dictionary_version=" + std::to_string(plan.streamer_version) +
+                                             " prefix_bytes=" + std::to_string(prefix_width));
+    return true;
 }
 
 bool ResolveSerializedNestedVersion(const SerializedReadPlan& plan, int32_t element_version,

@@ -1,5 +1,6 @@
 list(APPEND ROOT4DUCKDB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/root_direct_scheduler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/root_describe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_bind.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_state.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_special_modes.cpp

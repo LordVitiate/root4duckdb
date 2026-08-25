@@ -1,6 +1,7 @@
 #include "root4duckdb/core/root_headers.hpp"
 
 #include "root4duckdb/core/root_runtime_settings.hpp"
+#include "root4duckdb/direct/root_describe.hpp"
 #include "root4duckdb/iceberg/root_iceberg_catalog.hpp"
 #define DUCKDB_EXTENSION_MAIN
 
@@ -20,6 +21,7 @@ void LoadRootInternal(ExtensionLoader& loader) {
     ROOT::EnableThreadSafety();
 
     RegisterRootScan(loader);
+    RegisterRootDescribe(loader);
 
     // Versioned Parquet/Iceberg-backed deep index API.
     rootlake::RegisterRootRuntimeSettings(loader);

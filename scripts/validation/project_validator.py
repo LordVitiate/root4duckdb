@@ -57,4 +57,4 @@ class ProjectValidator:
         print(f"Project: {self.root}")
         print("Version: 3.8.0")
         print("Index format: 12")
-        print("Iceberg linkage: separate shared runtime (4 DSOs)")
+        print("Iceberg linkage: shared CLI runtime + static loadable extension")

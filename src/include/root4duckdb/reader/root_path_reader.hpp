@@ -4,33 +4,51 @@
 #include "root4duckdb/serialized/root_serialized_reader.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace duckdb::rootlake {
 
-/// Serialized-first reader limits and fallback policy.
-struct RootPathReaderOptions {
+/// Common ROOT access policy shared by direct scans, dataset scans, and index builds.
+/// Keeping the limits and cleanup policy in one value object prevents the three
+/// public execution paths from silently developing different safety defaults.
+struct RootAccessOptions {
     RootReaderMode reader_mode = RootReaderMode::AUTO;
-    uint32_t validation_entries = 4;
+    uint32_t validation_entries = 0;
     uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
     uint64_t max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
     uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
     bool enable_all_branches_on_fallback = false;
+    RootDictionaryCleanupMode dictionary_cleanup_mode = RootDictionaryCleanupMode::FULL;
     std::string operation = "read";
+
+    void Validate() const;
 };
 
-/// Result of starting the serialized reader.
+using RootPathReaderOptions = RootAccessOptions;
+
+enum class RootPathStartRoute : uint8_t { OBJECT_ONLY = 0, SERIALIZED = 1, OBJECT_FALLBACK = 2 };
+
+/// Mutually exclusive result of starting the serialized reader.
 struct RootPathReaderStartResult {
-    bool serialized_active = false;
-    bool fallback_activated = false;
+    RootPathStartRoute route = RootPathStartRoute::OBJECT_ONLY;
+
+    [[nodiscard]] bool SerializedActive() const noexcept;
+    [[nodiscard]] bool FallbackActivated() const noexcept;
 };
 
-/// Result of one serialized read attempt.
+enum class RootPathReadRoute : uint8_t { NOT_ATTEMPTED = 0, SERIALIZED = 1, OBJECT_FALLBACK = 2 };
+
+/// Mutually exclusive routing result of one serialized read attempt.
 struct RootPathReadResult {
-    bool decoded = false;
-    bool serialized = false;
-    bool fallback_activated = false;
+    RootPathReadRoute route = RootPathReadRoute::NOT_ATTEMPTED;
+    // A validation mismatch may decode successfully and still select fallback.
+    bool attempt_decoded = false;
+
+    [[nodiscard]] bool Decoded() const noexcept;
+    [[nodiscard]] bool Serialized() const noexcept;
+    [[nodiscard]] bool FallbackActivated() const noexcept;
 };
 
 class RootPathReader {
@@ -38,6 +56,7 @@ class RootPathReader {
     /// @name Ownership
     /// @{
     RootPathReader();
+    ~RootPathReader();
     RootPathReader(const RootPathReader&) = delete;
     RootPathReader& operator=(const RootPathReader&) = delete;
     RootPathReader(RootPathReader&&) noexcept;
@@ -48,8 +67,8 @@ class RootPathReader {
     /// @{
     void Resolve(TTree* tree, TBranch* object_branch, TClass* root_class, ParsedPath path,
                  std::vector<PathLevel> levels);
-    RootPathReaderStartResult StartSerialized(void* root_object_scratch, RootPathReaderOptions options,
-                                              std::string rejection_reason = {});
+    RootPathReaderStartResult StartSerialized(RootPathReaderOptions options, std::string rejection_reason = {});
+    void SetSerializedBasketCache(std::shared_ptr<SerializedBasketCache> cache);
     RootPathReadResult TryReadSerialized(uint64_t entry, RootEntryReader& object_entry, std::vector<double>& values,
                                          std::vector<int32_t>& flat_indices, bool collect_indices = true);
     RootPathReadResult TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
@@ -65,7 +84,7 @@ class RootPathReader {
     void CollectTypedValues(void* object, std::vector<RootPrimitiveValue>& values) const;
     void CollectTypedFlat(void* object, std::vector<RootPrimitiveValue>& values,
                           std::vector<int32_t>& flat_indices) const;
-    void CollectDirect(void* object, int64_t max_values, int64_t event_id, ReadResult& result) const;
+    void CollectDirect(void* object, int64_t max_values, int64_t entry_id, ReadResult& result) const;
     /// @}
 
     /// @name Reader state
@@ -84,6 +103,7 @@ class RootPathReader {
     /// @}
 
   private:
+    bool BindIsolatedValidationReader(std::string& failure_reason);
     bool ActivateFallback(const std::string& reason);
 
     TTree* tree = nullptr;
@@ -94,7 +114,10 @@ class RootPathReader {
     idx_t index_depth = 0;
     RootPathReaderOptions options;
     SerializedReadPlan serialized_plan;
+    std::shared_ptr<SerializedBasketCache> serialized_basket_cache;
     SerializedBasketReader serialized_reader;
+    std::unique_ptr<TFile> validation_file;
+    RootObjectReader validation_reader;
     bool serialized_active = false;
     bool fallback_recorded = false;
     uint32_t validation_remaining = 0;

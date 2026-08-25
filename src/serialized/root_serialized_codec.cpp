@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <type_traits>
 
 namespace duckdb::rootlake {
 
@@ -85,15 +86,16 @@ SerializedPrimitiveKind ClassifySerializedPrimitive(const std::string& raw_type)
     return SerializedPrimitiveKind::UNKNOWN;
 }
 
-bool DecodeSerializedVectorEntry(const uint8_t* bytes, size_t entry_size, const SerializedEntryLayout& layout,
-                                 uint64_t max_values_per_entry, uint32_t& observed_memberwise_header,
-                                 std::vector<double>& values, std::vector<int32_t>& flat_indices,
-                                 std::string& failure_reason, bool collect_indices) {
+template <class VALUE>
+bool DecodeVectorPayload(const uint8_t* bytes, size_t entry_size, size_t payload_offset, uint64_t count,
+                         const SerializedEntryLayout& layout, uint64_t max_values_per_entry,
+                         std::vector<VALUE>& values, std::vector<int32_t>& flat_indices,
+                         std::string& failure_reason, bool collect_indices) {
     values.clear();
     flat_indices.clear();
     failure_reason.clear();
-    if (!bytes || entry_size < 12) {
-        failure_reason = "serialized vector entry is shorter than its header";
+    if (!bytes || payload_offset > entry_size) {
+        failure_reason = "serialized vector payload starts outside its entry";
         return false;
     }
     const size_t expected_index_depth =
@@ -116,29 +118,6 @@ bool DecodeSerializedVectorEntry(const uint8_t* bytes, size_t entry_size, const 
         failure_reason = "serialized fixed-array dimensions do not match its length";
         return false;
     }
-    const uint32_t byte_count = serialized_codec::ReadBE32(bytes);
-    if ((byte_count & serialized_codec::ROOT_BYTE_COUNT_MASK) == 0) {
-        failure_reason = "serialized vector entry has no ROOT byte-count marker";
-        return false;
-    }
-    const uint64_t declared_size = static_cast<uint64_t>(byte_count & serialized_codec::ROOT_BYTE_COUNT_VALUE_MASK) + 4;
-    if (declared_size != entry_size) {
-        failure_reason = "serialized vector byte-count does not match entry offsets";
-        return false;
-    }
-    const uint32_t memberwise_header = serialized_codec::ReadBE32(bytes + 4);
-    if (!memberwise_header) {
-        failure_reason = "serialized vector has an empty member-wise header";
-        return false;
-    }
-    if (!observed_memberwise_header) {
-        observed_memberwise_header = memberwise_header;
-    }
-    if (memberwise_header != observed_memberwise_header) {
-        failure_reason = "member-wise streamer header changed inside one physical branch";
-        return false;
-    }
-    const uint64_t count = serialized_codec::ReadBE32(bytes + 8);
     if (count > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) || count > max_values_per_entry ||
         count > max_values_per_entry / layout.fixed_array_length) {
         failure_reason = "serialized vector element count exceeds configured safety limit";
@@ -158,11 +137,12 @@ bool DecodeSerializedVectorEntry(const uint8_t* bytes, size_t entry_size, const 
         return false;
     }
     const uint64_t projected_bytes = value_count * layout.value_bytes;
-    if (prefix_bytes > entry_size - 12 || projected_bytes > entry_size - 12 - prefix_bytes) {
+    if (prefix_bytes > entry_size - payload_offset ||
+        projected_bytes > entry_size - payload_offset - prefix_bytes) {
         failure_reason = "projected member range exceeds serialized entry";
         return false;
     }
-    const uint8_t* projected = bytes + 12 + prefix_bytes;
+    const uint8_t* projected = bytes + payload_offset + prefix_bytes;
     values.reserve(static_cast<size_t>(value_count));
     if (collect_indices) {
         flat_indices.reserve(static_cast<size_t>(value_count * layout.index_depth));
@@ -170,8 +150,17 @@ bool DecodeSerializedVectorEntry(const uint8_t* bytes, size_t entry_size, const 
     for (uint64_t element = 0; element < count; ++element) {
         for (uint64_t array_index = 0; array_index < layout.fixed_array_length; ++array_index) {
             const uint64_t flat = element * layout.fixed_array_length + array_index;
-            double value = 0;
-            if (!serialized_codec::DecodePrimitive(projected + flat * layout.value_bytes, primitive_kind, value)) {
+            VALUE value{};
+            const bool decoded = [&] {
+                if constexpr (std::is_same_v<VALUE, RootPrimitiveValue>) {
+                    return serialized_codec::DecodePrimitiveExact(projected + flat * layout.value_bytes,
+                                                                  primitive_kind, value);
+                } else {
+                    return serialized_codec::DecodePrimitive(projected + flat * layout.value_bytes, primitive_kind,
+                                                             value);
+                }
+            }();
+            if (!decoded) {
                 failure_reason = "unsupported primitive decoder for " + layout.value_type;
                 values.clear();
                 flat_indices.clear();
@@ -189,6 +178,73 @@ bool DecodeSerializedVectorEntry(const uint8_t* bytes, size_t entry_size, const 
     return true;
 }
 
+template <class VALUE>
+bool DecodeVectorEntry(const uint8_t* bytes, size_t entry_size, const SerializedEntryLayout& layout,
+                       uint64_t max_values_per_entry, uint32_t& observed_memberwise_header,
+                       std::vector<VALUE>& values, std::vector<int32_t>& flat_indices,
+                       std::string& failure_reason, bool collect_indices) {
+    values.clear();
+    flat_indices.clear();
+    failure_reason.clear();
+    serialized_codec::CheckedByteCursor cursor(bytes, entry_size);
+    uint32_t byte_count = 0;
+    uint32_t memberwise_header = 0;
+    uint32_t count = 0;
+    if (!cursor.ReadBE32(byte_count) || !cursor.ReadBE32(memberwise_header) || !cursor.ReadBE32(count)) {
+        failure_reason = "serialized vector entry is shorter than its header";
+        return false;
+    }
+    if ((byte_count & serialized_codec::ROOT_BYTE_COUNT_MASK) == 0) {
+        failure_reason = "serialized vector entry has no ROOT byte-count marker";
+        return false;
+    }
+    const uint64_t declared_size =
+        static_cast<uint64_t>(byte_count & serialized_codec::ROOT_BYTE_COUNT_VALUE_MASK) + 4;
+    if (declared_size != entry_size) {
+        failure_reason = "serialized vector byte-count does not match entry offsets";
+        return false;
+    }
+    if (!memberwise_header) {
+        failure_reason = "serialized vector has an empty member-wise header";
+        return false;
+    }
+    if (!observed_memberwise_header) {
+        observed_memberwise_header = memberwise_header;
+    }
+    if (memberwise_header != observed_memberwise_header) {
+        failure_reason = "member-wise streamer header changed inside one physical branch";
+        return false;
+    }
+    return DecodeVectorPayload(bytes, entry_size, cursor.Offset(), count, layout, max_values_per_entry, values,
+                               flat_indices,
+                               failure_reason, collect_indices);
+}
+
+bool DecodeSerializedVectorEntry(const uint8_t* bytes, size_t entry_size, const SerializedEntryLayout& layout,
+                                 uint64_t max_values_per_entry, uint32_t& observed_memberwise_header,
+                                 std::vector<double>& values, std::vector<int32_t>& flat_indices,
+                                 std::string& failure_reason, bool collect_indices) {
+    return DecodeVectorEntry(bytes, entry_size, layout, max_values_per_entry, observed_memberwise_header, values,
+                             flat_indices, failure_reason, collect_indices);
+}
+
+bool DecodeSerializedVectorPayload(const uint8_t* bytes, size_t entry_size, size_t payload_offset, uint64_t count,
+                                   const SerializedEntryLayout& layout, uint64_t max_values_per_entry,
+                                   std::vector<RootPrimitiveValue>& values,
+                                   std::vector<int32_t>& flat_indices, std::string& failure_reason,
+                                   bool collect_indices) {
+    return DecodeVectorPayload(bytes, entry_size, payload_offset, count, layout, max_values_per_entry, values,
+                               flat_indices, failure_reason, collect_indices);
+}
+
+bool DecodeSerializedVectorEntry(const uint8_t* bytes, size_t entry_size, const SerializedEntryLayout& layout,
+                                 uint64_t max_values_per_entry, uint32_t& observed_memberwise_header,
+                                 std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
+                                 std::string& failure_reason, bool collect_indices) {
+    return DecodeVectorEntry(bytes, entry_size, layout, max_values_per_entry, observed_memberwise_header, values,
+                             flat_indices, failure_reason, collect_indices);
+}
+
 bool EqualDecodedValues(const std::vector<double>& left, const std::vector<int32_t>& left_indices,
                         const std::vector<double>& right, const std::vector<int32_t>& right_indices) {
     if (left_indices != right_indices || left.size() != right.size()) {
@@ -202,6 +258,37 @@ bool EqualDecodedValues(const std::vector<double>& left, const std::vector<int32
             continue;
         }
         return false;
+    }
+    return true;
+}
+
+bool EqualDecodedValues(const std::vector<RootPrimitiveValue>& left, const std::vector<int32_t>& left_indices,
+                        const std::vector<RootPrimitiveValue>& right, const std::vector<int32_t>& right_indices) {
+    if (left_indices != right_indices || left.size() != right.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < left.size(); ++i) {
+        if (left[i].kind != right[i].kind) {
+            return false;
+        }
+        switch (left[i].kind) {
+        case RootPrimitiveKind::SIGNED:
+            if (left[i].signed_value != right[i].signed_value) {
+                return false;
+            }
+            break;
+        case RootPrimitiveKind::UNSIGNED:
+            if (left[i].unsigned_value != right[i].unsigned_value) {
+                return false;
+            }
+            break;
+        case RootPrimitiveKind::FLOATING:
+            if (left[i].floating_value != right[i].floating_value &&
+                !(std::isnan(left[i].floating_value) && std::isnan(right[i].floating_value))) {
+                return false;
+            }
+            break;
+        }
     }
     return true;
 }

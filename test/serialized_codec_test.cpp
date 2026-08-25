@@ -1,4 +1,5 @@
 #include "root4duckdb/serialized/root_serialized_codec.hpp"
+#include "root4duckdb/serialized/root_serialized_codec_utils.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -10,8 +11,12 @@
 
 using duckdb::rootlake::DecodeSerializedNestedPrimitiveVectorColumn;
 using duckdb::rootlake::DecodeSerializedVectorEntry;
+using duckdb::rootlake::DecodeSerializedVectorPayload;
 using duckdb::rootlake::EqualDecodedValues;
+using duckdb::rootlake::RootPrimitiveKind;
+using duckdb::rootlake::RootPrimitiveValue;
 using duckdb::rootlake::SerializedEntryLayout;
+using duckdb::rootlake::serialized_codec::CheckedByteCursor;
 
 static void PutBE32(std::vector<uint8_t>& bytes, size_t offset, uint32_t value) {
     bytes[offset + 0] = static_cast<uint8_t>(value >> 24U);
@@ -71,6 +76,19 @@ static std::vector<uint8_t> NestedShortColumn(size_t column_offset) {
 }
 
 int main() {
+    const std::vector<uint8_t> cursor_bytes{0x01, 0x02, 0x03, 0x04, 0x05};
+    CheckedByteCursor checked_cursor(cursor_bytes.data(), cursor_bytes.size());
+    uint32_t cursor_u32 = 0;
+    assert(checked_cursor.ReadBE32(cursor_u32));
+    assert(cursor_u32 == 0x01020304U);
+    assert(checked_cursor.Remaining() == 1);
+    assert(!checked_cursor.ReadBE32(cursor_u32));
+    assert(checked_cursor.Remaining() == 1);
+    uint8_t cursor_u8 = 0;
+    assert(checked_cursor.ReadU8(cursor_u8));
+    assert(cursor_u8 == 0x05U);
+    assert(!checked_cursor.Skip(1));
+
     SerializedEntryLayout scalar;
     scalar.value_type = "Float_t";
     scalar.bytes_before_value_per_element = 10;
@@ -88,6 +106,27 @@ int main() {
     assert((values == std::vector<double>{12.0, 59.5}));
     assert((indices == std::vector<int32_t>{0, 1}));
     assert(reason.empty());
+
+    // ROOT version/checksum headers are not universally 12 bytes.  Once ROOT
+    // has parsed the frame, the arithmetic decoder must honor its exact
+    // payload cursor rather than guessing a fixed header size.
+    std::vector<uint8_t> shifted_payload(24, 0xa5);
+    uint32_t first_bits = 0;
+    uint32_t second_bits = 0;
+    const float first_value = 12.0F;
+    const float second_value = 59.5F;
+    std::memcpy(&first_bits, &first_value, sizeof(first_bits));
+    std::memcpy(&second_bits, &second_value, sizeof(second_bits));
+    PutBE32(shifted_payload, 16, first_bits);
+    PutBE32(shifted_payload, 20, second_bits);
+    SerializedEntryLayout shifted_layout = scalar;
+    shifted_layout.bytes_before_value_per_element = 0;
+    std::vector<RootPrimitiveValue> shifted_values;
+    assert(DecodeSerializedVectorPayload(shifted_payload.data(), shifted_payload.size(), 16, 2, shifted_layout, 100,
+                                         shifted_values, indices, reason));
+    assert(shifted_values.size() == 2);
+    assert(shifted_values[0].floating_value == 12.0);
+    assert(shifted_values[1].floating_value == 59.5);
 
     observed_header = 0;
     assert(DecodeSerializedVectorEntry(entry.data(), entry.size(), scalar, 100, observed_header, values, indices,
@@ -159,6 +198,35 @@ int main() {
                                        values, indices, reason));
     assert((values == std::vector<double>{expected_double}));
 
+    SerializedEntryLayout int64_layout;
+    int64_layout.value_type = "Long64_t";
+    int64_layout.value_bytes = 8;
+    int64_layout.fixed_array_length = 1;
+    int64_layout.index_depth = 1;
+    std::vector<uint8_t> int64_entry(20, 0);
+    PutBE32(int64_entry, 0, 0x40000000U | 16U);
+    PutBE32(int64_entry, 4, 0x4009001eU);
+    PutBE32(int64_entry, 8, 1);
+    PutBE64(int64_entry, 12, 0x0020000000000001ULL);
+    std::vector<RootPrimitiveValue> exact_values;
+    observed_header = 0;
+    assert(DecodeSerializedVectorEntry(int64_entry.data(), int64_entry.size(), int64_layout, 100, observed_header,
+                                       exact_values, indices, reason));
+    assert(exact_values.size() == 1);
+    assert(exact_values[0].kind == RootPrimitiveKind::SIGNED);
+    assert(exact_values[0].signed_value == 9007199254740993LL);
+
+    auto uint64_layout = int64_layout;
+    uint64_layout.value_type = "ULong64_t";
+    std::vector<uint8_t> uint64_entry = int64_entry;
+    PutBE64(uint64_entry, 12, 0xfffffffffffffff0ULL);
+    observed_header = 0;
+    assert(DecodeSerializedVectorEntry(uint64_entry.data(), uint64_entry.size(), uint64_layout, 100, observed_header,
+                                       exact_values, indices, reason));
+    assert(exact_values.size() == 1);
+    assert(exact_values[0].kind == RootPrimitiveKind::UNSIGNED);
+    assert(exact_values[0].unsigned_value == 0xfffffffffffffff0ULL);
+
     auto bad_dimensions = fixed_array;
     bad_dimensions.array_dimensions = {3};
     assert(!DecodeSerializedVectorEntry(array_entry.data(), array_entry.size(), bad_dimensions, 100, observed_header,
@@ -203,7 +271,7 @@ int main() {
 
     const double nan = std::numeric_limits<double>::quiet_NaN();
     assert(EqualDecodedValues({nan, 1.0}, {0, 1}, {nan, 1.0}, {0, 1}));
-    assert(!EqualDecodedValues({1.0}, {0}, {2.0}, {0}));
+    assert(!EqualDecodedValues(std::vector<double>{1.0}, {0}, std::vector<double>{2.0}, {0}));
 
     std::cout << "serialized codec: OK\n";
     return 0;

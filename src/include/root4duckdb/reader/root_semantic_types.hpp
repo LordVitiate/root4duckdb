@@ -1,5 +1,7 @@
 #pragma once
 
+#include "root4duckdb/reader/root_primitive_value.hpp"
+
 #include "duckdb.hpp"
 
 #include <cstdint>
@@ -46,33 +48,15 @@ std::string PrimitiveBaseType(const std::string& raw_type);
 uint32_t PrimitiveTypeSize(const std::string& raw_type);
 std::string ArrayDimensionsText(const std::vector<uint32_t>& dimensions);
 bool IsPrimitiveType(const std::string& raw_type);
+/// Resolves enum typedefs and other named basic fields from ROOT's persistent
+/// streamer type code while preserving already-recognized primitive spelling.
+std::string StreamerPrimitiveType(int type_code, const std::string& raw_type);
 bool IsStringType(const std::string& raw_type);
 std::string ExtractInnerType(const std::string& container_type);
 LogicalType RootTypeToLogicalType(const std::string& raw_type);
 LogicalType RootTypeToScanLogicalType(const std::string& raw_type, bool is_string, bool is_primitive);
 bool IsLosslessDoubleBackedType(const std::string& raw_type);
 double ReadPrimitiveAsDouble(void* pointer, const std::string& raw_type);
-
-enum class RootPrimitiveKind : uint8_t { SIGNED, UNSIGNED, FLOATING };
-
-/// Exact primitive value used when a double would lose 64-bit integers.
-struct RootPrimitiveValue {
-    RootPrimitiveKind kind = RootPrimitiveKind::FLOATING;
-    int64_t signed_value = 0;
-    uint64_t unsigned_value = 0;
-    double floating_value = 0.0;
-
-    static RootPrimitiveValue Signed(int64_t value);
-    static RootPrimitiveValue Unsigned(uint64_t value);
-    static RootPrimitiveValue Floating(double value);
-    static RootPrimitiveValue FromPointer(void* pointer, const std::string& raw_type);
-    static RootPrimitiveValue FromDouble(double value, const std::string& raw_type);
-
-    int64_t AsSigned() const;
-    uint64_t AsUnsigned() const;
-    double AsDouble() const;
-    bool AsBool() const;
-};
 
 /// One resolved semantic step through a ROOT object or container.
 struct PathLevel {
@@ -92,7 +76,20 @@ struct PathLevel {
     TClass* element_class = nullptr;
 };
 
-/// Primitive children selected when browsing a non-leaf semantic path.
+/// One immediate child returned by metadata-only semantic browsing.
+struct SemanticPathChild {
+    std::string path;
+    std::string name;
+    std::string kind;
+    std::string root_type;
+    bool is_primitive = false;
+    bool is_string = false;
+    bool is_container = false;
+    bool is_fixed_array = false;
+    bool is_pointer = false;
+};
+
+/// Primitive children selected when binding a relation path.
 struct SemanticPathSelection {
     std::string bind_prefix;
     std::vector<std::string> primitive_paths;
@@ -104,7 +101,7 @@ struct ReadResult {
     std::vector<std::string> strings;
     std::vector<RootPrimitiveValue> numbers;
     std::vector<bool> is_string_flag;
-    std::vector<int64_t> event_ids;
+    std::vector<int64_t> entry_ids;
     std::vector<std::vector<int>> vector_indices;
     std::vector<std::string> vector_names;
     std::string source_path;
@@ -112,11 +109,11 @@ struct ReadResult {
     size_t size() const;
     bool empty() const;
     void Clear();
-    void AddString(const std::string& value, int64_t event_id, const std::vector<int32_t>& indices,
+    void AddString(const std::string& value, int64_t entry_id, const std::vector<int32_t>& indices,
                    const std::vector<std::string>& index_names);
-    void AddNumber(const RootPrimitiveValue& value, int64_t event_id, const std::vector<int32_t>& indices,
+    void AddNumber(const RootPrimitiveValue& value, int64_t entry_id, const std::vector<int32_t>& indices,
                    const std::vector<std::string>& index_names);
-    void AddNumber(double value, int64_t event_id, const std::vector<int32_t>& indices,
+    void AddNumber(double value, int64_t entry_id, const std::vector<int32_t>& indices,
                    const std::vector<std::string>& index_names);
 };
 

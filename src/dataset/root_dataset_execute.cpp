@@ -1,5 +1,7 @@
 #include "root4duckdb/dataset/root_dataset_scan_internal.hpp"
 
+#include "root4duckdb/core/root_file_opener.hpp"
+
 namespace duckdb::rootlake {
 
 void DatasetScanExecutor::ValidateAccessPlan(const SchemaBinding& schema, const std::vector<PathLevel>& actual) const {
@@ -49,17 +51,19 @@ void DatasetScanExecutor::OpenTaskFile(const DatasetBindData& bind, DatasetGloba
     local.reported_serialized_baskets = 0;
     local.reported_serialized_compressed_bytes = 0;
     local.reported_serialized_entry_bytes = 0;
-    local.file.reset(TFile::Open(task.root_uri.c_str(), "READ"));
+    auto opened = OpenRootFile(task.root_uri);
     global.opened_files.fetch_add(1);
-    if (!local.file || local.file->IsZombie()) {
-        throw IOException("Failed to open ROOT file: " + task.root_uri);
+    if (!opened) {
+        throw IOException("Failed to open ROOT file: " + task.root_uri + ": " + opened.error);
     }
+    local.file = std::move(opened.file);
     auto schema_it = bind.schema_lookup.find(task.schema_id);
     if (schema_it == bind.schema_lookup.end()) {
         throw IOException("Unknown schema_id in task: " + task.schema_id);
     }
     const auto& schema = bind.schemas[schema_it->second];
-    local.object_reader.Bind(local.file.get(), task.tree_name, schema.root_class, bind.dictionary_cleanup_mode);
+    local.object_reader.Bind(local.file.get(), task.tree_name, schema.root_class,
+                             bind.root_access.dictionary_cleanup_mode);
     auto parsed = ParsePath(bind.logical_path);
     auto* root_class = local.object_reader.RootClass();
     auto* tree = local.object_reader.Tree();
@@ -92,26 +96,21 @@ void DatasetScanExecutor::OpenTaskFile(const DatasetBindData& bind, DatasetGloba
     bool projection_applied = false;
     if (bind.path_predicates.empty() && local.path_reader.PhysicalMode() == "ancestor") {
         const auto projection =
-            ApplyBranchProjection(tree, {local.path_reader.PhysicalBranch()}, bind.tree_cache_bytes);
+            ApplyBranchProjection(tree, {local.path_reader.PhysicalBranch()}, bind.root_access.tree_cache_bytes);
         projection_applied = projection.applied;
         if (projection_applied) {
             global.projected_files.fetch_add(1);
         }
     }
     if (!projection_applied) {
-        EnableAllBranches(tree, bind.tree_cache_bytes);
+        EnableAllBranches(tree, bind.root_access.tree_cache_bytes);
     }
 
-    RootPathReaderOptions reader_options;
-    reader_options.reader_mode = bind.reader_mode;
-    reader_options.validation_entries = bind.raw_validation_entries;
-    reader_options.max_entry_bytes = bind.raw_max_entry_bytes;
-    reader_options.max_values_per_entry = bind.raw_max_values_per_entry;
-    reader_options.tree_cache_bytes = bind.tree_cache_bytes;
+    auto reader_options = bind.root_access;
     reader_options.enable_all_branches_on_fallback = true;
-    const auto started = local.path_reader.StartSerialized(local.object_reader.CurrentObject(),
-                                                           std::move(reader_options), std::move(serialized_rejection));
-    if (started.fallback_activated) {
+    const auto started =
+        local.path_reader.StartSerialized(std::move(reader_options), std::move(serialized_rejection));
+    if (started.FallbackActivated()) {
         global.fallback_files.fetch_add(1);
     }
 
@@ -180,7 +179,7 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
         local.values.clear();
         local.value_offset = 0;
         local.has_task = true;
-        if (bind.tree_cache_bytes) {
+        if (bind.root_access.tree_cache_bytes) {
             local.object_reader.Tree()->SetCacheEntryRange(static_cast<Long64_t>(local.current_task.entry_begin),
                                                            static_cast<Long64_t>(local.current_task.entry_end));
         }
@@ -237,18 +236,18 @@ bool DatasetScanExecutor::LoadNextEntry(const DatasetBindData& bind, DatasetLoca
 
             global.get_entry_calls.fetch_add(object_entry.LoadCount());
 
-            if (read.fallback_activated) {
+            if (read.FallbackActivated()) {
                 global.fallback_files.fetch_add(1);
             }
 
             const idx_t decoded_count = typed_transport ? local.typed_values.size() : local.values.size();
 
-            if (read.decoded) {
+            if (read.Decoded()) {
                 global.serialized_entry_calls.fetch_add(1);
                 global.serialized_values.fetch_add(decoded_count);
             }
 
-            if (read.serialized) {
+            if (read.Serialized()) {
                 global.decoded_values.fetch_add(decoded_count);
 
                 local.value_offset = 0;
@@ -264,7 +263,7 @@ bool DatasetScanExecutor::LoadNextEntry(const DatasetBindData& bind, DatasetLoca
                 continue;
             }
 
-            if (read.fallback_activated && object_entry.LoadCount()) {
+            if (read.FallbackActivated() && object_entry.LoadCount()) {
                 object_entry.Invalidate();
             }
         }
@@ -599,8 +598,8 @@ InsertionOrderPreservingMap<string> DatasetScanExplain::Bound(TableFunctionToStr
     }
     result["Filter Pushdown"] = "zonemap + optional Bloom + exact in-scan evaluation";
     result["Projection Pushdown"] = "enabled";
-    result["ROOT Decode Mode"] = RootReaderModeName(bind.reader_mode);
-    result["Serialized Validation Entries"] = std::to_string(bind.raw_validation_entries);
+    result["ROOT Decode Mode"] = RootReaderModeName(bind.root_access.reader_mode);
+    result["Serialized Validation Entries"] = std::to_string(bind.root_access.validation_entries);
     result["Path Predicate Indexes"] = std::to_string(bind.path_predicates.size());
     result["Explicit Entry Selections"] = std::to_string(bind.entry_selection.size());
     result["Estimated Rows"] = std::to_string(bind.estimated_cardinality);
@@ -618,7 +617,7 @@ InsertionOrderPreservingMap<string> DatasetScanExplain::Running(TableFunctionDyn
         result["Value Type"] = bind.value_type.ToString();
         result["Index Columns"] = bind.index_names.empty() ? "none" : JoinStrings(bind.index_names, ", ");
         result["Metadata Source"] = bind.sources.sql_tables ? "SQL/Iceberg relations" : bind.catalog_path;
-        result["ROOT Decode Mode"] = RootReaderModeName(bind.reader_mode);
+        result["ROOT Decode Mode"] = RootReaderModeName(bind.root_access.reader_mode);
         if (!bind.sources.snapshot_id.empty()) {
             result["Snapshot"] = bind.sources.snapshot_id;
         }

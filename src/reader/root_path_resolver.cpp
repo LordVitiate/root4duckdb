@@ -63,8 +63,24 @@ std::optional<StreamerFieldMatch> FindStreamerField(TClass* klass, const std::st
     return std::nullopt;
 }
 
-void CollectImmediateChildren(TClass* klass, const std::string& prefix, SemanticPathSelection& selection,
-                              std::set<std::string>& active_bases) {
+std::string ChildKind(const PathLevel& level) {
+    if (level.is_fixed_array) {
+        return "FIXED_ARRAY";
+    }
+    if (level.is_container) {
+        return "CONTAINER";
+    }
+    if (level.is_string) {
+        return "STRING";
+    }
+    if (level.is_primitive) {
+        return "PRIMITIVE";
+    }
+    return "OBJECT";
+}
+
+void CollectImmediateMemberNames(TClass* klass, std::vector<std::string>& names, std::set<std::string>& seen_names,
+                                 std::set<std::string>& active_bases) {
     if (!klass) {
         return;
     }
@@ -79,6 +95,18 @@ void CollectImmediateChildren(TClass* klass, const std::string& prefix, Semantic
         active_bases.erase(class_name);
         return;
     }
+
+    // Match FindStreamerField(): a derived member shadows an inherited one.
+    for (int i = 0; i < elements->GetEntries(); ++i) {
+        auto* element = dynamic_cast<TStreamerElement*>(elements->At(i));
+        if (!element || element->IsBase()) {
+            continue;
+        }
+        const std::string name = element->GetName();
+        if (seen_names.insert(name).second) {
+            names.push_back(name);
+        }
+    }
     for (int i = 0; i < elements->GetEntries(); ++i) {
         auto* base = dynamic_cast<TStreamerElement*>(elements->At(i));
         if (!base || !base->IsBase()) {
@@ -88,22 +116,37 @@ void CollectImmediateChildren(TClass* klass, const std::string& prefix, Semantic
         if (!base_class) {
             base_class = TClass::GetClass(base->GetTypeName());
         }
-        CollectImmediateChildren(base_class, prefix, selection, active_bases);
-    }
-    for (int i = 0; i < elements->GetEntries(); ++i) {
-        auto* element = dynamic_cast<TStreamerElement*>(elements->At(i));
-        if (!element || element->IsBase()) {
-            continue;
-        }
-        const std::string full_path = prefix + element->GetName();
-        const std::string type = element->GetTypeName();
-        if (IsPrimitiveType(type) || IsStringType(type)) {
-            selection.primitive_paths.push_back(full_path);
-        } else if (element->GetClassPointer() || element->IsaPointer()) {
-            selection.child_paths.insert(full_path + "/");
-        }
+        CollectImmediateMemberNames(base_class, names, seen_names, active_bases);
     }
     active_bases.erase(class_name);
+}
+
+SemanticPathChild MakeChild(const std::string& path, const std::vector<PathLevel>& levels) {
+    SemanticPathChild child;
+    child.path = path;
+    const auto slash = path.find_last_of('/');
+    child.name = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (levels.empty()) {
+        child.kind = "UNKNOWN";
+        return child;
+    }
+    const auto& level = levels.back();
+    child.root_type = level.type;
+    child.kind = ChildKind(level);
+    child.is_primitive = level.is_primitive;
+    child.is_string = level.is_string;
+    child.is_container = level.is_container;
+    child.is_fixed_array = level.is_fixed_array;
+    child.is_pointer = level.is_pointer;
+    return child;
+}
+
+void AppendSyntheticChild(TClass* root_class, const std::string& path, std::vector<SemanticPathChild>& children) {
+    const auto parsed = ParsePathPrefix(path);
+    const auto levels = PathResolver::TryResolve(root_class, parsed.fields);
+    if (!levels.empty()) {
+        children.push_back(MakeChild(path, levels));
+    }
 }
 
 std::vector<PathLevel> ResolvePath(TClass* root_class, const std::vector<std::string>& fields, bool strict_layout) {
@@ -141,10 +184,6 @@ std::vector<PathLevel> ResolvePath(TClass* root_class, const std::vector<std::st
                                            ? PrimitiveTypeSize(value_level.type)
                                            : (value_level.klass ? static_cast<uint32_t>(value_level.klass->Size()) : 0);
             const bool terminal = field_index + 1 == fields.size();
-            if (terminal && !value_level.is_primitive && !value_level.is_string) {
-                throw InvalidInputException("Container /value does not terminate in a primitive/string: " +
-                                            value_level.type);
-            }
             if (!terminal && !value_level.klass) {
                 throw InvalidInputException("Cannot descend through container value type: " + value_level.type);
             }
@@ -175,6 +214,7 @@ std::vector<PathLevel> ResolvePath(TClass* root_class, const std::vector<std::st
         PathLevel level;
         level.name = field;
         level.type = element->GetTypeName();
+        level.type = StreamerPrimitiveType(element->GetType(), level.type);
         level.offset_in_parent = match->offset;
         level.cumulative_offset = cumulative + level.offset_in_parent;
         level.is_primitive = IsPrimitiveType(level.type);
@@ -298,62 +338,128 @@ idx_t IndexDepth(const std::vector<PathLevel>& levels) {
     return result;
 }
 
+bool DescribeSemanticPath(TClass* root_class, const ParsedPath& path, const std::string& raw_path,
+                          std::vector<SemanticPathChild>& children) {
+    children.clear();
+    if (!root_class) {
+        return false;
+    }
+
+    const std::string canonical = NormalizePath(raw_path);
+    std::vector<PathLevel> target_levels;
+    TClass* target_class = root_class;
+
+    if (!path.fields.empty()) {
+        target_levels = PathResolver::TryResolve(root_class, path.fields);
+        if (target_levels.empty()) {
+            return false;
+        }
+        const auto& terminal = target_levels.back();
+
+        // A scalar is a valid metadata location but has no next level.
+        if ((terminal.is_primitive || terminal.is_string) && !terminal.is_fixed_array && !terminal.is_container) {
+            return true;
+        }
+
+        if (terminal.is_fixed_array) {
+            if (terminal.is_primitive || terminal.is_string) {
+                SemanticPathChild child = MakeChild(canonical, target_levels);
+                child.path = canonical + "/value";
+                child.name = "value";
+                child.kind = terminal.is_string ? "STRING" : "PRIMITIVE";
+                child.is_fixed_array = false;
+                children.push_back(std::move(child));
+                return true;
+            }
+            target_class = terminal.klass;
+        } else if (terminal.is_container) {
+            if (IsAssociativeContainerType(terminal.type)) {
+                AppendSyntheticChild(root_class, canonical + "/key", children);
+                AppendSyntheticChild(root_class, canonical + "/value", children);
+                return true;
+            }
+
+            const auto inner = terminal.element_class ? std::string(terminal.element_class->GetName())
+                                                      : ExtractInnerType(terminal.type);
+            if (IsPrimitiveType(inner) || IsStringType(inner) ||
+                (terminal.element_class && terminal.element_class->GetCollectionProxy())) {
+                AppendSyntheticChild(root_class, canonical + "/value", children);
+                return true;
+            }
+            target_class = terminal.element_class;
+        } else {
+            target_class = terminal.klass;
+        }
+    }
+
+    if (!target_class) {
+        return false;
+    }
+
+    std::vector<std::string> member_names;
+    std::set<std::string> seen_names;
+    std::set<std::string> active_bases;
+    CollectImmediateMemberNames(target_class, member_names, seen_names, active_bases);
+    for (const auto& name : member_names) {
+        const auto child_path = canonical + "/" + name;
+        const auto child_parsed = ParsePathPrefix(child_path);
+        const auto levels = PathResolver::TryResolve(root_class, child_parsed.fields);
+        if (!levels.empty()) {
+            children.push_back(MakeChild(child_path, levels));
+        }
+    }
+    return true;
+}
+
 bool SelectSemanticPath(TClass* root_class, const ParsedPath& path, const std::string& raw_path,
                         SemanticPathSelection& selection) {
     selection = {};
     if (!root_class) {
         return false;
     }
-    std::string canonical = raw_path;
-    while (canonical.size() > 1 && canonical.back() == '/') {
-        canonical.pop_back();
-    }
 
-    if (path.fields.empty()) {
-        selection.bind_prefix = canonical + "/";
-        std::set<std::string> active_bases;
-        CollectImmediateChildren(root_class, selection.bind_prefix, selection, active_bases);
-        return !selection.primitive_paths.empty() || !selection.child_paths.empty();
-    }
+    const std::string canonical = NormalizePath(raw_path);
+    std::vector<PathLevel> target_levels;
+    if (!path.fields.empty()) {
+        target_levels = PathResolver::TryResolve(root_class, path.fields);
+        if (target_levels.empty()) {
+            return false;
+        }
+        const auto& terminal = target_levels.back();
+        if ((terminal.is_primitive || terminal.is_string) && !terminal.is_fixed_array && !terminal.is_container) {
+            throw InvalidInputException("read_root path_prefix must select an object or collection, not scalar leaf '" +
+                                        canonical + "'; select its parent object and project column '" + terminal.name +
+                                        "' instead");
+        }
 
-    const auto levels = PathResolver::TryResolve(root_class, path.fields);
-    if (levels.empty()) {
-        return false;
-    }
-    const auto& terminal = levels.back();
-    if (terminal.is_primitive || terminal.is_string) {
-        selection.bind_prefix = canonical;
-        selection.primitive_paths.push_back(canonical);
-        return true;
-    }
-
-    TClass* target_class = nullptr;
-    if (terminal.is_container) {
-        if (IsAssociativeContainerType(terminal.type)) {
-            selection.bind_prefix = canonical + "/";
-            selection.primitive_paths.push_back(canonical + "/key");
-            selection.primitive_paths.push_back(canonical + "/value");
+        // A fixed array is itself the selected collection. Keep the existing
+        // internal address so flattened array indices preserve their contract.
+        if (terminal.is_fixed_array && (terminal.is_primitive || terminal.is_string)) {
+            selection.bind_prefix = canonical;
+            selection.primitive_paths.push_back(canonical);
             return true;
         }
-        const auto inner =
-            terminal.element_class ? std::string(terminal.element_class->GetName()) : ExtractInnerType(terminal.type);
-        if (IsPrimitiveType(inner) || IsStringType(inner)) {
-            selection.bind_prefix = canonical + "/";
-            selection.primitive_paths.push_back(canonical + "/value");
-            return true;
-        }
-        target_class = terminal.element_class;
-    } else {
-        target_class = terminal.klass;
     }
-    if (!target_class) {
+
+    std::vector<SemanticPathChild> children;
+    if (!DescribeSemanticPath(root_class, path, canonical, children)) {
         return false;
     }
 
     selection.bind_prefix = canonical + "/";
-    std::set<std::string> active_bases;
-    CollectImmediateChildren(target_class, selection.bind_prefix, selection, active_bases);
-    return !selection.primitive_paths.empty() || !selection.child_paths.empty();
+    const auto target_signature = IndexSignature(target_levels);
+    for (const auto& child : children) {
+        if ((child.is_primitive || child.is_string) && !child.is_container && !child.is_fixed_array) {
+            const auto child_parsed = ParsePathPrefix(child.path);
+            const auto child_levels = PathResolver::TryResolve(root_class, child_parsed.fields);
+            if (!child_levels.empty() && IndexSignature(child_levels) == target_signature) {
+                selection.primitive_paths.push_back(child.path);
+                continue;
+            }
+        }
+        selection.child_paths.insert(child.path);
+    }
+    return true;
 }
 
 } // namespace duckdb::rootlake

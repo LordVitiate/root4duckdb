@@ -306,33 +306,28 @@ unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFu
     if (it != input.named_parameters.end()) {
         dictionary_cleanup = it->second.ToString();
     }
-    bind->dictionary_cleanup_mode = ParseDictionaryCleanupMode(dictionary_cleanup);
+    bind->root_access.dictionary_cleanup_mode = ParseDictionaryCleanupMode(dictionary_cleanup);
     it = input.named_parameters.find("tree_cache_bytes");
     if (it != input.named_parameters.end()) {
-        bind->tree_cache_bytes = it->second.GetValue<uint64_t>();
+        bind->root_access.tree_cache_bytes = it->second.GetValue<uint64_t>();
     }
     it = input.named_parameters.find("reader_mode");
     if (it != input.named_parameters.end()) {
-        bind->reader_mode = ParseRootReaderMode(it->second.ToString());
+        bind->root_access.reader_mode = ParseRootReaderMode(it->second.ToString());
     }
     it = input.named_parameters.find("raw_validation_entries");
     if (it != input.named_parameters.end()) {
-        bind->raw_validation_entries = it->second.GetValue<uint32_t>();
+        bind->root_access.validation_entries = it->second.GetValue<uint32_t>();
     }
     it = input.named_parameters.find("raw_max_entry_bytes");
     if (it != input.named_parameters.end()) {
-        bind->raw_max_entry_bytes = it->second.GetValue<uint64_t>();
+        bind->root_access.max_entry_bytes = it->second.GetValue<uint64_t>();
     }
     it = input.named_parameters.find("raw_max_values_per_entry");
     if (it != input.named_parameters.end()) {
-        bind->raw_max_values_per_entry = it->second.GetValue<uint64_t>();
+        bind->root_access.max_values_per_entry = it->second.GetValue<uint64_t>();
     }
-    if (bind->raw_max_entry_bytes < 12) {
-        throw InvalidInputException("raw_max_entry_bytes must be at least 12");
-    }
-    if (bind->raw_max_values_per_entry == 0) {
-        throw InvalidInputException("raw_max_values_per_entry must be positive");
-    }
+    bind->root_access.Validate();
     it = input.named_parameters.find("coalesce_gap_bytes");
     if (it != input.named_parameters.end()) {
         bind->coalesce_gap_bytes = it->second.GetValue<uint64_t>();

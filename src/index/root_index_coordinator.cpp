@@ -31,12 +31,8 @@ RootIndexBuildOptions RootIndexCoordinator::ConfigureRuntime(ClientContext& cont
     options.logical_paths = bind.logical_paths;
     options.bloom_bytes = bind.bloom_bytes;
     options.bloom_false_positive_rate = bind.bloom_false_positive_rate;
-    options.tree_cache_bytes = bind.tree_cache_bytes;
-    options.reader_mode = bind.reader_mode;
-    options.raw_validation_entries = bind.raw_validation_entries;
-    options.raw_max_entry_bytes = bind.raw_max_entry_bytes;
-    options.raw_max_values_per_entry = bind.raw_max_values_per_entry;
-    options.dictionary_cleanup_mode = bind.dictionary_cleanup_mode;
+    options.root_access = bind.root_access;
+    options.root_access.operation = "index";
 
     if (state.manifest_fingerprint.empty()) {
         state.manifest_fingerprint = ManifestFingerprint(files);
@@ -257,7 +253,7 @@ unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& co
     state->dictionary_fingerprint = bind.dictionary_fingerprint;
 
     LoadRootDictionary(bind.dictionary);
-    const auto files = ResolveRootInputs(context, bind.root_glob);
+    const auto files = RootInputResolver(context).Resolve(bind.root_glob);
     const auto index_options = ConfigureRuntime(context, bind, *state, files);
     const auto dataset_id = DatasetId(bind, files);
     fs::path staging_root;

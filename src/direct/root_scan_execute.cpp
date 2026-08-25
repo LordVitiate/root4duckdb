@@ -16,7 +16,7 @@ std::vector<std::string> RootScanExecutor::SplitIndexSignature(const std::string
 
 void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column, uint64_t entry,
                                                    const rootlake::SerializedReadPlan& plan,
-                                                   const std::vector<double>& values,
+                                                   const std::vector<rootlake::RootPrimitiveValue>& values,
                                                    const std::vector<int32_t>& flat_indices,
                                                    rootlake::ReadResult& result) {
     result.Clear();
@@ -36,128 +36,197 @@ void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column,
 
 CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_data, RootScanGlobalState& gstate,
                                                 RootScanLocalState& lstate, DataChunk& output, idx_t& out_count) {
-    uint64_t entry = lstate.local_current_row;
+    (void)output;
+    (void)out_count;
+    const uint64_t entry = lstate.local_current_row;
 
     std::map<std::string, std::vector<idx_t>> branch_columns;
     for (idx_t out_idx = 0; out_idx < gstate.scan_column_ids.size(); ++out_idx) {
-        idx_t col_idx = gstate.scan_column_ids[out_idx];
+        const idx_t col_idx = gstate.scan_column_ids[out_idx];
         if (col_idx == COLUMN_IDENTIFIER_ROW_ID || col_idx >= bind_data.columns.size()) {
             continue;
         }
         const auto& col = bind_data.columns[col_idx];
-        if (!col.levels.empty() && !col.is_virtual_index && col.name != "event_id") {
+        if (!col.levels.empty() && !col.is_virtual_index && col.name != "entry_id") {
             branch_columns[col.branch_name].push_back(col_idx);
         }
     }
 
     lstate.cached_results.resize(bind_data.columns.size());
-    bool has_data = false;
+    std::set<idx_t> serialized_success;
 
-    if (lstate.path_reader.SerializedActive() && lstate.serialized_column < bind_data.columns.size()) {
-        const auto& column = bind_data.columns[lstate.serialized_column];
+    for (auto& serialized : lstate.serialized_columns) {
+        if (!serialized.path_reader.SerializedActive() || serialized.column_id >= bind_data.columns.size()) {
+            continue;
+        }
+
+        const auto& column = bind_data.columns[serialized.column_id];
         auto reader_it = lstate.root_readers.find(column.branch_name);
         if (reader_it == lstate.root_readers.end()) {
             throw InternalException("serialized ROOT path has no universal object reader");
         }
+
         rootlake::RootEntryReader object_entry(reader_it->second);
         object_entry.Begin(entry);
-        const auto read = lstate.path_reader.TryReadSerialized(entry, object_entry, lstate.serialized_values,
-                                                               lstate.serialized_indices);
+        const auto read = serialized.path_reader.TryReadSerialized(entry, object_entry, serialized.values,
+                                                                   serialized.indices);
         gstate.object_validation_entries.fetch_add(object_entry.LoadCount());
 
-        const auto& serialized_counters = lstate.path_reader.SerializedCounters();
-        gstate.serialized_baskets.fetch_add(serialized_counters.baskets - lstate.reported_serialized_baskets);
-        gstate.serialized_compressed_bytes.fetch_add(serialized_counters.compressed_bytes -
-                                                     lstate.reported_serialized_compressed_bytes);
-        gstate.serialized_entry_bytes.fetch_add(serialized_counters.serialized_bytes -
-                                                lstate.reported_serialized_entry_bytes);
-        lstate.reported_serialized_baskets = serialized_counters.baskets;
-        lstate.reported_serialized_compressed_bytes = serialized_counters.compressed_bytes;
-        lstate.reported_serialized_entry_bytes = serialized_counters.serialized_bytes;
-        if (read.decoded) {
+        const auto& counters = serialized.path_reader.SerializedCounters();
+        gstate.serialized_baskets.fetch_add(counters.baskets - serialized.reported_baskets);
+        gstate.serialized_compressed_bytes.fetch_add(counters.compressed_bytes - serialized.reported_compressed_bytes);
+        gstate.serialized_entry_bytes.fetch_add(counters.serialized_bytes - serialized.reported_entry_bytes);
+        serialized.reported_baskets = counters.baskets;
+        serialized.reported_compressed_bytes = counters.compressed_bytes;
+        serialized.reported_entry_bytes = counters.serialized_bytes;
+
+        if (read.Decoded()) {
             gstate.serialized_entries.fetch_add(1);
-            gstate.serialized_values.fetch_add(lstate.serialized_values.size());
+            gstate.serialized_values.fetch_add(serialized.values.size());
         }
-        if (read.serialized) {
-            MaterializeSerializedResult(column, entry, lstate.path_reader.SerializedPlan(), lstate.serialized_values,
-                                        lstate.serialized_indices, lstate.cached_results[lstate.serialized_column]);
-            has_data = !lstate.cached_results[lstate.serialized_column].empty();
-            if (!has_data) {
-                lstate.local_current_row++;
-                return CacheResult::CONTINUE_LOOP;
+        if (!read.Serialized()) {
+            continue;
+        }
+
+        MaterializeSerializedResult(column, entry, serialized.path_reader.SerializedPlan(), serialized.values,
+                                    serialized.indices, lstate.cached_results[serialized.column_id]);
+        serialized_success.insert(serialized.column_id);
+    }
+
+    const auto shapes_match = [&lstate](const std::vector<idx_t>& columns) {
+        const rootlake::ReadResult* reference = nullptr;
+        for (const auto col_idx : columns) {
+            if (col_idx >= lstate.cached_results.size()) {
+                continue;
             }
-            lstate.current_entry = entry;
-            lstate.current_elem_idx = 0;
-            lstate.has_cached_entry = true;
-            return CacheResult::CACHED;
+            const auto& result = lstate.cached_results[col_idx];
+            if (!reference) {
+                reference = &result;
+                continue;
+            }
+            if (result.size() != reference->size() || result.vector_names != reference->vector_names ||
+                result.vector_indices != reference->vector_indices) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    bool has_data = false;
+    for (const auto& [branch_name, col_indices] : branch_columns) {
+        auto reader_it = lstate.root_readers.find(branch_name);
+        if (reader_it == lstate.root_readers.end()) {
+            continue;
+        }
+        auto& reader = reader_it->second;
+        if (entry >= static_cast<uint64_t>(reader.Tree()->GetEntries())) {
+            continue;
+        }
+
+        bool needs_object = false;
+        bool has_serialized = false;
+        for (const auto col_idx : col_indices) {
+            if (serialized_success.find(col_idx) != serialized_success.end()) {
+                has_serialized = true;
+            } else {
+                needs_object = true;
+            }
+        }
+
+        void* object = nullptr;
+        if (needs_object) {
+            RootDebug("READ.BEFORE_GET_ENTRY", "mode=group class=" + branch_name + " entry=" +
+                                                   std::to_string(entry) + " tree_ptr=" + RootPointer(reader.Tree()));
+            object = reader.Read(entry);
+            gstate.object_fallback_entries.fetch_add(1);
+            RootDebug("READ.AFTER_GET_ENTRY", "mode=group class=" + branch_name + " entry=" +
+                                                  std::to_string(entry) + " object_ptr=" + RootPointer(object));
+            if (object) {
+                for (const auto col_idx : col_indices) {
+                    if (serialized_success.find(col_idx) != serialized_success.end()) {
+                        continue;
+                    }
+                    const auto& col = bind_data.columns[col_idx];
+                    lstate.cached_results[col_idx].Clear();
+                    rootlake::OffsetValueReader::CollectDirect(object, col.levels,
+                                                               std::numeric_limits<Long64_t>::max(), entry,
+                                                               lstate.cached_results[col_idx]);
+                }
+            }
+        }
+
+        if (has_serialized && !shapes_match(col_indices)) {
+            if (bind_data.root_access.reader_mode == rootlake::RootReaderMode::SERIALIZED) {
+                throw IOException("serialized sibling columns have different collection shapes for ROOT branch " +
+                                  branch_name + " at entry " + std::to_string(entry));
+            }
+
+            if (!object) {
+                RootDebug("READ.BEFORE_GET_ENTRY", "mode=shape-fallback class=" + branch_name + " entry=" +
+                                                       std::to_string(entry) +
+                                                       " tree_ptr=" + RootPointer(reader.Tree()));
+                object = reader.Read(entry);
+                gstate.object_fallback_entries.fetch_add(1);
+                RootDebug("READ.AFTER_GET_ENTRY", "mode=shape-fallback class=" + branch_name + " entry=" +
+                                                      std::to_string(entry) + " object_ptr=" + RootPointer(object));
+            }
+            if (object) {
+                for (const auto col_idx : col_indices) {
+                    const auto& col = bind_data.columns[col_idx];
+                    lstate.cached_results[col_idx].Clear();
+                    rootlake::OffsetValueReader::CollectDirect(object, col.levels,
+                                                               std::numeric_limits<Long64_t>::max(), entry,
+                                                               lstate.cached_results[col_idx]);
+                }
+            }
+        }
+
+        for (const auto col_idx : col_indices) {
+            if (col_idx < lstate.cached_results.size() && !lstate.cached_results[col_idx].empty()) {
+                has_data = true;
+                break;
+            }
         }
     }
 
     if (branch_columns.empty() && lstate.has_container_columns) {
-        idx_t sample_col_idx = static_cast<idx_t>(-1);
+        idx_t sample_col_idx = DConstants::INVALID_INDEX;
         std::string sample_branch;
 
         for (idx_t i = 0; i < bind_data.columns.size(); ++i) {
             const auto& col = bind_data.columns[i];
-            if (!col.levels.empty() && !col.is_virtual_index && col.name != "event_id") {
+            if (!col.levels.empty() && !col.is_virtual_index && col.name != "entry_id") {
                 sample_col_idx = i;
                 sample_branch = col.branch_name;
                 break;
             }
         }
 
-        if (sample_col_idx != static_cast<idx_t>(-1)) {
-            auto it = lstate.root_readers.find(sample_branch);
-            if (it != lstate.root_readers.end()) {
-                auto& reader = it->second;
-                if (entry < static_cast<uint64_t>(reader.Tree()->GetEntries())) {
-                    RootDebug("READ.BEFORE_GET_ENTRY", "mode=sample class=" + sample_branch +
-                                                           " entry=" + std::to_string(entry) +
-                                                           " tree_ptr=" + RootPointer(reader.Tree()));
-                    void* object = reader.Read(entry);
-                    gstate.object_fallback_entries.fetch_add(1);
-                    RootDebug("READ.AFTER_GET_ENTRY", "mode=sample class=" + sample_branch + " entry=" +
-                                                          std::to_string(entry) + " object_ptr=" + RootPointer(object));
-                    if (object) {
-                        const auto& col = bind_data.columns[sample_col_idx];
-                        lstate.cached_results[sample_col_idx].Clear();
-                        rootlake::OffsetValueReader::CollectDirect(object, col.levels,
-                                                                   std::numeric_limits<Long64_t>::max(), entry,
-                                                                   lstate.cached_results[sample_col_idx]);
-                        has_data = !lstate.cached_results[sample_col_idx].empty();
-                    }
-                }
-            }
-        }
-    } else {
-        for (const auto& [branch_name, col_indices] : branch_columns) {
-            auto it = lstate.root_readers.find(branch_name);
-            if (it == lstate.root_readers.end()) {
-                continue;
-            }
-            auto& reader = it->second;
-            if (entry >= static_cast<uint64_t>(reader.Tree()->GetEntries())) {
-                continue;
-            }
-
-            RootDebug("READ.BEFORE_GET_ENTRY", "mode=group class=" + branch_name + " entry=" + std::to_string(entry) +
-                                                   " tree_ptr=" + RootPointer(reader.Tree()));
-            void* object = reader.Read(entry);
-            gstate.object_fallback_entries.fetch_add(1);
-            RootDebug("READ.AFTER_GET_ENTRY", "mode=group class=" + branch_name + " entry=" + std::to_string(entry) +
-                                                  " object_ptr=" + RootPointer(object));
-            if (!object) {
-                continue;
-            }
-
-            for (idx_t col_idx : col_indices) {
-                const auto& col = bind_data.columns[col_idx];
-                if (object) {
-                    lstate.cached_results[col_idx].Clear();
-                    rootlake::OffsetValueReader::CollectDirect(object, col.levels, std::numeric_limits<Long64_t>::max(),
-                                                               entry, lstate.cached_results[col_idx]);
-                    if (!lstate.cached_results[col_idx].empty()) {
-                        has_data = true;
+        if (sample_col_idx != DConstants::INVALID_INDEX) {
+            const auto serialized_it = serialized_success.find(sample_col_idx);
+            if (serialized_it != serialized_success.end()) {
+                has_data = !lstate.cached_results[sample_col_idx].empty();
+            } else {
+                auto it = lstate.root_readers.find(sample_branch);
+                if (it != lstate.root_readers.end()) {
+                    auto& reader = it->second;
+                    if (entry < static_cast<uint64_t>(reader.Tree()->GetEntries())) {
+                        RootDebug("READ.BEFORE_GET_ENTRY", "mode=sample class=" + sample_branch +
+                                                               " entry=" + std::to_string(entry) +
+                                                               " tree_ptr=" + RootPointer(reader.Tree()));
+                        void* object = reader.Read(entry);
+                        gstate.object_fallback_entries.fetch_add(1);
+                        RootDebug("READ.AFTER_GET_ENTRY", "mode=sample class=" + sample_branch + " entry=" +
+                                                              std::to_string(entry) +
+                                                              " object_ptr=" + RootPointer(object));
+                        if (object) {
+                            const auto& col = bind_data.columns[sample_col_idx];
+                            lstate.cached_results[sample_col_idx].Clear();
+                            rootlake::OffsetValueReader::CollectDirect(object, col.levels,
+                                                                       std::numeric_limits<Long64_t>::max(), entry,
+                                                                       lstate.cached_results[sample_col_idx]);
+                            has_data = !lstate.cached_results[sample_col_idx].empty();
+                        }
                     }
                 }
             }
@@ -168,11 +237,10 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
         if (lstate.has_container_columns) {
             lstate.local_current_row++;
             return CacheResult::CONTINUE_LOOP;
-        } else {
-            if (entry > 0) {
-                lstate.local_current_row = lstate.local_end_row;
-                return CacheResult::BREAK_LOOP;
-            }
+        }
+        if (entry > 0) {
+            lstate.local_current_row = lstate.local_end_row;
+            return CacheResult::BREAK_LOOP;
         }
     }
 
@@ -187,26 +255,26 @@ void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_
     auto& gstate = data_p.global_state->Cast<RootScanGlobalState>();
     auto& lstate = data_p.local_state->Cast<RootScanLocalState>();
 
-    if (bind_data.is_empty_mode) {
+    if (bind_data.IsEmptyMode()) {
         output.SetCardinality(0);
         return;
     }
-    if (gstate.event_range_impossible) {
+    if (gstate.entry_range_impossible) {
         output.SetCardinality(0);
         return;
     }
 
-    if (bind_data.is_histogram_mode) {
+    if (bind_data.IsHistogramMode()) {
         ProcessHistogramMode(context, bind_data, gstate, lstate, output);
         return;
     }
 
-    if (bind_data.is_browse_mode) {
+    if (bind_data.IsBrowseMode()) {
         ProcessBrowseMode(context, bind_data, gstate, lstate, output);
         return;
     }
 
-    if (bind_data.is_primitive_tree_mode) {
+    if (bind_data.IsPrimitiveTreeMode()) {
         while (true) {
             if (gstate.file_scheduler && !file_manager.EnsureReady(bind_data, gstate, lstate)) {
                 output.SetCardinality(0);
@@ -228,7 +296,7 @@ void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_
         }
     }
 
-    if (bind_data.is_direct_branch_mode) {
+    if (bind_data.IsDirectBranchMode()) {
         while (true) {
             if (gstate.file_scheduler && !file_manager.EnsureReady(bind_data, gstate, lstate)) {
                 output.SetCardinality(0);
@@ -263,7 +331,7 @@ void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_
                         break;
                     }
                     RootEntryScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
-                    auto batch = scheduler.ClaimWork(100000);
+                    auto batch = scheduler.ClaimWork();
                     if (!batch.HasWork()) {
                         break;
                     }
@@ -304,8 +372,8 @@ InsertionOrderPreservingMap<string> RootScanExplain::Bound(TableFunctionToString
     result["ROOT Files"] = std::to_string(bind.root_paths.size());
     result["ROOT Representative"] = bind.root_path;
     result["ROOT Bind Open Time (us)"] = std::to_string(bind.bind_open_us);
-    result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.reader_mode);
-    result["Serialized Validation Entries"] = std::to_string(bind.raw_validation_entries);
+    result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.root_access.reader_mode);
+    result["Serialized Validation Entries"] = std::to_string(bind.root_access.validation_entries);
     return result;
 }
 
@@ -313,7 +381,7 @@ InsertionOrderPreservingMap<string> RootScanExplain::Running(TableFunctionDynami
     InsertionOrderPreservingMap<string> result;
     if (input.bind_data) {
         const auto& bind = input.bind_data->Cast<RootScanBindData>();
-        result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.reader_mode);
+        result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.root_access.reader_mode);
         result["ROOT Input Files"] = std::to_string(bind.root_paths.size());
         result["ROOT Representative"] = bind.root_path;
         result["ROOT Bind Open Time (us)"] = std::to_string(bind.bind_open_us);

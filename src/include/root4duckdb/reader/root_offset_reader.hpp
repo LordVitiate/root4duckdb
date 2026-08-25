@@ -20,7 +20,11 @@ std::string IndexSignature(const std::vector<PathLevel>& levels);
 idx_t IndexDepth(const std::vector<PathLevel>& levels);
 /// @}
 
-/// Selects terminal primitive children for a semantic prefix.
+/// Describes exactly one logical level below a semantic path.
+bool DescribeSemanticPath(TClass* root_class, const ParsedPath& path, const std::string& raw_path,
+                          std::vector<SemanticPathChild>& children);
+
+/// Selects immediate primitive/string children for a relation prefix.
 bool SelectSemanticPath(TClass* root_class, const ParsedPath& path, const std::string& raw_path,
                         SemanticPathSelection& selection);
 
@@ -34,7 +38,7 @@ class OffsetValueReader {
                             std::vector<double>& values, std::vector<int32_t>& flat_indices);
     /// Collects the mixed direct-scan row representation.
     static void CollectDirect(void* root_object, const std::vector<PathLevel>& levels, int64_t max_values,
-                              int64_t event_id, ReadResult& out);
+                              int64_t entry_id, ReadResult& out);
 };
 
 } // namespace duckdb::rootlake

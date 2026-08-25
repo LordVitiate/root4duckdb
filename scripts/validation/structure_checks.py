@@ -29,7 +29,6 @@ def _required_files() -> tuple[str, ...]:
     return (
         ".clang-format",
         ".clang-tidy",
-        ".editorconfig",
         "VERSION",
         "CMakeLists.txt",
         "cmake/RootCompiler.cmake",
@@ -52,6 +51,8 @@ def _required_files() -> tuple[str, ...]:
         "scripts/production/index_chunk.sh",
         "scripts/production/validate_chunks.py",
         "scripts/production/commit_iceberg.sh",
+        "scripts/package-release.sh",
+        "test/loadable_extension_smoke.cpp",
         "test/production/test_control_plane.py",
     )
 
@@ -132,7 +133,7 @@ def _check_cmake_sources(validator: ProjectValidator) -> None:
 
 
 def _check_iceberg_build(validator: ProjectValidator) -> None:
-    """Preserve the separate shared Iceberg runtime contract."""
+    """Preserve the split shared and portable-static Iceberg contract."""
     iceberg_cmake = validator.read("cmake/RootIceberg.cmake")
     validator.require_tokens("RootIceberg.cmake", iceberg_cmake, (
         "ROOT4DUCKDB_ICEBERG_CORE",
@@ -140,19 +141,22 @@ def _check_iceberg_build(validator: ProjectValidator) -> None:
         "ROOT4DUCKDB_ICEBERG_BUNDLE",
         "ROOT4DUCKDB_ICEBERG_SQL",
         "root4duckdb_use_shared_iceberg",
+        "root4duckdb_embed_static_iceberg",
+        "iceberg::iceberg_bundle_static",
+        "iceberg::iceberg_sql_catalog_static",
+        "--exclude-libs,ALL",
+        "SKIP_BUILD_RPATH",
         "SKIP_PRECOMPILE_HEADERS",
     ))
     validator.reject_tokens("RootIceberg.cmake", iceberg_cmake, (
-        "find_package(iceberg",
-        "iceberg::iceberg_static",
-        "iceberg::iceberg_bundle",
-        "--exclude-libs",
+        "iceberg::iceberg_shared",
+        "iceberg::iceberg_bundle_shared",
     ))
 
     iceberg_build = validator.read("build-iceberg.sh")
     validator.require_tokens("build-iceberg.sh", iceberg_build, (
         "-DICEBERG_BUILD_SHARED=ON",
-        "-DICEBERG_BUILD_STATIC=OFF",
+        "-DICEBERG_BUILD_STATIC=ON",
         "-DICEBERG_BUILD_SQL_CATALOG=ON",
         "-DICEBERG_SQL_SQLITE=ON",
         "CMAKE_INSTALL_RPATH='$ORIGIN'",
@@ -164,6 +168,7 @@ def _check_iceberg_build(validator: ProjectValidator) -> None:
         validator.errors.append("ROOT4DuckDB build still invokes the Iceberg build implicitly")
     validator.require_tokens("build-root4duckdb.sh", root_build, (
         "scripts/check-iceberg.sh",
+        "scripts/package-release.sh",
         "libiceberg_bundle.so",
         "libiceberg_sql_catalog.so",
     ))

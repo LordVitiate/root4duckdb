@@ -5,7 +5,8 @@ namespace duckdb {
 void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootScanBindData& bind_data,
                                             RootScanGlobalState& gstate, RootScanLocalState& lstate,
                                             DataChunk& output) {
-    if (!bind_data.histogram_object) {
+    const auto* histogram_mode = bind_data.HistogramMode();
+    if (!histogram_mode || !histogram_mode->object) {
         throw InternalException("ROOT histogram object is unavailable");
     }
 
@@ -19,7 +20,7 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
 
             RootEntryScheduler scheduler(gstate.next_row, gstate.total_rows, gstate.coordination_mutex);
 
-            const auto batch = scheduler.ClaimWork(100000);
+            const auto batch = scheduler.ClaimWork();
 
             if (!batch.HasWork()) {
                 break;
@@ -32,7 +33,7 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
 
         const auto row = lstate.local_current_row++;
 
-        rootlake::MaterializeRootHistogramRow(bind_data.histogram_binding, *bind_data.histogram_object, row,
+        rootlake::MaterializeRootHistogramRow(histogram_mode->binding, *histogram_mode->object, row,
                                               row_values);
 
         bool passes = true;
@@ -98,7 +99,11 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
 
 void RootScanExecutor::ProcessBrowseMode(ClientContext& context, const RootScanBindData& bind_data,
                                          RootScanGlobalState& gstate, RootScanLocalState& lstate, DataChunk& output) {
-    const auto& children = bind_data.browse_children;
+    const auto* browse_mode = bind_data.BrowseMode();
+    if (!browse_mode) {
+        throw InternalException("read_root browse execution has no browse plan");
+    }
+    const auto& children = browse_mode->children;
     std::lock_guard<std::mutex> lock(gstate.coordination_mutex);
     size_t start = gstate.browse_offset;
 

@@ -172,10 +172,34 @@ PhysicalBranchResolution ResolvePhysicalBranch(TBranch* object_branch, const std
     if (auto* exact = FindPhysicalBranch(object_branch, fields)) {
         return {exact, "exact"};
     }
+    auto streamer_fields = fields;
+    bool has_alias = false;
+    for (auto& field : streamer_fields) {
+        if (field == "key") {
+            field = "first";
+            has_alias = true;
+        }
+    }
+    if (!streamer_fields.empty() && streamer_fields.back() == "value") {
+        streamer_fields.back() = "second";
+        has_alias = true;
+    }
+    if (has_alias) {
+        if (auto* exact = FindPhysicalBranch(object_branch, streamer_fields)) {
+            return {exact, "exact_alias"};
+        }
+    }
     for (idx_t prefix_size = fields.size(); prefix_size > 0; --prefix_size) {
         const std::vector<std::string> prefix(fields.begin(), fields.begin() + prefix_size);
         if (auto* ancestor = FindPhysicalBranch(object_branch, prefix)) {
             return {ancestor, prefix_size == fields.size() ? "exact" : "ancestor"};
+        }
+        if (has_alias) {
+            const std::vector<std::string> streamer_prefix(streamer_fields.begin(),
+                                                           streamer_fields.begin() + prefix_size);
+            if (auto* ancestor = FindPhysicalBranch(object_branch, streamer_prefix)) {
+                return {ancestor, prefix_size == fields.size() ? "exact_alias" : "ancestor_alias"};
+            }
         }
     }
     if (HasPersistentBaskets(object_branch)) {
