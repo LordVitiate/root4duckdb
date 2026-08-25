@@ -16,8 +16,9 @@
 
 ## Latest news 🔥
 
+- **2026-08-25 — Relation-level ROOT queries and parallel decoding.** `read_root()` now selects objects and collections as SQL relations, exposes their immediate fields as columns. Both object and serialized readers now parallelize single-file scans, while multi-column serialized reads share basket decoding work across sibling fields. Exact remote ROOT URIs, including `s3://` and `davix://`, use the common ROOT input layer.
 - **2026-08-13 — ROOT histograms in SQL.** `TH1`, `TH2`, `TH3` and profile objects are available as relational views.
-- **2026-08-11 — 10.7 billion values on one node.** A direct query scanned 117 remote ROOT files in 10 min 44 s at 16.6 million values/s with approximately 1.3 GiB peak memory. [Methodology and results](docs/direct-multifile-scan.md).
+- **2026-08-11 — 10.7 billion values on one node.** A direct query scanned 117 remote ROOT files in 10 min 44 s at 16.6 million values/s with approximately 1.3 GiB peak memory. [Methodology and results](https://github.com/LordVitiate/root4duckdb/blob/main/docs/direct-multifile-scan.md).
 
 ## Quick start
 
