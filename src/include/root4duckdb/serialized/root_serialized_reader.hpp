@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
 class TBranch;
@@ -47,10 +48,24 @@ bool IsSerializedNestedProjection(SerializedProjectionKind kind);
 const char* SerializedProjectionName(SerializedProjectionKind kind);
 /// @}
 
+struct SerializedPlanRejected {
+    std::string reason;
+};
+struct SerializedFixedProjection {};
+struct SerializedNestedPrimitiveProjection {};
+struct SerializedSelectedSubtreeProjection {};
+struct SerializedLeafBranchProjection {};
+struct SerializedRootSubtreeProjection {};
+struct SerializedCollectionBranchProjection {};
+
+using SerializedProjectionState =
+    std::variant<SerializedPlanRejected, SerializedFixedProjection, SerializedNestedPrimitiveProjection,
+                 SerializedSelectedSubtreeProjection, SerializedLeafBranchProjection,
+                 SerializedRootSubtreeProjection, SerializedCollectionBranchProjection>;
+
 /// Conservative plan for decoding one physical basket projection.
 struct SerializedReadPlan {
-    bool supported = false;
-    std::string reason;
+    SerializedProjectionState projection;
     std::string logical_path;
     std::string root_class;
     std::string container_name;
@@ -59,7 +74,6 @@ struct SerializedReadPlan {
     std::string value_type;
     std::string physical_branch_name;
     std::string schema_fingerprint;
-    SerializedProjectionKind projection_kind = SerializedProjectionKind::FIXED_MEMBER;
     // ROOT metadata is process-global after the dictionary has been loaded.
     // These pointers let the local reader ask ROOT to consume a member-wise
     // prefix whose serialized width is not statically knowable.
@@ -77,6 +91,13 @@ struct SerializedReadPlan {
     uint64_t fixed_array_length = 1;
     std::vector<uint32_t> array_dimensions;
     idx_t index_depth = 0;
+
+    [[nodiscard]] bool Supported() const noexcept;
+    [[nodiscard]] bool Is(SerializedProjectionKind kind) const noexcept;
+    [[nodiscard]] SerializedProjectionKind Kind() const;
+    [[nodiscard]] const std::string& RejectionReason() const noexcept;
+    void Select(SerializedProjectionKind kind);
+    void Reject(std::string reason);
 };
 
 /// Builds a conservative plan; unsupported layouts use object fallback.
@@ -143,7 +164,7 @@ class SerializedBasketReader {
     /// @name Ownership
     /// @{
     SerializedBasketReader();
-    ~SerializedBasketReader();
+    ~SerializedBasketReader() noexcept;
     SerializedBasketReader(const SerializedBasketReader&) = delete;
     SerializedBasketReader& operator=(const SerializedBasketReader&) = delete;
     SerializedBasketReader(SerializedBasketReader&&) noexcept;
@@ -155,8 +176,8 @@ class SerializedBasketReader {
     void Bind(TBranch* branch, SerializedReadPlan plan, uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL,
               uint64_t max_values_per_entry = 10ULL * 1024ULL * 1024ULL);
     /// Detaches branch-local ROOT addresses without discarding metrics/plan state.
-    void ReleaseBindings();
-    void Reset();
+    void ReleaseBindings() noexcept;
+    void Reset() noexcept;
 
     bool Decode(uint64_t entry, std::vector<double>& values, std::vector<int32_t>& flat_indices,
                 std::string& failure_reason, bool collect_indices = true);

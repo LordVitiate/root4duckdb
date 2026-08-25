@@ -10,8 +10,10 @@
 
 namespace duckdb::rootlake {
 
-/// Serialized-first reader limits and fallback policy.
-struct RootPathReaderOptions {
+/// Common ROOT access policy shared by direct scans, dataset scans, and index builds.
+/// Keeping the limits and cleanup policy in one value object prevents the three
+/// public execution paths from silently developing different safety defaults.
+struct RootAccessOptions {
     RootReaderMode reader_mode = RootReaderMode::AUTO;
     uint32_t validation_entries = 0;
     uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
@@ -20,19 +22,33 @@ struct RootPathReaderOptions {
     bool enable_all_branches_on_fallback = false;
     RootDictionaryCleanupMode dictionary_cleanup_mode = RootDictionaryCleanupMode::FULL;
     std::string operation = "read";
+
+    void Validate() const;
 };
 
-/// Result of starting the serialized reader.
+using RootPathReaderOptions = RootAccessOptions;
+
+enum class RootPathStartRoute : uint8_t { OBJECT_ONLY = 0, SERIALIZED = 1, OBJECT_FALLBACK = 2 };
+
+/// Mutually exclusive result of starting the serialized reader.
 struct RootPathReaderStartResult {
-    bool serialized_active = false;
-    bool fallback_activated = false;
+    RootPathStartRoute route = RootPathStartRoute::OBJECT_ONLY;
+
+    [[nodiscard]] bool SerializedActive() const noexcept;
+    [[nodiscard]] bool FallbackActivated() const noexcept;
 };
 
-/// Result of one serialized read attempt.
+enum class RootPathReadRoute : uint8_t { NOT_ATTEMPTED = 0, SERIALIZED = 1, OBJECT_FALLBACK = 2 };
+
+/// Mutually exclusive routing result of one serialized read attempt.
 struct RootPathReadResult {
-    bool decoded = false;
-    bool serialized = false;
-    bool fallback_activated = false;
+    RootPathReadRoute route = RootPathReadRoute::NOT_ATTEMPTED;
+    // A validation mismatch may decode successfully and still select fallback.
+    bool attempt_decoded = false;
+
+    [[nodiscard]] bool Decoded() const noexcept;
+    [[nodiscard]] bool Serialized() const noexcept;
+    [[nodiscard]] bool FallbackActivated() const noexcept;
 };
 
 class RootPathReader {

@@ -1,4 +1,5 @@
 #include "root4duckdb/serialized/root_serialized_codec.hpp"
+#include "root4duckdb/serialized/root_serialized_codec_utils.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -15,6 +16,7 @@ using duckdb::rootlake::EqualDecodedValues;
 using duckdb::rootlake::RootPrimitiveKind;
 using duckdb::rootlake::RootPrimitiveValue;
 using duckdb::rootlake::SerializedEntryLayout;
+using duckdb::rootlake::serialized_codec::CheckedByteCursor;
 
 static void PutBE32(std::vector<uint8_t>& bytes, size_t offset, uint32_t value) {
     bytes[offset + 0] = static_cast<uint8_t>(value >> 24U);
@@ -74,6 +76,19 @@ static std::vector<uint8_t> NestedShortColumn(size_t column_offset) {
 }
 
 int main() {
+    const std::vector<uint8_t> cursor_bytes{0x01, 0x02, 0x03, 0x04, 0x05};
+    CheckedByteCursor checked_cursor(cursor_bytes.data(), cursor_bytes.size());
+    uint32_t cursor_u32 = 0;
+    assert(checked_cursor.ReadBE32(cursor_u32));
+    assert(cursor_u32 == 0x01020304U);
+    assert(checked_cursor.Remaining() == 1);
+    assert(!checked_cursor.ReadBE32(cursor_u32));
+    assert(checked_cursor.Remaining() == 1);
+    uint8_t cursor_u8 = 0;
+    assert(checked_cursor.ReadU8(cursor_u8));
+    assert(cursor_u8 == 0x05U);
+    assert(!checked_cursor.Skip(1));
+
     SerializedEntryLayout scalar;
     scalar.value_type = "Float_t";
     scalar.bytes_before_value_per_element = 10;

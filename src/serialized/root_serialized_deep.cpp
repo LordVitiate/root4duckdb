@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 
 namespace duckdb::rootlake {
@@ -31,6 +32,75 @@ const char* SerializedProjectionName(SerializedProjectionKind kind) {
         return "collection_branch";
     }
     return "unknown";
+}
+
+bool SerializedReadPlan::Supported() const noexcept {
+    return !std::holds_alternative<SerializedPlanRejected>(projection);
+}
+
+bool SerializedReadPlan::Is(SerializedProjectionKind kind) const noexcept {
+    switch (kind) {
+    case SerializedProjectionKind::FIXED_MEMBER:
+        return std::holds_alternative<SerializedFixedProjection>(projection);
+    case SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR:
+        return std::holds_alternative<SerializedNestedPrimitiveProjection>(projection);
+    case SerializedProjectionKind::SELECTED_SUBTREE:
+        return std::holds_alternative<SerializedSelectedSubtreeProjection>(projection);
+    case SerializedProjectionKind::LEAF_BRANCH:
+        return std::holds_alternative<SerializedLeafBranchProjection>(projection);
+    case SerializedProjectionKind::ROOT_SELECTED_SUBTREE:
+        return std::holds_alternative<SerializedRootSubtreeProjection>(projection);
+    case SerializedProjectionKind::COLLECTION_BRANCH:
+        return std::holds_alternative<SerializedCollectionBranchProjection>(projection);
+    }
+    return false;
+}
+
+SerializedProjectionKind SerializedReadPlan::Kind() const {
+    for (const auto kind : {SerializedProjectionKind::FIXED_MEMBER,
+                            SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR,
+                            SerializedProjectionKind::SELECTED_SUBTREE,
+                            SerializedProjectionKind::LEAF_BRANCH,
+                            SerializedProjectionKind::ROOT_SELECTED_SUBTREE,
+                            SerializedProjectionKind::COLLECTION_BRANCH}) {
+        if (Is(kind)) {
+            return kind;
+        }
+    }
+    throw std::logic_error("unsupported serialized plan has no projection kind");
+}
+
+const std::string& SerializedReadPlan::RejectionReason() const noexcept {
+    static const std::string empty;
+    const auto* rejected = std::get_if<SerializedPlanRejected>(&projection);
+    return rejected ? rejected->reason : empty;
+}
+
+void SerializedReadPlan::Select(SerializedProjectionKind kind) {
+    switch (kind) {
+    case SerializedProjectionKind::FIXED_MEMBER:
+        projection.emplace<SerializedFixedProjection>();
+        return;
+    case SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR:
+        projection.emplace<SerializedNestedPrimitiveProjection>();
+        return;
+    case SerializedProjectionKind::SELECTED_SUBTREE:
+        projection.emplace<SerializedSelectedSubtreeProjection>();
+        return;
+    case SerializedProjectionKind::LEAF_BRANCH:
+        projection.emplace<SerializedLeafBranchProjection>();
+        return;
+    case SerializedProjectionKind::ROOT_SELECTED_SUBTREE:
+        projection.emplace<SerializedRootSubtreeProjection>();
+        return;
+    case SerializedProjectionKind::COLLECTION_BRANCH:
+        projection.emplace<SerializedCollectionBranchProjection>();
+        return;
+    }
+}
+
+void SerializedReadPlan::Reject(std::string reason) {
+    projection.emplace<SerializedPlanRejected>(SerializedPlanRejected{std::move(reason)});
 }
 
 bool ResolveSerializedVersionedMember(const SerializedReadPlan& plan, int32_t element_version,
@@ -64,7 +134,7 @@ bool ResolveSerializedVersionedMember(const SerializedReadPlan& plan, int32_t el
         return false;
     }
     if (target->IsaPointer() ||
-        (plan.projection_kind == SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR &&
+        (plan.Is(SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR) &&
          (target->GetArrayDim() != 0 || target->GetStreamer()))) {
         failure_reason = "projected member has an unsupported layout in serialized outer "
                          "element version " +
@@ -76,7 +146,7 @@ bool ResolveSerializedVersionedMember(const SerializedReadPlan& plan, int32_t el
     const auto arguments = TemplateArguments(target_type);
     auto* target_class = target->GetClassPointer();
     auto* target_proxy = target_class ? target_class->GetCollectionProxy() : nullptr;
-    if (plan.projection_kind == SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR) {
+    if (plan.Is(SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR)) {
         if (!IsContiguousVectorType(target_type) || arguments.empty() || !target_proxy ||
             target_proxy->HasPointers()) {
             failure_reason = "projected nested vector is not an inline collection in serialized outer element "
@@ -95,7 +165,7 @@ bool ResolveSerializedVersionedMember(const SerializedReadPlan& plan, int32_t el
                              ", dictionary=" + plan.value_type + ")";
             return false;
         }
-    } else if (plan.projection_kind == SerializedProjectionKind::SELECTED_SUBTREE) {
+    } else if (plan.Is(SerializedProjectionKind::SELECTED_SUBTREE)) {
         // The selected member can be either an inline object or an inline
         // vector<object>.  Versioned resolution must preserve that exact
         // persistent shape; otherwise the stored traversal offsets are not
@@ -242,9 +312,7 @@ bool ConfigureSerializedDeepProjection(const ParsedPath& path, const std::vector
         return false;
     }
 
-    plan.supported = true;
-    plan.reason.clear();
-    plan.projection_kind = SerializedProjectionKind::SELECTED_SUBTREE;
+    plan.Select(SerializedProjectionKind::SELECTED_SUBTREE);
     plan.container_name = levels[0].name;
     plan.element_class = outer_element_class->GetName();
     plan.projected_member_name = path.fields[1];
@@ -273,7 +341,7 @@ bool ConsumeSerializedSelectedMembers(TBufferFile& buffer, const SerializedReadP
                                       const std::vector<int>& prefix_element_ids,
                                       std::unique_ptr<TStreamerInfoActions::TActionSequence>& cached_actions,
                                       std::string& failure_reason) {
-    const bool include_selected_member = plan.projection_kind == SerializedProjectionKind::SELECTED_SUBTREE;
+    const bool include_selected_member = plan.Is(SerializedProjectionKind::SELECTED_SUBTREE);
     if (prefix_element_ids.empty() && !include_selected_member) {
         return true;
     }

@@ -110,16 +110,11 @@ struct DatasetBindData final : public TableFunctionData {
     std::vector<PathPredicateBinding> path_predicates;
     LogicalType value_type;
     idx_t value_column = 0;
-    uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
-    RootReaderMode reader_mode = RootReaderMode::AUTO;
-    uint32_t raw_validation_entries = 0;
-    uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
-    uint64_t raw_max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
+    RootAccessOptions root_access;
     uint64_t coalesce_gap_bytes = 64ULL * 1024ULL;
     uint32_t prefetch_depth = 2;
     bool prefetch_ranges = true;
     bool require_fresh_index = true;
-    RootDictionaryCleanupMode dictionary_cleanup_mode = RootDictionaryCleanupMode::FULL;
     std::unordered_map<std::string, std::vector<EntryInterval>> entry_selection;
     bool entry_selection_active = false;
     uint32_t max_open_files = 0;

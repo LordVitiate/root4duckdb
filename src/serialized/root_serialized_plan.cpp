@@ -179,9 +179,7 @@ bool ConfigureLeafProjection(const ParsedPath& path, const std::vector<PathLevel
     if (!PrimitiveTypeSize(value_type)) {
         return false;
     }
-    plan.supported = true;
-    plan.reason.clear();
-    plan.projection_kind = SerializedProjectionKind::LEAF_BRANCH;
+    plan.Select(SerializedProjectionKind::LEAF_BRANCH);
     plan.value_type = value_type;
     plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
     plan.projection_levels = levels;
@@ -228,9 +226,7 @@ bool ConfigureCollectionBranchProjection(TClass* root_class, const ParsedPath& p
         return false;
     }
 
-    plan.supported = true;
-    plan.reason.clear();
-    plan.projection_kind = SerializedProjectionKind::COLLECTION_BRANCH;
+    plan.Select(SerializedProjectionKind::COLLECTION_BRANCH);
     plan.value_type = value_type;
     plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
     plan.scratch_class = root_class;
@@ -283,9 +279,7 @@ bool ConfigureInlineObjectBranchProjection(TClass* root_class, const ParsedPath&
         return false;
     }
 
-    plan.supported = true;
-    plan.reason.clear();
-    plan.projection_kind = SerializedProjectionKind::ROOT_SELECTED_SUBTREE;
+    plan.Select(SerializedProjectionKind::ROOT_SELECTED_SUBTREE);
     plan.value_type = value_type;
     plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
     plan.scratch_class = root_class;
@@ -313,9 +307,7 @@ bool ConfigureRootProjection(TClass* root_class, const ParsedPath& path, const s
         reason = "top-level selected member is absent from ROOT streamer actions";
         return false;
     }
-    plan.supported = true;
-    plan.reason.clear();
-    plan.projection_kind = SerializedProjectionKind::ROOT_SELECTED_SUBTREE;
+    plan.Select(SerializedProjectionKind::ROOT_SELECTED_SUBTREE);
     plan.value_type = PrimitiveBaseType(levels.back().type);
     plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
     plan.scratch_class = root_class;
@@ -375,8 +367,7 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     plan.root_class = path.root_class;
     plan.physical_branch_name = physical_branch && physical_branch->GetName() ? physical_branch->GetName() : "";
     auto reject = [&](std::string reason) {
-        plan.supported = false;
-        plan.reason = std::move(reason);
+        plan.Reject(std::move(reason));
         return plan;
     };
 
@@ -476,9 +467,7 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
             return reject("nested vector primitive type is unsupported: " + scalar_type);
         }
 
-        plan.supported = true;
-        plan.reason.clear();
-        plan.projection_kind = SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR;
+        plan.Select(SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR);
         plan.container_name = levels[0].name;
         plan.element_class = element_class->GetName();
         plan.projected_member_name = path.fields[1];
@@ -574,8 +563,7 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
         return reject("terminal member has unsupported persistent width");
     }
 
-    plan.supported = true;
-    plan.reason.clear();
+    plan.Select(SerializedProjectionKind::FIXED_MEMBER);
     plan.container_name = levels[0].name;
     plan.element_class = element_class->GetName();
     plan.projected_member_name = target->GetName();
@@ -594,7 +582,7 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
 
 bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
                                   SerializedEntryLayout& resolved_layout, std::string& failure_reason) {
-    if (plan.projection_kind != SerializedProjectionKind::FIXED_MEMBER || !plan.outer_element_class ||
+    if (!plan.Is(SerializedProjectionKind::FIXED_MEMBER) || !plan.outer_element_class ||
         plan.projected_member_name.empty() || element_version < 0) {
         failure_reason = "serialized fixed projection has no versioned member metadata";
         return false;

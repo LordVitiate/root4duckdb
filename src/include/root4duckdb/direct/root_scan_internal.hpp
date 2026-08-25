@@ -19,6 +19,7 @@
 #include <string>
 #include <unordered_map>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -59,6 +60,27 @@ struct RootPrimitiveBranch {
     TBranch* branch = nullptr;
     TLeaf* leaf = nullptr;
 };
+
+struct RootSemanticScanMode {};
+struct RootPrimitiveTreeScanMode {};
+struct RootEmptyScanMode {};
+
+struct RootBrowseScanMode {
+    std::vector<std::string> children;
+};
+
+struct RootDirectBranchScanMode {
+    RootPrimitiveBranch branch;
+};
+
+struct RootHistogramScanMode {
+    rootlake::RootHistogramBinding binding;
+    std::unique_ptr<TH1> object;
+};
+
+/// Exactly one direct-scan strategy selected at bind time.
+using RootScanMode = std::variant<RootSemanticScanMode, RootBrowseScanMode, RootDirectBranchScanMode,
+                                  RootPrimitiveTreeScanMode, RootHistogramScanMode, RootEmptyScanMode>;
 
 /// One logical output column in the direct scan plan.
 struct RootScanColumn {
@@ -103,26 +125,28 @@ struct RootScanBindData : public TableFunctionData {
     uint64_t total_rows = 0;
     std::vector<RootScanColumn> columns;
 
-    bool is_browse_mode = false;
-    bool is_direct_branch_mode = false;
-    bool is_primitive_tree_mode = false;
-    bool is_empty_mode = false;
-    bool is_histogram_mode = false;
-    rootlake::RootDictionaryCleanupMode dictionary_cleanup_mode = rootlake::RootDictionaryCleanupMode::FULL;
-    std::vector<std::string> browse_children;
-    RootPrimitiveBranch direct_branch_info;
-    rootlake::RootHistogramBinding histogram_binding;
-    std::unique_ptr<TH1> histogram_object;
-    rootlake::RootReaderMode reader_mode = rootlake::RootReaderMode::AUTO;
-    uint32_t raw_validation_entries = 0;
-    uint64_t raw_max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
-    uint64_t raw_max_values_per_entry = 10ULL * 1024ULL * 1024ULL;
-    uint64_t tree_cache_bytes = 64ULL * 1024ULL * 1024ULL;
+    RootScanMode scan_mode;
+    rootlake::RootAccessOptions root_access;
     idx_t source_id_column = DConstants::INVALID_INDEX;
     idx_t source_path_column = DConstants::INVALID_INDEX;
 
     bool IsMultiFile() const;
-    ~RootScanBindData();
+    bool IsSemanticMode() const noexcept;
+    bool IsBrowseMode() const noexcept;
+    bool IsDirectBranchMode() const noexcept;
+    bool IsPrimitiveTreeMode() const noexcept;
+    bool IsHistogramMode() const noexcept;
+    bool IsEmptyMode() const noexcept;
+    const RootBrowseScanMode* BrowseMode() const noexcept;
+    const RootDirectBranchScanMode* DirectBranchMode() const noexcept;
+    const RootHistogramScanMode* HistogramMode() const noexcept;
+    void SelectSemanticMode();
+    void SelectBrowseMode(std::vector<std::string> children);
+    void SelectDirectBranchMode(RootPrimitiveBranch branch);
+    void SelectPrimitiveTreeMode();
+    void SelectHistogramMode(rootlake::RootHistogramBinding binding, std::unique_ptr<TH1> object);
+    void SelectEmptyMode();
+    ~RootScanBindData() noexcept;
 };
 
 /// Shared scheduling and profiling state for read_root.
@@ -146,7 +170,7 @@ struct RootScanGlobalState : public GlobalTableFunctionState {
     uint64_t event_lower = 0;
     uint64_t event_upper = std::numeric_limits<uint64_t>::max();
     bool event_range_impossible = false;
-    bool histogram_mode = false;
+    bool force_single_thread = false;
 
     idx_t MaxThreads() const override;
 };

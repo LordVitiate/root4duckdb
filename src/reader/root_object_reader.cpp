@@ -11,9 +11,23 @@ namespace duckdb::rootlake {
 
 RootObjectContext::RootObjectContext() = default;
 
-RootObjectReader::RootObjectReader() = default;
-RootObjectReader::RootObjectReader(RootObjectReader&&) noexcept = default;
-RootObjectReader& RootObjectReader::operator=(RootObjectReader&&) noexcept = default;
+RootObjectReader::RootObjectReader() : context(std::make_unique<RootObjectContext>()) {
+}
+RootObjectReader::~RootObjectReader() noexcept = default;
+RootObjectReader::RootObjectReader(RootObjectReader&& other) noexcept
+    : file(other.file), context(std::move(other.context)) {
+    other.file = nullptr;
+}
+
+RootObjectReader& RootObjectReader::operator=(RootObjectReader&& other) noexcept {
+    if (this != &other) {
+        Reset();
+        file = other.file;
+        context = std::move(other.context);
+        other.file = nullptr;
+    }
+    return *this;
+}
 
 void* RootObjectContext::CurrentObject() const {
     return address_slot;
@@ -24,19 +38,19 @@ TFile* RootObjectReader::File() const {
 }
 
 TTree* RootObjectReader::Tree() const {
-    return context.tree;
+    return context ? context->Tree() : nullptr;
 }
 
 TBranch* RootObjectReader::ObjectBranch() const {
-    return context.branch;
+    return context ? context->Branch() : nullptr;
 }
 
 TClass* RootObjectReader::RootClass() const {
-    return context.root_class;
+    return context ? context->Class() : nullptr;
 }
 
 void* RootObjectReader::CurrentObject() const {
-    return context.CurrentObject();
+    return context ? context->CurrentObject() : nullptr;
 }
 
 uint64_t RootEntryReader::LoadCount() const {
@@ -64,6 +78,9 @@ RootDictionaryCleanupMode ParseDictionaryCleanupMode(std::string mode, RootDicti
 void RootObjectReader::Bind(TFile* file_p, const std::string& tree_name, const std::string& root_class_name,
                             RootDictionaryCleanupMode cleanup_mode) {
     Reset();
+    if (!context) {
+        context = std::make_unique<RootObjectContext>();
+    }
     if (!file_p || file_p->IsZombie()) {
         throw InvalidInputException("Cannot bind an invalid ROOT file");
     }
@@ -79,21 +96,23 @@ void RootObjectReader::Bind(TFile* file_p, const std::string& tree_name, const s
     if (!branch) {
         throw InvalidInputException("No object branch for ROOT class " + root_class_name);
     }
-    context.Bind(tree, branch, root_class, cleanup_mode, root_class_name);
+    context->Bind(tree, branch, root_class, cleanup_mode, root_class_name);
     file = file_p;
 }
 
-void RootObjectReader::Reset() {
-    context.Reset();
+void RootObjectReader::Reset() noexcept {
+    if (context) {
+        context->Reset();
+    }
     file = nullptr;
 }
 
 void* RootObjectReader::Read(uint64_t entry) {
-    return context.Read(entry);
+    return context ? context->Read(entry) : nullptr;
 }
 
 bool RootObjectReader::IsBound() const {
-    return file && context.tree && context.branch && context.root_class;
+    return file && context && context->IsBound();
 }
 
 RootEntryReader::RootEntryReader(RootObjectReader& reader_p) : reader(reader_p) {
@@ -126,19 +145,7 @@ void RootEntryReader::Invalidate() {
     loaded = false;
 }
 
-RootObjectContext::RootObjectContext(RootObjectContext&& other) noexcept {
-    MoveFrom(std::move(other));
-}
-
-RootObjectContext& RootObjectContext::operator=(RootObjectContext&& other) noexcept {
-    if (this != &other) {
-        Reset();
-        MoveFrom(std::move(other));
-    }
-    return *this;
-}
-
-RootObjectContext::~RootObjectContext() {
+RootObjectContext::~RootObjectContext() noexcept {
     Reset();
 }
 
@@ -179,41 +186,31 @@ void* RootObjectContext::Read(uint64_t entry) {
     return bytes < 0 ? nullptr : address_slot;
 }
 
-void RootObjectContext::MoveFrom(RootObjectContext&& other) {
-    tree = other.tree;
-    branch = other.branch;
-    root_class = other.root_class;
-    owned_object = other.owned_object;
-    address_slot = other.address_slot;
-    cleanup_mode = other.cleanup_mode;
-    class_name = std::move(other.class_name);
-    other.tree = nullptr;
-    other.branch = nullptr;
-    other.root_class = nullptr;
-    other.owned_object = nullptr;
-    other.address_slot = nullptr;
-    other.cleanup_mode = RootDictionaryCleanupMode::FULL;
-    if (branch) {
-        branch->SetAddress(&address_slot);
-    }
+bool RootObjectContext::IsBound() const noexcept {
+    return tree && branch && root_class;
 }
 
-void RootObjectContext::Reset() {
-    if (branch) {
-        branch->ResetAddress();
-    }
-    if (owned_object && root_class) {
-        switch (cleanup_mode) {
-        case RootDictionaryCleanupMode::FULL:
-            root_class->Destructor(owned_object, kFALSE);
-            break;
-        case RootDictionaryCleanupMode::DESTRUCT_ONLY:
-            root_class->Destructor(owned_object, kTRUE);
-            break;
-        case RootDictionaryCleanupMode::RETAIN:
-            break;
-        }
-    }
+TTree* RootObjectContext::Tree() const noexcept {
+    return tree;
+}
+
+TBranch* RootObjectContext::Branch() const noexcept {
+    return branch;
+}
+
+TClass* RootObjectContext::Class() const noexcept {
+    return root_class;
+}
+
+void RootObjectContext::Reset() noexcept {
+    // Clear the state before invoking external ROOT cleanup. Even if a custom
+    // dictionary violates the no-throw boundary, this context cannot clean up
+    // the same resource twice.
+    auto* bound_branch = branch;
+    auto* object_class = root_class;
+    auto* object = owned_object;
+    const auto mode = cleanup_mode;
+
     tree = nullptr;
     branch = nullptr;
     root_class = nullptr;
@@ -221,6 +218,31 @@ void RootObjectContext::Reset() {
     address_slot = nullptr;
     cleanup_mode = RootDictionaryCleanupMode::FULL;
     class_name.clear();
+
+    try {
+        if (bound_branch) {
+            bound_branch->ResetAddress();
+        }
+    } catch (...) {
+        // DCL57-CPP: cleanup must never escape a destructor/noexcept boundary.
+    }
+
+    try {
+        if (object && object_class) {
+            switch (mode) {
+            case RootDictionaryCleanupMode::FULL:
+                object_class->Destructor(object, kFALSE);
+                break;
+            case RootDictionaryCleanupMode::DESTRUCT_ONLY:
+                object_class->Destructor(object, kTRUE);
+                break;
+            case RootDictionaryCleanupMode::RETAIN:
+                break;
+            }
+        }
+    } catch (...) {
+        // A third-party custom streamer/destructor cannot cross this ABI edge.
+    }
 }
 
 } // namespace duckdb::rootlake

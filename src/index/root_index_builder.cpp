@@ -221,7 +221,7 @@ IndexedPathPlan PreparePath(const RootIndexBuildOptions& options, TTree* tree, T
         basket.physical_offset = basket_seek > 0 ? static_cast<uint64_t>(basket_seek) : 0;
         basket.compressed_size = basket_bytes ? static_cast<uint32_t>(std::max(0, basket_bytes[basket_id])) : 0;
         const bool serialized_metadata =
-            options.reader_mode != RootReaderMode::OBJECT && plan.reader.SerializedPlan().supported;
+            options.root_access.reader_mode != RootReaderMode::OBJECT && plan.reader.SerializedPlan().Supported();
         if (!serialized_metadata) {
             ApplyRootBasketMetadata(basket, physical_branch->GetBasket(basket_id));
             physical_branch->DropBaskets();
@@ -270,7 +270,8 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
 
         const auto root_path_spec = ParsePath(options.logical_paths.front());
         RootObjectReader object_reader;
-        object_reader.Bind(file.get(), options.tree_name, root_path_spec.root_class, options.dictionary_cleanup_mode);
+        object_reader.Bind(file.get(), options.tree_name, root_path_spec.root_class,
+                           options.root_access.dictionary_cleanup_mode);
         auto* tree = object_reader.Tree();
         auto* object_branch = object_reader.ObjectBranch();
         auto* root_class = object_reader.RootClass();
@@ -296,10 +297,11 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
             projection_safe = projection_safe && path.reader.PhysicalMode() == "ancestor";
         }
         const auto projection = projection_safe
-                                    ? ApplyBranchProjection(tree, projected_branches, options.tree_cache_bytes)
+                                    ? ApplyBranchProjection(tree, projected_branches,
+                                                            options.root_access.tree_cache_bytes)
                                     : BranchProjectionResult{};
         if (!projection.applied) {
-            EnableAllBranches(tree, options.tree_cache_bytes);
+            EnableAllBranches(tree, options.root_access.tree_cache_bytes);
         }
 
         uint64_t serialized_path_count = 0;
@@ -313,20 +315,13 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
             if (paths_per_branch[path.reader.PhysicalBranch()] > 1) {
                 rejection = "multiple requested paths share one physical ancestor; universal one-pass read is cheaper";
             }
-            RootPathReaderOptions reader_options;
-            reader_options.reader_mode = options.reader_mode;
-            reader_options.validation_entries = options.raw_validation_entries;
-            reader_options.max_entry_bytes = options.raw_max_entry_bytes;
-            reader_options.max_values_per_entry = options.raw_max_values_per_entry;
-            reader_options.tree_cache_bytes = options.tree_cache_bytes;
-            reader_options.dictionary_cleanup_mode = options.dictionary_cleanup_mode;
-            reader_options.operation = "index";
+            auto reader_options = options.root_access;
             const auto started =
                 path.reader.StartSerialized(std::move(reader_options), std::move(rejection));
-            if (started.serialized_active) {
+            if (started.SerializedActive()) {
                 ++serialized_path_count;
             }
-            if (started.fallback_activated) {
+            if (started.FallbackActivated()) {
                 ++fallback_path_count;
             }
         }
@@ -335,7 +330,7 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
         std::vector<int32_t> indices;
         RootEntryReader object_entry(object_reader);
         for (uint64_t entry = 0; entry < total_entries; ++entry) {
-            bool need_object = options.reader_mode == RootReaderMode::OBJECT;
+            bool need_object = options.root_access.reader_mode == RootReaderMode::OBJECT;
             for (const auto& path : paths) {
                 if (!path.reader.SerializedActive() || path.reader.ValidationRemaining() > 0) {
                     need_object = true;
@@ -365,7 +360,7 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
                 if (path.reader.SerializedActive()) {
                     const auto read = path.reader.TryReadSerialized(entry, object_entry, values, indices,
                                                                     path.reader.ValidationRemaining() > 0);
-                    if (read.fallback_activated) {
+                    if (read.FallbackActivated()) {
                         ++fallback_path_count;
                     }
                     SerializedBasketInfo basket_info;

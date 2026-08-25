@@ -29,6 +29,72 @@ RootPrimitiveValue FloatingValue(double input) {
 
 } // namespace
 
+CheckedByteCursor::CheckedByteCursor(const uint8_t* data_p, size_t size_p) noexcept : data(data_p), size(size_p) {
+}
+
+size_t CheckedByteCursor::Offset() const noexcept {
+    return offset;
+}
+
+size_t CheckedByteCursor::Remaining() const noexcept {
+    return offset <= size ? size - offset : 0;
+}
+
+const uint8_t* CheckedByteCursor::Current() const noexcept {
+    return data && offset <= size ? data + offset : nullptr;
+}
+
+bool CheckedByteCursor::Take(size_t requested, const uint8_t*& begin) noexcept {
+    begin = nullptr;
+    if (!data || requested > Remaining()) {
+        return false;
+    }
+    begin = data + offset;
+    offset += requested;
+    return true;
+}
+
+bool CheckedByteCursor::Skip(size_t requested) noexcept {
+    const uint8_t* ignored = nullptr;
+    return Take(requested, ignored);
+}
+
+bool CheckedByteCursor::ReadU8(uint8_t& value) noexcept {
+    const uint8_t* bytes = nullptr;
+    if (!Take(1, bytes)) {
+        return false;
+    }
+    value = bytes[0];
+    return true;
+}
+
+bool CheckedByteCursor::ReadBE16(uint16_t& value) noexcept {
+    const uint8_t* bytes = nullptr;
+    if (!Take(2, bytes)) {
+        return false;
+    }
+    value = serialized_codec::ReadBE16(bytes);
+    return true;
+}
+
+bool CheckedByteCursor::ReadBE32(uint32_t& value) noexcept {
+    const uint8_t* bytes = nullptr;
+    if (!Take(4, bytes)) {
+        return false;
+    }
+    value = serialized_codec::ReadBE32(bytes);
+    return true;
+}
+
+bool CheckedByteCursor::ReadBE64(uint64_t& value) noexcept {
+    const uint8_t* bytes = nullptr;
+    if (!Take(8, bytes)) {
+        return false;
+    }
+    value = serialized_codec::ReadBE64(bytes);
+    return true;
+}
+
 uint16_t ReadBE16(const uint8_t* pointer) {
     return static_cast<uint16_t>((static_cast<uint16_t>(pointer[0]) << 8U) | static_cast<uint16_t>(pointer[1]));
 }

@@ -134,7 +134,7 @@ void RootScanBinder::BindDirectPrimitives(RootScanBindData& bind_data, const std
 void RootScanBinder::BindBrowseMode(RootScanBindData& bind_data, const std::string& path_prefix,
                                     const std::set<std::string>& direct_children,
                                     std::vector<std::string>& return_names, std::vector<LogicalType>& return_types) {
-    bind_data.is_browse_mode = true;
+    std::vector<std::string> children;
     return_names.emplace_back("path");
     return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
 
@@ -146,13 +146,14 @@ void RootScanBinder::BindBrowseMode(RootScanBindData& bind_data, const std::stri
         if (folder_name.empty()) {
             continue;
         }
-        bind_data.browse_children.push_back(folder_name);
+        children.push_back(std::move(folder_name));
     }
+    bind_data.SelectBrowseMode(std::move(children));
 }
 
 void RootScanBinder::BindEmptyResult(RootScanBindData& bind_data, const std::string& path_prefix,
                                      std::vector<std::string>& return_names, std::vector<LogicalType>& return_types) {
-    bind_data.is_empty_mode = true;
+    bind_data.SelectEmptyMode();
     bind_data.total_rows = 0;
     AddEventIdColumn(bind_data, return_names, return_types);
     if (!path_prefix.empty()) {
@@ -285,7 +286,7 @@ std::unique_ptr<TFile> RootScanBinder::OpenRepresentativeFile(RootScanBindData& 
 
 void RootScanBinder::AddMultiFileIdentityColumns(RootScanBindData& bind_data, std::vector<std::string>& return_names,
                                                  std::vector<LogicalType>& return_types) {
-    if (!bind_data.IsMultiFile() || bind_data.is_browse_mode ||
+    if (!bind_data.IsMultiFile() || bind_data.IsBrowseMode() ||
         bind_data.source_id_column != DConstants::INVALID_INDEX) {
         return;
     }
@@ -318,7 +319,7 @@ unique_ptr<FunctionData> RootScanBinder::Bind(ClientContext& context, TableFunct
     auto cleanup_parameter = input.named_parameters.find("dictionary_cleanup");
     const std::string cleanup_mode =
         cleanup_parameter == input.named_parameters.end() ? "auto" : cleanup_parameter->second.ToString();
-    bind_data->dictionary_cleanup_mode = rootlake::ParseDictionaryCleanupMode(
+    bind_data->root_access.dictionary_cleanup_mode = rootlake::ParseDictionaryCleanupMode(
         cleanup_mode,
         dictionary_loaded ? rootlake::RootDictionaryCleanupMode::RETAIN : rootlake::RootDictionaryCleanupMode::FULL);
 
@@ -337,30 +338,25 @@ void RootScanBinder::ConfigureOptions(RootScanBindData& bind_data, ClientContext
     bind_data.root_path = bind_data.root_paths.front();
     auto reader_mode = input.named_parameters.find("reader_mode");
     if (reader_mode != input.named_parameters.end()) {
-        bind_data.reader_mode = rootlake::ParseRootReaderMode(reader_mode->second.ToString());
+        bind_data.root_access.reader_mode = rootlake::ParseRootReaderMode(reader_mode->second.ToString());
     }
     auto raw_validation = input.named_parameters.find("raw_validation_entries");
     if (raw_validation != input.named_parameters.end()) {
-        bind_data.raw_validation_entries = raw_validation->second.GetValue<uint32_t>();
+        bind_data.root_access.validation_entries = raw_validation->second.GetValue<uint32_t>();
     }
     auto raw_entry_limit = input.named_parameters.find("raw_max_entry_bytes");
     if (raw_entry_limit != input.named_parameters.end()) {
-        bind_data.raw_max_entry_bytes = raw_entry_limit->second.GetValue<uint64_t>();
+        bind_data.root_access.max_entry_bytes = raw_entry_limit->second.GetValue<uint64_t>();
     }
     auto raw_value_limit = input.named_parameters.find("raw_max_values_per_entry");
     if (raw_value_limit != input.named_parameters.end()) {
-        bind_data.raw_max_values_per_entry = raw_value_limit->second.GetValue<uint64_t>();
+        bind_data.root_access.max_values_per_entry = raw_value_limit->second.GetValue<uint64_t>();
     }
     auto tree_cache = input.named_parameters.find("tree_cache_bytes");
     if (tree_cache != input.named_parameters.end()) {
-        bind_data.tree_cache_bytes = tree_cache->second.GetValue<uint64_t>();
+        bind_data.root_access.tree_cache_bytes = tree_cache->second.GetValue<uint64_t>();
     }
-    if (bind_data.raw_max_entry_bytes < 12) {
-        throw InvalidInputException("raw_max_entry_bytes must be at least 12");
-    }
-    if (bind_data.raw_max_values_per_entry == 0) {
-        throw InvalidInputException("raw_max_values_per_entry must be positive");
-    }
+    bind_data.root_access.Validate();
     RootDebug("BIND.BEGIN", "root_input=" + bind_data.input_specification +
                                 " resolved_files=" + std::to_string(bind_data.root_paths.size()) +
                                 " inputs=" + std::to_string(input.inputs.size()) +
@@ -409,9 +405,7 @@ void RootScanBinder::BindRootBrowse(RootScanBindData& bind_data, std::vector<std
         throw IOException("No readable ROOT objects were found in file");
     }
 
-    bind_data.browse_children.assign(children.begin(), children.end());
-
-    bind_data.is_browse_mode = true;
+    bind_data.SelectBrowseMode(std::vector<std::string>(children.begin(), children.end()));
 
     return_names.emplace_back("path");
 
@@ -427,27 +421,28 @@ void RootScanBinder::BindRequestedPath(RootScanBindData& bind_data, TableFunctio
 
     auto file = OpenRepresentativeFile(bind_data);
 
-    if (rootlake::TryBindRootHistogram(*file, path_prefix_raw, bind_data.histogram_binding,
-                                       bind_data.histogram_object)) {
+    rootlake::RootHistogramBinding histogram_binding;
+    std::unique_ptr<TH1> histogram_object;
+    if (rootlake::TryBindRootHistogram(*file, path_prefix_raw, histogram_binding, histogram_object)) {
 
         if (bind_data.IsMultiFile()) {
             throw NotImplementedException("ROOT histogram object mode currently "
                                           "accepts one ROOT file per read_root() call");
         }
 
-        bind_data.is_histogram_mode = true;
+        bind_data.total_rows = histogram_binding.row_count;
 
-        bind_data.total_rows = bind_data.histogram_binding.row_count;
-
-        const auto& schema = bind_data.histogram_binding.schema;
+        const auto& schema = histogram_binding.schema;
 
         return_names = schema.names;
         return_types = schema.types;
 
-        RootDebug("BIND.HISTOGRAM", "path=" + bind_data.histogram_binding.object_path +
-                                        " class=" + bind_data.histogram_binding.class_name +
-                                        " view=" + rootlake::RootHistogramViewName(bind_data.histogram_binding.view) +
-                                        " rows=" + std::to_string(bind_data.histogram_binding.row_count));
+        RootDebug("BIND.HISTOGRAM", "path=" + histogram_binding.object_path +
+                                        " class=" + histogram_binding.class_name +
+                                        " view=" + rootlake::RootHistogramViewName(histogram_binding.view) +
+                                        " rows=" + std::to_string(histogram_binding.row_count));
+
+        bind_data.SelectHistogramMode(std::move(histogram_binding), std::move(histogram_object));
 
         return;
     }
@@ -541,7 +536,7 @@ void RootScanBinder::BindPrimitiveCompatibility(RootScanBindData& bind_data, TFi
         }
 
         if (primitive_only) {
-            bind_data.is_primitive_tree_mode = true;
+            bind_data.SelectPrimitiveTreeMode();
             bind_data.tree_name = target_tree->GetName();
             bind_data.total_rows = static_cast<uint64_t>(std::max<Long64_t>(0, target_tree->GetEntries()));
 
@@ -566,11 +561,13 @@ void RootScanBinder::BindPrimitiveCompatibility(RootScanBindData& bind_data, TFi
             return;
         }
 
-        bind_data.is_browse_mode = true;
-
+        std::vector<std::string> children;
+        children.reserve(tree_primitives.size());
         for (const auto& branch : tree_primitives) {
-            bind_data.browse_children.push_back("/" + branch.name);
+            children.push_back("/" + branch.name);
         }
+
+        bind_data.SelectBrowseMode(std::move(children));
 
         return_names.emplace_back("path");
         return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
@@ -581,8 +578,7 @@ void RootScanBinder::BindPrimitiveCompatibility(RootScanBindData& bind_data, TFi
         if (branch.name != target_name) {
             continue;
         }
-        bind_data.is_direct_branch_mode = true;
-        bind_data.direct_branch_info = branch;
+        bind_data.SelectDirectBranchMode(branch);
         bind_data.tree_name = tree.GetName();
         bind_data.total_rows = tree.GetEntries();
         AddEventIdColumn(bind_data, return_names, return_types);

@@ -14,7 +14,7 @@
 namespace duckdb::rootlake {
 
 SerializedBasketReader::SerializedBasketReader() = default;
-SerializedBasketReader::~SerializedBasketReader() {
+SerializedBasketReader::~SerializedBasketReader() noexcept {
     Reset();
 }
 
@@ -64,7 +64,7 @@ SerializedBasketReader& SerializedBasketReader::operator=(SerializedBasketReader
 }
 
 bool SerializedBasketReader::IsBound() const {
-    return branch != nullptr && plan.supported;
+    return branch != nullptr && plan.Supported();
 }
 
 const SerializedReadPlan& SerializedBasketReader::Plan() const {
@@ -91,16 +91,16 @@ void SerializedBasketReader::Bind(TBranch* branch_p, SerializedReadPlan plan_p, 
     max_entry_bytes = std::max<uint64_t>(12, max_entry_bytes_p);
     max_values_per_entry = std::max<uint64_t>(1, max_values_per_entry_p);
     const bool uses_root_scratch =
-        plan.projection_kind == SerializedProjectionKind::ROOT_SELECTED_SUBTREE ||
-        plan.projection_kind == SerializedProjectionKind::COLLECTION_BRANCH;
+        plan.Is(SerializedProjectionKind::ROOT_SELECTED_SUBTREE) ||
+        plan.Is(SerializedProjectionKind::COLLECTION_BRANCH);
     auto* scratch_class = uses_root_scratch ? plan.scratch_class : plan.outer_container_class;
-    if ((IsSerializedNestedProjection(plan.projection_kind) ||
+    if ((IsSerializedNestedProjection(plan.Kind()) ||
          uses_root_scratch) &&
         scratch_class) {
         outer_collection_scratch = scratch_class->New();
         owns_outer_collection_scratch = outer_collection_scratch != nullptr;
     }
-    if (plan.projection_kind == SerializedProjectionKind::LEAF_BRANCH && branch) {
+    if (plan.Is(SerializedProjectionKind::LEAF_BRANCH) && branch) {
         auto* leaves = branch->GetListOfLeaves();
         leaf = leaves && leaves->GetEntries() == 1 ? dynamic_cast<TLeaf*>(leaves->At(0)) : nullptr;
         if (auto* branch_element = dynamic_cast<TBranchElement*>(branch)) {
@@ -115,34 +115,37 @@ void SerializedBasketReader::Bind(TBranch* branch_p, SerializedReadPlan plan_p, 
     }
     RootDebug("SERIALIZED.BIND", "path=" + plan.logical_path +
                                      " branch=" + (branch && branch->GetName() ? branch->GetName() : "none") +
-                                     " supported=" + (plan.supported ? "true" : "false") + " type=" + plan.value_type +
-                                     " projection=" + SerializedProjectionName(plan.projection_kind) +
+                                     " supported=" + (plan.Supported() ? "true" : "false") +
+                                     " type=" + plan.value_type +
+                                     " projection=" + SerializedProjectionName(plan.Kind()) +
                                      " prefix_bytes=" + std::to_string(plan.bytes_before_value_per_element));
 }
 
-void SerializedBasketReader::ReleaseBindings() {
-    if (leaf && branch) {
-        branch->ResetAddress();
-    }
-    if (leaf_make_class && branch) {
-        if (auto* branch_element = dynamic_cast<TBranchElement*>(branch)) {
-            branch_element->SetMakeClass(false);
+void SerializedBasketReader::ReleaseBindings() noexcept {
+    try {
+        if (leaf && branch) {
+            branch->ResetAddress();
         }
+        if (leaf_make_class && branch) {
+            if (auto* branch_element = dynamic_cast<TBranchElement*>(branch)) {
+                branch_element->SetMakeClass(false);
+            }
+        }
+    } catch (...) {
+        // ROOT cleanup is an ABI boundary and must not escape noexcept code.
     }
     leaf_make_class = false;
     leaf_scratch.clear();
     leaf_scratch_capacity = 0;
 }
 
-void SerializedBasketReader::Reset() {
+void SerializedBasketReader::Reset() noexcept {
     ReleaseBindings();
     const bool uses_root_scratch =
-        plan.projection_kind == SerializedProjectionKind::ROOT_SELECTED_SUBTREE ||
-        plan.projection_kind == SerializedProjectionKind::COLLECTION_BRANCH;
+        plan.Is(SerializedProjectionKind::ROOT_SELECTED_SUBTREE) ||
+        plan.Is(SerializedProjectionKind::COLLECTION_BRANCH);
     auto* scratch_class = uses_root_scratch ? plan.scratch_class : plan.outer_container_class;
-    if (owns_outer_collection_scratch && outer_collection_scratch && scratch_class) {
-        scratch_class->Destructor(outer_collection_scratch, kFALSE);
-    }
+    auto* scratch = owns_outer_collection_scratch ? outer_collection_scratch : nullptr;
     branch = nullptr;
     basket = nullptr;
     basket_prepared = false;
@@ -161,6 +164,14 @@ void SerializedBasketReader::Reset() {
     cached_action_sequence.reset();
     observed_memberwise_header = 0;
     counters = {};
+
+    try {
+        if (scratch && scratch_class) {
+            scratch_class->Destructor(scratch, kFALSE);
+        }
+    } catch (...) {
+        // DCL57-CPP / ERR59-CPP: never throw across destruction or ROOT ABI.
+    }
 }
 
 bool SerializedBasketReader::EnsureLeafScratch(uint64_t value_count, std::string& failure_reason) {
@@ -313,7 +324,7 @@ bool SerializedBasketReader::Decode(uint64_t entry, std::vector<RootPrimitiveVal
                                     bool collect_indices) {
     values.clear();
     flat_indices.clear();
-    if (plan.projection_kind == SerializedProjectionKind::LEAF_BRANCH) {
+    if (plan.Is(SerializedProjectionKind::LEAF_BRANCH)) {
         const bool decoded = DecodeLeafBranchEntry(entry, values, flat_indices, failure_reason, collect_indices);
         if (decoded) {
             ++counters.entries;
@@ -329,12 +340,12 @@ bool SerializedBasketReader::Decode(uint64_t entry, std::vector<RootPrimitiveVal
         return false;
     }
     const bool uses_root_actions =
-        plan.projection_kind == SerializedProjectionKind::ROOT_SELECTED_SUBTREE ||
-        plan.projection_kind == SerializedProjectionKind::COLLECTION_BRANCH;
+        plan.Is(SerializedProjectionKind::ROOT_SELECTED_SUBTREE) ||
+        plan.Is(SerializedProjectionKind::COLLECTION_BRANCH);
     const bool decoded = uses_root_actions
                              ? DecodeRootProjectionEntry(bytes, entry_size, values, flat_indices, failure_reason,
                                                          collect_indices)
-                         : IsSerializedNestedProjection(plan.projection_kind)
+                         : IsSerializedNestedProjection(plan.Kind())
                              ? DecodeNestedProjectionEntry(bytes, entry_size, values, flat_indices, failure_reason,
                                                            collect_indices)
                              : DecodeFixedProjectionEntry(bytes, entry_size, values, flat_indices, failure_reason,
@@ -365,7 +376,7 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
         failure_reason = "serialized nested vector plan has no ROOT collection metadata";
         return false;
     }
-    if (plan.projection_kind == SerializedProjectionKind::SELECTED_SUBTREE &&
+    if (plan.Is(SerializedProjectionKind::SELECTED_SUBTREE) &&
         (!outer_collection_scratch || plan.projection_levels.empty() || !plan.index_depth)) {
         failure_reason = "serialized selected-subtree projection has no safe traversal metadata";
         return false;
@@ -375,7 +386,13 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
         return false;
     }
 
-    const uint32_t raw_byte_count = serialized_codec::ReadBE32(bytes);
+    serialized_codec::CheckedByteCursor header(bytes, entry_size);
+    uint32_t raw_byte_count = 0;
+    uint32_t memberwise_header = 0;
+    if (!header.ReadBE32(raw_byte_count) || !header.ReadBE32(memberwise_header)) {
+        failure_reason = "serialized vector entry is shorter than its ROOT header";
+        return false;
+    }
     if ((raw_byte_count & serialized_codec::ROOT_BYTE_COUNT_MASK) == 0) {
         failure_reason = "serialized vector entry has no ROOT byte-count marker";
         return false;
@@ -386,7 +403,6 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
         failure_reason = "serialized vector byte-count does not match entry offsets";
         return false;
     }
-    const uint32_t memberwise_header = serialized_codec::ReadBE32(bytes + 4);
     if (!memberwise_header) {
         failure_reason = "serialized vector has an empty member-wise header";
         return false;
@@ -444,7 +460,7 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
             return false;
         }
 
-        if (plan.projection_kind == SerializedProjectionKind::SELECTED_SUBTREE) {
+        if (plan.Is(SerializedProjectionKind::SELECTED_SUBTREE)) {
             return CollectSerializedSelectedSubtree(plan, outer_collection_scratch, max_values_per_entry, values,
                                                     flat_indices, failure_reason, collect_indices);
         }

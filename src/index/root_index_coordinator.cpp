@@ -31,12 +31,8 @@ RootIndexBuildOptions RootIndexCoordinator::ConfigureRuntime(ClientContext& cont
     options.logical_paths = bind.logical_paths;
     options.bloom_bytes = bind.bloom_bytes;
     options.bloom_false_positive_rate = bind.bloom_false_positive_rate;
-    options.tree_cache_bytes = bind.tree_cache_bytes;
-    options.reader_mode = bind.reader_mode;
-    options.raw_validation_entries = bind.raw_validation_entries;
-    options.raw_max_entry_bytes = bind.raw_max_entry_bytes;
-    options.raw_max_values_per_entry = bind.raw_max_values_per_entry;
-    options.dictionary_cleanup_mode = bind.dictionary_cleanup_mode;
+    options.root_access = bind.root_access;
+    options.root_access.operation = "index";
 
     if (state.manifest_fingerprint.empty()) {
         state.manifest_fingerprint = ManifestFingerprint(files);

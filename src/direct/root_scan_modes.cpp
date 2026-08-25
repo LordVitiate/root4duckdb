@@ -313,7 +313,12 @@ bool RootScanExecutor::PassesDirectBranchFilters(ClientContext& context, const R
     if (!gstate.filters) {
         return true;
     }
-    const auto value_type = rootlake::RootTypeToScanLogicalType(bind_data.direct_branch_info.type_name, false, true);
+    const auto* direct_mode = bind_data.DirectBranchMode();
+    if (!direct_mode) {
+        throw InternalException("read_root direct branch filter has no branch plan");
+    }
+    const auto value_type =
+        rootlake::RootTypeToScanLogicalType(direct_mode->branch.type_name, false, true);
     for (const auto& filter : gstate.filters->filters) {
         if (filter.first >= gstate.scan_column_ids.size()) {
             continue;
@@ -340,6 +345,10 @@ bool RootScanExecutor::PassesDirectBranchFilters(ClientContext& context, const R
 
 void RootScanExecutor::ProcessDirectBranch(ClientContext& context, const RootScanBindData& bind_data,
                                            RootScanGlobalState& gstate, RootScanLocalState& lstate, DataChunk& output) {
+    const auto* direct_mode = bind_data.DirectBranchMode();
+    if (!direct_mode) {
+        throw InternalException("read_root direct branch execution has no branch plan");
+    }
     if (!lstate.direct_branch || !lstate.direct_leaf) {
         output.SetCardinality(0);
         return;
@@ -368,7 +377,7 @@ void RootScanExecutor::ProcessDirectBranch(ClientContext& context, const RootSca
         }
 
         const auto val = rootlake::RootPrimitiveValue::FromPointer(lstate.direct_leaf->GetValuePointer(),
-                                                                   bind_data.direct_branch_info.type_name);
+                                                                   direct_mode->branch.type_name);
         ++lstate.local_current_row;
         if (!PassesDirectBranchFilters(context, bind_data, gstate, lstate, entry, val)) {
             continue;

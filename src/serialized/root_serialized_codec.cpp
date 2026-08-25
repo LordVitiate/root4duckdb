@@ -186,11 +186,14 @@ bool DecodeVectorEntry(const uint8_t* bytes, size_t entry_size, const Serialized
     values.clear();
     flat_indices.clear();
     failure_reason.clear();
-    if (!bytes || entry_size < 12) {
+    serialized_codec::CheckedByteCursor cursor(bytes, entry_size);
+    uint32_t byte_count = 0;
+    uint32_t memberwise_header = 0;
+    uint32_t count = 0;
+    if (!cursor.ReadBE32(byte_count) || !cursor.ReadBE32(memberwise_header) || !cursor.ReadBE32(count)) {
         failure_reason = "serialized vector entry is shorter than its header";
         return false;
     }
-    const uint32_t byte_count = serialized_codec::ReadBE32(bytes);
     if ((byte_count & serialized_codec::ROOT_BYTE_COUNT_MASK) == 0) {
         failure_reason = "serialized vector entry has no ROOT byte-count marker";
         return false;
@@ -201,7 +204,6 @@ bool DecodeVectorEntry(const uint8_t* bytes, size_t entry_size, const Serialized
         failure_reason = "serialized vector byte-count does not match entry offsets";
         return false;
     }
-    const uint32_t memberwise_header = serialized_codec::ReadBE32(bytes + 4);
     if (!memberwise_header) {
         failure_reason = "serialized vector has an empty member-wise header";
         return false;
@@ -213,8 +215,8 @@ bool DecodeVectorEntry(const uint8_t* bytes, size_t entry_size, const Serialized
         failure_reason = "member-wise streamer header changed inside one physical branch";
         return false;
     }
-    const uint64_t count = serialized_codec::ReadBE32(bytes + 8);
-    return DecodeVectorPayload(bytes, entry_size, 12, count, layout, max_values_per_entry, values, flat_indices,
+    return DecodeVectorPayload(bytes, entry_size, cursor.Offset(), count, layout, max_values_per_entry, values,
+                               flat_indices,
                                failure_reason, collect_indices);
 }
 

@@ -2,6 +2,8 @@
 
 #include "root4duckdb/reader/root_semantic_types.hpp"
 
+#include <memory>
+
 class TFile;
 class TTree;
 
@@ -22,9 +24,9 @@ class RootObjectContext {
     RootObjectContext();
     RootObjectContext(const RootObjectContext&) = delete;
     RootObjectContext& operator=(const RootObjectContext&) = delete;
-    RootObjectContext(RootObjectContext&& other) noexcept;
-    RootObjectContext& operator=(RootObjectContext&& other) noexcept;
-    ~RootObjectContext();
+    RootObjectContext(RootObjectContext&& other) = delete;
+    RootObjectContext& operator=(RootObjectContext&& other) = delete;
+    ~RootObjectContext() noexcept;
     /// @}
 
     /// @name Object access
@@ -33,19 +35,22 @@ class RootObjectContext {
               RootDictionaryCleanupMode cleanup_mode = RootDictionaryCleanupMode::FULL, std::string class_name = {});
     void* Read(uint64_t entry);
     void* CurrentObject() const;
-    void Reset();
+    void Reset() noexcept;
+    bool IsBound() const noexcept;
+    TTree* Tree() const noexcept;
+    TBranch* Branch() const noexcept;
+    TClass* Class() const noexcept;
     /// @}
 
+  private:
     TTree* tree = nullptr;
     TBranch* branch = nullptr;
     TClass* root_class = nullptr;
     void* owned_object = nullptr;
+    // ROOT stores the address of this slot in TBranch. RootObjectContext is
+    // deliberately immovable so that the slot address stays stable.
     void* address_slot = nullptr;
     RootDictionaryCleanupMode cleanup_mode = RootDictionaryCleanupMode::FULL;
-
-  private:
-    void MoveFrom(RootObjectContext&& other);
-
     std::string class_name;
 };
 
@@ -55,6 +60,7 @@ class RootObjectReader {
     /// @name Ownership
     /// @{
     RootObjectReader();
+    ~RootObjectReader() noexcept;
     RootObjectReader(const RootObjectReader&) = delete;
     RootObjectReader& operator=(const RootObjectReader&) = delete;
     RootObjectReader(RootObjectReader&&) noexcept;
@@ -65,7 +71,7 @@ class RootObjectReader {
     /// @{
     void Bind(TFile* file, const std::string& tree_name, const std::string& root_class_name,
               RootDictionaryCleanupMode cleanup_mode = RootDictionaryCleanupMode::FULL);
-    void Reset();
+    void Reset() noexcept;
     void* Read(uint64_t entry);
     /// @}
 
@@ -81,7 +87,9 @@ class RootObjectReader {
 
   private:
     TFile* file = nullptr;
-    RootObjectContext context;
+    // A stable heap address is part of the branch-address contract. Moving a
+    // RootObjectReader transfers ownership without relocating that address.
+    std::unique_ptr<RootObjectContext> context;
 };
 
 /// Caches one object load shared by all projected paths for an entry.

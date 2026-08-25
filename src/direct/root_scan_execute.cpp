@@ -74,11 +74,11 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
         lstate.reported_serialized_baskets = serialized_counters.baskets;
         lstate.reported_serialized_compressed_bytes = serialized_counters.compressed_bytes;
         lstate.reported_serialized_entry_bytes = serialized_counters.serialized_bytes;
-        if (read.decoded) {
+        if (read.Decoded()) {
             gstate.serialized_entries.fetch_add(1);
             gstate.serialized_values.fetch_add(lstate.serialized_values.size());
         }
-        if (read.serialized) {
+        if (read.Serialized()) {
             MaterializeSerializedResult(column, entry, lstate.path_reader.SerializedPlan(), lstate.serialized_values,
                                         lstate.serialized_indices, lstate.cached_results[lstate.serialized_column]);
             has_data = !lstate.cached_results[lstate.serialized_column].empty();
@@ -187,7 +187,7 @@ void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_
     auto& gstate = data_p.global_state->Cast<RootScanGlobalState>();
     auto& lstate = data_p.local_state->Cast<RootScanLocalState>();
 
-    if (bind_data.is_empty_mode) {
+    if (bind_data.IsEmptyMode()) {
         output.SetCardinality(0);
         return;
     }
@@ -196,17 +196,17 @@ void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_
         return;
     }
 
-    if (bind_data.is_histogram_mode) {
+    if (bind_data.IsHistogramMode()) {
         ProcessHistogramMode(context, bind_data, gstate, lstate, output);
         return;
     }
 
-    if (bind_data.is_browse_mode) {
+    if (bind_data.IsBrowseMode()) {
         ProcessBrowseMode(context, bind_data, gstate, lstate, output);
         return;
     }
 
-    if (bind_data.is_primitive_tree_mode) {
+    if (bind_data.IsPrimitiveTreeMode()) {
         while (true) {
             if (gstate.file_scheduler && !file_manager.EnsureReady(bind_data, gstate, lstate)) {
                 output.SetCardinality(0);
@@ -228,7 +228,7 @@ void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_
         }
     }
 
-    if (bind_data.is_direct_branch_mode) {
+    if (bind_data.IsDirectBranchMode()) {
         while (true) {
             if (gstate.file_scheduler && !file_manager.EnsureReady(bind_data, gstate, lstate)) {
                 output.SetCardinality(0);
@@ -304,8 +304,8 @@ InsertionOrderPreservingMap<string> RootScanExplain::Bound(TableFunctionToString
     result["ROOT Files"] = std::to_string(bind.root_paths.size());
     result["ROOT Representative"] = bind.root_path;
     result["ROOT Bind Open Time (us)"] = std::to_string(bind.bind_open_us);
-    result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.reader_mode);
-    result["Serialized Validation Entries"] = std::to_string(bind.raw_validation_entries);
+    result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.root_access.reader_mode);
+    result["Serialized Validation Entries"] = std::to_string(bind.root_access.validation_entries);
     return result;
 }
 
@@ -313,7 +313,7 @@ InsertionOrderPreservingMap<string> RootScanExplain::Running(TableFunctionDynami
     InsertionOrderPreservingMap<string> result;
     if (input.bind_data) {
         const auto& bind = input.bind_data->Cast<RootScanBindData>();
-        result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.reader_mode);
+        result["ROOT Decode Mode"] = rootlake::RootReaderModeName(bind.root_access.reader_mode);
         result["ROOT Input Files"] = std::to_string(bind.root_paths.size());
         result["ROOT Representative"] = bind.root_path;
         result["ROOT Bind Open Time (us)"] = std::to_string(bind.bind_open_us);

@@ -80,6 +80,35 @@ bool PrimitiveEqual(const RootPrimitiveValue& left, const RootPrimitiveValue& ri
 
 } // namespace
 
+void RootAccessOptions::Validate() const {
+    if (max_entry_bytes < 12) {
+        throw InvalidInputException("raw_max_entry_bytes must be at least 12");
+    }
+    if (max_values_per_entry == 0) {
+        throw InvalidInputException("raw_max_values_per_entry must be positive");
+    }
+}
+
+bool RootPathReaderStartResult::SerializedActive() const noexcept {
+    return route == RootPathStartRoute::SERIALIZED;
+}
+
+bool RootPathReaderStartResult::FallbackActivated() const noexcept {
+    return route == RootPathStartRoute::OBJECT_FALLBACK;
+}
+
+bool RootPathReadResult::Decoded() const noexcept {
+    return attempt_decoded;
+}
+
+bool RootPathReadResult::Serialized() const noexcept {
+    return route == RootPathReadRoute::SERIALIZED;
+}
+
+bool RootPathReadResult::FallbackActivated() const noexcept {
+    return route == RootPathReadRoute::OBJECT_FALLBACK;
+}
+
 RootPathReader::RootPathReader() = default;
 RootPathReader::~RootPathReader() = default;
 RootPathReader::RootPathReader(RootPathReader&&) noexcept = default;
@@ -137,37 +166,39 @@ void RootPathReader::Resolve(TTree* tree_p, TBranch* object_branch, TClass* root
 
 RootPathReaderStartResult RootPathReader::StartSerialized(RootPathReaderOptions options_p,
                                                           std::string rejection_reason) {
+    options_p.Validate();
     options = std::move(options_p);
     validation_remaining = options.validation_entries;
     serialized_active = false;
     fallback_recorded = false;
 
     if (options.reader_mode == RootReaderMode::OBJECT) {
-        return {};
+        return {RootPathStartRoute::OBJECT_ONLY};
     }
-    if (rejection_reason.empty() && !serialized_plan.supported) {
-        rejection_reason = serialized_plan.reason.empty() ? "serialized reader is unavailable" : serialized_plan.reason;
+    if (rejection_reason.empty() && !serialized_plan.Supported()) {
+        rejection_reason = serialized_plan.RejectionReason().empty() ? "serialized reader is unavailable"
+                                                                     : serialized_plan.RejectionReason();
     }
     if (!rejection_reason.empty()) {
         const bool activated = ActivateFallback(rejection_reason);
-        return {false, activated};
+        return {activated ? RootPathStartRoute::OBJECT_FALLBACK : RootPathStartRoute::OBJECT_ONLY};
     }
 
     if (validation_remaining > 0 && !BindIsolatedValidationReader(rejection_reason)) {
         const bool activated = ActivateFallback(rejection_reason);
-        return {false, activated};
+        return {activated ? RootPathStartRoute::OBJECT_FALLBACK : RootPathStartRoute::OBJECT_ONLY};
     }
 
     serialized_reader.Bind(physical_branch, serialized_plan, options.max_entry_bytes, options.max_values_per_entry);
     serialized_active = true;
-    return {true, false};
+    return {RootPathStartRoute::SERIALIZED};
 }
 
 RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
                                                      std::vector<double>& values, std::vector<int32_t>& flat_indices,
                                                      bool collect_indices) {
     if (!serialized_active) {
-        return {};
+        return {RootPathReadRoute::NOT_ATTEMPTED, false};
     }
 
     std::vector<double> reference_values;
@@ -187,7 +218,8 @@ RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryRe
     const bool decoded = serialized_reader.Decode(entry, values, flat_indices, failure_reason,
                                                   collect_indices || validation_remaining > 0);
     if (!decoded) {
-        return {false, false, ActivateFallback(failure_reason)};
+        const bool activated = ActivateFallback(failure_reason);
+        return {activated ? RootPathReadRoute::OBJECT_FALLBACK : RootPathReadRoute::NOT_ATTEMPTED, false};
     }
 
     if (validation_remaining > 0) {
@@ -199,11 +231,12 @@ RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryRe
                                                        stream << std::setprecision(17) << value;
                                                        return stream.str();
                                                    });
-            return {true, false, ActivateFallback(reason)};
+            const bool activated = ActivateFallback(reason);
+            return {activated ? RootPathReadRoute::OBJECT_FALLBACK : RootPathReadRoute::NOT_ATTEMPTED, true};
         }
         --validation_remaining;
     }
-    return {true, true, false};
+    return {RootPathReadRoute::SERIALIZED, true};
 }
 
 RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
@@ -211,7 +244,7 @@ RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryRe
                                                      std::vector<int32_t>& flat_indices, bool collect_indices) {
     values.clear();
     if (!serialized_active) {
-        return {};
+        return {RootPathReadRoute::NOT_ATTEMPTED, false};
     }
 
     std::vector<RootPrimitiveValue> reference_values;
@@ -229,7 +262,8 @@ RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryRe
     const bool decoded = serialized_reader.Decode(entry, values, flat_indices, failure_reason,
                                                   collect_indices || validation_remaining > 0);
     if (!decoded) {
-        return {false, false, ActivateFallback(failure_reason)};
+        const bool activated = ActivateFallback(failure_reason);
+        return {activated ? RootPathReadRoute::OBJECT_FALLBACK : RootPathReadRoute::NOT_ATTEMPTED, false};
     }
 
     if (validation_remaining > 0) {
@@ -259,11 +293,12 @@ RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryRe
                 }
             }
             reason += ')';
-            return {true, false, ActivateFallback(reason)};
+            const bool activated = ActivateFallback(reason);
+            return {activated ? RootPathReadRoute::OBJECT_FALLBACK : RootPathReadRoute::NOT_ATTEMPTED, true};
         }
         --validation_remaining;
     }
-    return {true, true, false};
+    return {RootPathReadRoute::SERIALIZED, true};
 }
 
 void RootPathReader::Reset() {
