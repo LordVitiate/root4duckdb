@@ -172,7 +172,7 @@ if git -C "$PROJECT_DIR" \
     rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     source_changes="$(
         git -C "$PROJECT_DIR" \
-            status --porcelain --untracked-files=normal
+            status --porcelain --untracked-files=no
     )"
 
     [[ -z "$source_changes" ]] ||
