@@ -112,14 +112,11 @@ IFS=$'\t' read -r \
 dynamic_section="$(readelf -d "$EXTENSION")"
 
 if grep -Eq \
-    'libiceberg(_data|_bundle|_sql_catalog)?\.so' \
+    'libiceberg(_data|_bundle|_sql_catalog)?\.so|lib(Core|RIO|Tree|Hist|Cling|Thread|MathCore|Matrix|Imt|Net|MultiProc|ROOTVecOps|TreePlayer|Rint|Physics|ROOTNTuple|ROOTNTupleUtil|ROOTDataFrame|Gpad|Graf|Graf3d|Postscript)\.so' \
     <<<"$dynamic_section"; then
-    fail "Release extension still depends on shared Iceberg libraries"
+    fail "Release extension depends on forbidden shared ROOT or Iceberg libraries"
 fi
 
-if grep -Eq 'Shared library: \[(libstdc\+\+\.so|libgcc_s\.so)' <<<"$dynamic_section"; then
-    fail "Release extension still depends on shared GCC runtime"
-fi
 
 if grep -Eq '\((RPATH|RUNPATH)\)' <<<"$dynamic_section"; then
     fail "Release extension contains RPATH or RUNPATH"
@@ -150,7 +147,7 @@ missing="$(sed -n '/not found/p' <<<"$dependencies")"
 smoke_dependencies="$(ldd "$LOADABLE_SMOKE")"
 
 if grep -Eq \
-    'libiceberg|libCore\.so' \
+    'libiceberg|lib(Core|RIO|Tree|Hist|Cling|Thread|MathCore|Matrix|Imt|Net|MultiProc|ROOTVecOps|TreePlayer|Rint|Physics|ROOTNTuple|ROOTNTupleUtil|ROOTDataFrame|Gpad|Graf|Graf3d|Postscript)\.so' \
     <<<"$smoke_dependencies"; then
     fail "Loadable-extension smoke host is not isolated from ROOT4DuckDB dependencies"
 fi

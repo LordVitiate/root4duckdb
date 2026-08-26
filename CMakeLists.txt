@@ -165,8 +165,19 @@ if(ROOT4DUCKDB_CERN_BOOTSTRAP)
     )
     # DuckDB's extension macro uses the plain target_link_libraries signature.
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${CMAKE_DL_LIBS})
+    set(ROOT4DUCKDB_BOOTSTRAP_VERSION_SCRIPT
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/root_bootstrap.map"
+    )
+
+    set_property(
+        TARGET ${LOADABLE_EXTENSION_NAME}
+        APPEND PROPERTY LINK_DEPENDS
+        "${ROOT4DUCKDB_BOOTSTRAP_VERSION_SCRIPT}"
+    )
+
     target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
         "LINKER:-z,noexecstack"
+        "LINKER:--version-script=${ROOT4DUCKDB_BOOTSTRAP_VERSION_SCRIPT}"
     )
 else()
     build_loadable_extension(${TARGET_NAME} "" ${EXTENSION_SOURCES})
