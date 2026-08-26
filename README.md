@@ -6,6 +6,9 @@
   <a href="https://github.com/LordVitiate/root4duckdb/releases/latest">
     <img alt="Latest release" src="https://img.shields.io/github/v/release/LordVitiate/root4duckdb?sort=semver&display_name=release&style=flat">
   </a>
+  <a href="https://deepwiki.com/LordVitiate/root4duckdb/">
+    <img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg">
+  </a>
   <img alt="DuckDB" src="https://img.shields.io/badge/DuckDB-v1.4.5-FFF000">
   <img alt="CERN ROOT" src="https://img.shields.io/badge/CERN%20ROOT-6.40-2c6aa6">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey">
@@ -57,24 +60,24 @@ SELECT *
 FROM read_root('events.root');
 ```
 
-Read a primitive branch:
+Read a primitive collection:
 
 ```sql
-SELECT *
+SELECT value
 FROM read_root(
     'events.root',
     path_prefix := '/energy'
 );
 ```
 
-Read a nested experiment object using its ROOT dictionary:
+Read fields of a nested experiment object using its ROOT dictionary:
 
 ```sql
-SELECT *
+SELECT momentum
 FROM read_root(
     'events.root',
     dictionary := 'libExperiment.so',
-    path_prefix := '/Event/tracks/momentum'
+    path_prefix := '/Event/tracks'
 );
 ```
 
@@ -118,7 +121,7 @@ ROOT4DuckDB provides one logical SQL layer over that storage:
 Nested collections become ordinary rows:
 
 ```text
-/Event/tracks/hits/energy
+/Event/tracks/hits
 
 event_id | tracks_idx | hits_idx | energy
 ```
