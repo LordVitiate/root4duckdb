@@ -41,6 +41,7 @@ void RegisterRootScan(ExtensionLoader& loader) {
 
     root_scan.filter_pushdown = true;
     root_scan.filter_prune = true;
+    root_scan.pushdown_complex_filter = RootScanCollectPruningHints;
     root_scan.projection_pushdown = true;
     root_scan.init_local = RootScanInitLocal;
     root_scan.to_string = RootScanToString;

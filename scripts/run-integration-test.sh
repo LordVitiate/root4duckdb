@@ -558,6 +558,18 @@ FROM read_root(
     reader_mode := 'serialized',
     raw_validation_entries := 2
 );
+SELECT count(*) = 9
+       AND sum(value) = 3309
+       AND min(header_idx) = 0
+       AND max(header_idx) = 2
+       AS serialized_top_level_primitive_vector_ok
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/header',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
 SQL
 
 DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"

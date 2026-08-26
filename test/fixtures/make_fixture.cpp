@@ -53,6 +53,8 @@ static void WriteFixture(const fs::path& path, Int_t run_base, const std::vector
         event->mapScore.emplace(static_cast<Double_t>(event_index) + 0.25, static_cast<Double_t>(event->run));
         event->mapScore.emplace(static_cast<Double_t>(event_index) + 0.75, static_cast<Double_t>(event->run) + 0.5);
         event->setCode = {event_index, event_index + 10};
+        event->header = {static_cast<UInt_t>(event->run), static_cast<UInt_t>(event_index),
+                         static_cast<UInt_t>(1000 + event_index)};
         event->nestedPairs = {{{static_cast<Double_t>(event_index) + 1.5, 100 + event_index},
                                {static_cast<Double_t>(event_index) + 2.5, 200 + event_index}},
                               {{static_cast<Double_t>(event_index) + 3.5, 300 + event_index}}};

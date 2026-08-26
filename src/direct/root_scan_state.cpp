@@ -139,6 +139,31 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
     }
     global_state->total_rows = bind_data.total_rows;
     global_state->next_row = 0;
+
+    // Complex-filter pushdown records only conservative physical bounds. Keep
+    // the original DuckDB filter as the source of truth and intersect this hint
+    // with any TableFilterSet bounds that are available below.
+    if (bind_data.entry_prune_active) {
+        global_state->entry_lower = std::max(global_state->entry_lower, bind_data.entry_prune_lower);
+        global_state->entry_upper = std::min(global_state->entry_upper, bind_data.entry_prune_upper);
+        global_state->entry_range_impossible =
+            global_state->entry_range_impossible || bind_data.entry_prune_impossible ||
+            global_state->entry_lower > global_state->entry_upper;
+
+        if (!bind_data.IsMultiFile()) {
+            if (global_state->entry_range_impossible) {
+                global_state->next_row = bind_data.total_rows;
+                global_state->total_rows = bind_data.total_rows;
+            } else {
+                global_state->next_row =
+                    std::min<uint64_t>(bind_data.total_rows, global_state->entry_lower);
+                if (global_state->entry_upper != std::numeric_limits<uint64_t>::max()) {
+                    global_state->total_rows =
+                        std::min<uint64_t>(bind_data.total_rows, global_state->entry_upper + 1);
+                }
+            }
+        }
+    }
     if (!bind_data.IsBrowseMode() && !bind_data.IsHistogramMode() && global_state->filters) {
         for (const auto& entry : global_state->filters->filters) {
             if (entry.first >= global_state->scan_column_ids.size()) {
@@ -185,6 +210,13 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
                     global_state->total_rows = std::min(global_state->total_rows, range.upper + 1);
                 }
             }
+        }
+    }
+    if (global_state->entry_lower > global_state->entry_upper) {
+        global_state->entry_range_impossible = true;
+        if (!bind_data.IsMultiFile()) {
+            global_state->next_row = bind_data.total_rows;
+            global_state->total_rows = bind_data.total_rows;
         }
     }
     global_state->scheduled_rows =

@@ -48,6 +48,9 @@
 
 namespace duckdb {
 
+class Expression;
+class LogicalGet;
+
 /// Converts one primitive value into an exact filter scalar.
 rootlake::RootScalarActual PrimitiveScalarActual(const LogicalType& logical_type,
                                                  const rootlake::RootPrimitiveValue& value);
@@ -132,6 +135,13 @@ struct RootScanBindData : public TableFunctionData {
     rootlake::RootAccessOptions root_access;
     idx_t source_id_column = DConstants::INVALID_INDEX;
     idx_t source_path_column = DConstants::INVALID_INDEX;
+
+    // Conservative optimizer hints for physical entry scheduling. The SQL
+    // predicate remains above read_root and is still evaluated by DuckDB.
+    uint64_t entry_prune_lower = 0;
+    uint64_t entry_prune_upper = std::numeric_limits<uint64_t>::max();
+    bool entry_prune_impossible = false;
+    bool entry_prune_active = false;
 
     bool IsMultiFile() const;
     bool IsSemanticMode() const noexcept;
@@ -268,6 +278,10 @@ class RootScanFileManager final {
     void Reset(RootScanGlobalState& global, RootScanLocalState& local, bool completed);
     bool EnsureReady(const RootScanBindData& bind_data, RootScanGlobalState& global, RootScanLocalState& local);
 };
+
+/// Collects conservative physical entry bounds from optimizer expressions.
+void RootScanCollectPruningHints(ClientContext& context, LogicalGet& get, FunctionData* bind_data,
+                                 vector<unique_ptr<Expression>>& filters);
 
 /// Constructs direct scan global and local states.
 class RootScanStateFactory final {
