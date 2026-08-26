@@ -1,0 +1,135 @@
+name: Ubuntu build
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-22:
+    name: Ubuntu 22.04 x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    env:
+      ROOT_VERSION: "6.40.02"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            binutils \
+            ccache \
+            cmake \
+            curl \
+            file \
+            git \
+            ninja-build \
+            pkg-config \
+            python3 \
+            libssl-dev \
+            libsqlite3-dev \
+            libsnappy-dev \
+            libtbb-dev \
+            libx11-dev \
+            libxext-dev \
+            libxft-dev \
+            libxpm-dev \
+            zlib1g-dev
+
+      - name: Install ROOT 6.40.02
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl -fL \
+            "https://root.cern/download/root_v6.40.02.Linux-ubuntu22.04-x86_64-gcc11.4.tar.gz" \
+            -o /tmp/root.tar.gz
+
+          mkdir -p "$HOME/root"
+
+          tar -xzf /tmp/root.tar.gz \
+            --strip-components=1 \
+            -C "$HOME/root"
+
+          source "$HOME/root/bin/thisroot.sh"
+
+          echo "ROOTSYS=$ROOTSYS"
+          root-config --version
+          root-config --prefix
+          gcc --version | head -1
+          g++ --version | head -1
+          cmake --version | head -1
+
+      - name: Build Iceberg
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$HOME/root/bin/thisroot.sh"
+
+          ./build-iceberg.sh
+
+      - name: Build and test ROOT4DuckDB
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$HOME/root/bin/thisroot.sh"
+
+          ./build-root4duckdb.sh \
+            --clean \
+            --jobs "$(nproc)" \
+            --tests
+
+      - name: Locate extension
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXT="build/release/extension/root/root.duckdb_extension"
+
+          test -s "$EXT"
+
+          echo "=== EXTENSION ==="
+          ls -lh "$EXT"
+
+          echo
+          echo "=== DYNAMIC DEPENDENCIES ==="
+          readelf -d "$EXT" | grep NEEDED || true
+
+          echo
+          echo "=== EXPORTS ==="
+          nm -D --defined-only "$EXT" || true
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+
+          cp \
+            build/release/extension/root/root.duckdb_extension \
+            artifacts/root-ubuntu22-x86_64.duckdb_extension
+
+      - name: Upload Ubuntu artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: root-ubuntu22-x86_64
+          path: artifacts/root-ubuntu22-x86_64.duckdb_extension
+          if-no-files-found: error
