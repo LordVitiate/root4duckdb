@@ -7,7 +7,7 @@ import re
 from validation.project_validator import ProjectValidator
 
 
-EXPECTED_VERSION = "3.8.0"
+EXPECTED_VERSION = "3.9.0"
 INDEX_VERSION = 12
 
 

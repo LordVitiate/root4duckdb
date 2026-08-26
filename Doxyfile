@@ -1,7 +1,7 @@
 # ROOT4DuckDB API documentation.
 
 PROJECT_NAME           = "ROOT4DuckDB"
-PROJECT_NUMBER         = "3.8.0"
+PROJECT_NUMBER         = "3.9.0"
 PROJECT_BRIEF          = "DuckDB access to ROOT data and indexed ROOT datasets"
 
 OUTPUT_DIRECTORY       = doxygen
