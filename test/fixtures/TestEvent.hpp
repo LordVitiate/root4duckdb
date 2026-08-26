@@ -86,7 +86,8 @@ class TestEvent : public TestBase {
     std::vector<TestLayer> vecLayer;
     std::map<Double_t, Double_t> mapScore;
     std::set<Int_t> setCode;
+    std::vector<UInt_t> header;
     std::vector<std::vector<std::pair<Double_t, Int_t>>> nestedPairs;
 
-    ClassDef(TestEvent, 7);
+    ClassDef(TestEvent, 8);
 };

@@ -201,8 +201,10 @@ bool ConfigureCollectionBranchProjection(TClass* root_class, const ParsedPath& p
         return false;
     }
     const auto container_kind = TemplatePrimaryName(levels[0].type);
-    if (container_kind != "set" && container_kind != "multiset" && container_kind != "unordered_set" &&
-        container_kind != "unordered_multiset") {
+    const bool primitive_vector = container_kind == "vector";
+    const bool primitive_set = container_kind == "set" || container_kind == "multiset" ||
+                               container_kind == "unordered_set" || container_kind == "unordered_multiset";
+    if (!primitive_vector && !primitive_set) {
         return false;
     }
     auto* proxy = branch_element->GetCollectionProxy();
@@ -213,7 +215,11 @@ bool ConfigureCollectionBranchProjection(TClass* root_class, const ParsedPath& p
         return false;
     }
     const auto value_type = PrimitiveBaseType(levels[1].type);
-    if (!PrimitiveTypeSize(value_type)) {
+    // std::vector<bool> is bit-packed and is not compatible with the ordinary
+    // primitive collection traversal used by OffsetValueReader.
+    if ((primitive_vector && (value_type == "bool" || value_type == "Bool_t")) ||
+        !PrimitiveTypeSize(value_type) ||
+        ClassifySerializedPrimitive(value_type) == SerializedPrimitiveKind::UNKNOWN) {
         return false;
     }
     auto* streamer = branch_element->GetInfo();
@@ -401,7 +407,7 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     }
     if (levels.empty() || !levels[0].is_container || !IsContiguousVectorType(levels[0].type) || levels[0].is_pointer ||
         !levels[0].element_class) {
-        return reject("outer field is not std::vector<object>");
+        return reject("outer field is not a supported primitive collection or std::vector<object>");
     }
     if (!BranchNameEndsWithToken(plan.physical_branch_name, levels[0].name)) {
         return reject("physical branch '" + plan.physical_branch_name + "' is not the vector ancestor '" +
