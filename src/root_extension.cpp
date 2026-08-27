@@ -28,6 +28,13 @@ void LoadRootInternal(ExtensionLoader& loader) {
     rootlake::RegisterRootLakeIndex(loader);
     rootlake::RegisterRootLakeScan(loader);
     rootlake::RegisterRootIcebergCatalog(loader);
+
+    // ROOT installs process-wide signal handlers while initializing.
+    // ROOT4DuckDB is an embedded library, so restore the handlers owned
+    // by the host process (DuckDB CLI, JVM, Python, etc.).
+    if (gSystem) {
+        gSystem->ResetSignals();
+    }
 }
 
 void RootExtension::Load(ExtensionLoader& loader) {

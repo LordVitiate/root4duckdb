@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -31,7 +32,13 @@ extern const unsigned char _binary_root4duckdb_payload_bin_end[];
 namespace {
 
 constexpr const char *kLcgView = ROOT4DUCKDB_CERN_LCG_VIEW;
+
+using PayloadInit = void (*)(duckdb::ExtensionLoader &);
+
 void *g_payload_handle = nullptr;
+PayloadInit g_payload_init = nullptr;
+std::once_flag g_runtime_once;
+std::mutex g_extension_init_mutex;
 
 std::string CanonicalPath(const std::string &path) {
     char *resolved = realpath(path.c_str(), nullptr);
@@ -255,9 +262,7 @@ void *LoadEmbeddedPayload() {
     return g_payload_handle;
 }
 
-using PayloadInit = void (*)(duckdb::ExtensionLoader &);
-
-void InitializePayload(duckdb::ExtensionLoader &loader) {
+PayloadInit ResolvePayloadInit() {
     void *handle = LoadEmbeddedPayload();
 
     dlerror();
@@ -270,7 +275,26 @@ void InitializePayload(duckdb::ExtensionLoader &loader) {
     }
 
     auto init = reinterpret_cast<PayloadInit>(symbol);
-    init(loader);
+    return init;
+}
+
+void InitializeGlobalRuntime() {
+    LoadRootRuntime();
+    g_payload_init = ResolvePayloadInit();
+}
+
+void InitializePayload(duckdb::ExtensionLoader &loader) {
+    std::call_once(g_runtime_once, InitializeGlobalRuntime);
+
+    if (!g_payload_init) {
+        throw std::runtime_error(
+            "ROOT4DuckDB embedded payload initialization is unavailable");
+    }
+
+    // Registration belongs to the individual DuckDB instance, but DuckDB/JDBC
+    // may LOAD the extension concurrently from several connections.
+    std::lock_guard<std::mutex> lock(g_extension_init_mutex);
+    g_payload_init(loader);
 }
 
 } // namespace
@@ -278,7 +302,6 @@ void InitializePayload(duckdb::ExtensionLoader &loader) {
 extern "C" {
 
 DUCKDB_CPP_EXTENSION_ENTRY(root, loader) {
-    LoadRootRuntime();
     InitializePayload(loader);
 }
 
