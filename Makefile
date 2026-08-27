@@ -10,7 +10,6 @@ BUILD_FLAGS := $(filter-out -DBENCHMARK_ROOT_DIRECTORY=% -DBUILD_EXTENSION_TEST_
 
 .PHONY: release-package
 release-package: ${EXTENSION_CONFIG_STEP}
-	cmake -E remove_directory build/release-package
 	cmake -E make_directory build/release-package
 	cmake $(GENERATOR) $(BUILD_FLAGS) $(EXT_RELEASE_FLAGS) $(VCPKG_MANIFEST_FLAGS) \
 		-DCMAKE_BUILD_TYPE=Release \
