@@ -84,6 +84,9 @@ class TestCustom
 class TestEvent : public TestBase
 {
   public:
+    TestEvent();
+    ~TestEvent() override;
+
     Int_t run = 0;
     UChar_t flags = 0;
     Char_t signed_code = 0;
