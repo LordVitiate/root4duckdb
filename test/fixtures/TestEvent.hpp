@@ -2,6 +2,7 @@
 #define ROOT4DUCKDB_TEST_TESTEVENT_HPP
 
 #include "Rtypes.h"
+#include "TObject.h"
 
 #include <map>
 #include <set>
@@ -10,7 +11,7 @@
 
 class TBuffer;
 
-class TestBase
+class TestBase : public TObject
 {
   public:
     Int_t inherited = 0;
