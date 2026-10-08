@@ -10,7 +10,7 @@
 #include <TStreamerInfo.h>
 #include <TStreamerElement.h>
 #include <TObjArray.h>
-#include <TSystem.h>
+#include <dlfcn.h>
 
 #include <iostream>
 #include <memory>
@@ -167,11 +167,11 @@ void diagnose_root_object_access(const char* file_name, const char* dictionary, 
                                  const char* field_name = "run", Long64_t entry = 0)
 {
 
-    const Long64_t load_result = gSystem->Load(dictionary);
-    std::cout << "dictionary load result: " << load_result << "\n";
-    if (load_result < 0)
+    // Keep the dictionary loaded: ROOT's class metadata refers to its code.
+    if (!dlopen(dictionary, RTLD_NOW | RTLD_GLOBAL))
     {
-        std::cerr << "ERROR: dictionary load failed\n";
+        const char* message = dlerror();
+        std::cerr << "ERROR: dictionary load failed: " << (message ? message : "unknown error") << "\n";
         return;
     }
 
