@@ -532,6 +532,13 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     {
         return reject(std::string("cannot resolve serialized path: ") + ex.what());
     }
+    RootDebug("SERIALIZED.PLAN_ENTRY",
+              "path=" + plan.logical_path + " branch=" + plan.physical_branch_name +
+              " levels=" + std::to_string(levels.size()) +
+              " nested_fixed_flag=" +
+              (std::getenv("ROOT4DUCKDB_NESTED_FIXED_OFFSET")
+                   ? std::string(std::getenv("ROOT4DUCKDB_NESTED_FIXED_OFFSET"))
+                   : "<unset>"));
     if (IsTopObjectBranch(physical_branch, root_class))
     {
         std::string reason;
