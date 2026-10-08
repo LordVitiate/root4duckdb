@@ -415,3 +415,29 @@ Reduce parallelism:
 ```
 
 The same recommendation applies to Iceberg and incremental extension builds.
+
+
+## Java / JDBC runtime integration
+
+ROOT installs process-wide signal handlers. HotSpot also uses signals such as `SIGSEGV`; loading ROOT inside a running JVM without Java signal chaining has caused a reproducible crash in ROOT4DuckDB, even for a single JDBC connection executing only `LOAD root`. The supported Linux/HotSpot integration is to preload the matching JDK's `libjsig.so` **before the JVM starts**:
+
+```bash
+export LD_PRELOAD="$JAVA_HOME/lib/libjsig.so${LD_PRELOAD:+:$LD_PRELOAD}"
+java -cp "/path/to/duckdb_jdbc-1.5.6.0.jar:/path/to/classes" YourApplication
+```
+
+The ROOT4DuckDB bootstrap detects a loaded JVM and checks that `sigaction` resolves through `libjsig.so` before loading ROOT. Without this protection it reports an initialization error instead of proceeding into the known crash path. This check is intentionally conservative: a host which provides a separately verified signal-handling mechanism may opt out with `ROOT4DUCKDB_ALLOW_UNCHAINED_JVM=1`. This is **not** a way to make an unchained JVM safe. Loading `libjsig.so` after the JVM starts is not supported as a remedy.
+
+JDBC 1.5.6.0 regression testing against the COMPASS 2022 W08 mDST (including 1/8 concurrent connections and both ROOT readers) is available as an **explicit** test, not part of the normal build:
+
+```bash
+source .deps/iceberg-env.sh
+source .deps/build-env.sh
+ROOT4DUCKDB_JDBC_JAR=/tmp/duckdb_jdbc-1.5.6.0.jar bash scripts/test-jdbc-root.sh
+```
+
+Optional overrides: `ROOT4DUCKDB_JSIG`, `ROOT4DUCKDB_EXTENSION`, `ROOT4DUCKDB_MDST`, `ROOT4DUCKDB_PHAST_LIB`, `ROOT4DUCKDB_JDBC_TIMEOUT`. The script compiles its Java fixture into `/tmp`, repeats the single-connection load, then runs concurrent load, serialized and object reads. On failure, diagnostics stay in the printed temporary directory; successful runs clean up after themselves.
+
+Passing native DuckDB tests or a single JDBC `LOAD` does **not** establish multi-threaded JDBC or PHAST object lifetime safety. These require actual test results on the host.
+
+References: [Oracle JDK 17 signal chaining](https://docs.oracle.com/en/java/javase/17/troubleshoot/handle-signals-and-exceptions.html) and [ROOT/JNI report](https://root-forum.cern.ch/t/seg-fault-when-loading-library-with-links-to-root-libs/8047).
