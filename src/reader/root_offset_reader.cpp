@@ -223,6 +223,44 @@ class FlatNumericSink
     std::vector<int32_t>& indices;
 };
 
+class FlatTypedSink
+{
+  public:
+    FlatTypedSink(idx_t index_depth_p, int64_t max_values_p, std::vector<RootPrimitiveValue>& values_p,
+                  std::vector<int32_t>& flat_indices_p)
+        : index_depth(index_depth_p), max_values(max_values_p), values(values_p), flat_indices(flat_indices_p)
+    {
+    }
+    bool Full() const
+    {
+        return max_values >= 0 && values.size() >= static_cast<size_t>(max_values);
+    }
+    bool RequiresContainerDictionary() const
+    {
+        return true;
+    }
+    void Number(void* pointer, const std::string& type, const std::vector<int32_t>& current_indices,
+                const std::vector<std::string>&)
+    {
+        if (current_indices.size() != index_depth)
+        {
+            throw IOException("ROOT container depth mismatch while executing indexed access plan: expected " +
+                              std::to_string(index_depth) + ", got " + std::to_string(current_indices.size()));
+        }
+        values.push_back(RootPrimitiveValue::FromPointer(pointer, type));
+        flat_indices.insert(flat_indices.end(), current_indices.begin(), current_indices.end());
+    }
+    void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&)
+    {
+    }
+
+  private:
+    idx_t index_depth;
+    int64_t max_values;
+    std::vector<RootPrimitiveValue>& values;
+    std::vector<int32_t>& flat_indices;
+};
+
 template <class SINK>
 void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels, size_t level_index,
                             std::vector<int32_t>& indices, std::vector<std::string>& index_names, SINK& sink)
@@ -372,6 +410,15 @@ void OffsetValueReader::CollectFlat(void* root_object, const std::vector<PathLev
                                     std::vector<double>& values, std::vector<int32_t>& flat_indices)
 {
     FlatNumericSink sink{index_depth, values, flat_indices};
+    RunTraversal(root_object, levels, sink);
+}
+
+void OffsetValueReader::CollectTypedFlat(void* root_object, const std::vector<PathLevel>& levels,
+                                         idx_t index_depth, int64_t max_values,
+                                         std::vector<RootPrimitiveValue>& values,
+                                         std::vector<int32_t>& flat_indices)
+{
+    FlatTypedSink sink{index_depth, max_values, values, flat_indices};
     RunTraversal(root_object, levels, sink);
 }
 
