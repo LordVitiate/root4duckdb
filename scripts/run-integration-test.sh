@@ -55,7 +55,7 @@ build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX
     "$FIXTURE_DIR/concurrent_root_load.cpp" \
     -L"$PROJECT_DIR/build/release/src" \
     -Wl,-rpath,"$PROJECT_DIR/build/release/src" \
-    -lduckdb -o "$WORK_DIR/build/concurrent_root_load"
+    -lduckdb -ldl -o "$WORK_DIR/build/concurrent_root_load"
 timeout -k 5s 180s "$WORK_DIR/build/concurrent_root_load" \
     "$WORK_DIR/data/a.root" "$WORK_DIR/build/libTestEvent.so" \
     "$WORK_DIR/build/concurrent-index"
