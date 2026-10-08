@@ -52,7 +52,7 @@ inspect() {
 
     echo 'NEEDED:'
     readelf -d "$path" |
-        awk '/\\(NEEDED\\)/ { print }'
+        awk '/NEEDED/ { print }'
 
     versions="$(needed_versions "$path")"
     maxv="$(printf '%s\n' "$versions" | awk 'NF' | tail -1)"
