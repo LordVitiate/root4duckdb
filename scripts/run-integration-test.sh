@@ -1395,6 +1395,31 @@ if [[ "$PATH_PREDICATE_INDEXES" != "2" || "$PREDICATE_INTERSECTIONS" != "1" ]]; 
     exit 1
 fi
 
+# A catalog with a committed snapshot but no commit ledger must fail
+# rather than silently selecting that snapshot without a valid commit.
+cat > "$WORK_DIR/missing-commit-ledger.sql" <<SQL
+CREATE TABLE main.broken_root_snapshots (
+    snapshot_id VARCHAR,
+    state VARCHAR,
+    index_version INTEGER,
+    created_at_ns BIGINT
+);
+INSERT INTO main.broken_root_snapshots
+VALUES ('unverified', 'COMMITTED', 12, 1);
+SELECT count(*)
+FROM read_root_dataset('main.broken_root', '/TestEvent/run');
+SQL
+if "$DUCKDB_BIN" -csv -noheader :memory: \
+    < "$WORK_DIR/missing-commit-ledger.sql" > "$WORK_DIR/missing-commit-ledger.log" 2>&1; then
+    echo "ROOT catalog accepted a snapshot without its required commit ledger" >&2
+    exit 1
+fi
+if ! grep -q 'broken_root_commits' "$WORK_DIR/missing-commit-ledger.log"; then
+    echo "ROOT catalog did not report the missing commit ledger" >&2
+    cat "$WORK_DIR/missing-commit-ledger.log" >&2
+    exit 1
+fi
+
 # Freshness must be checked before pruning (including Bloom pruning) and
 # before the metadata-only COUNT(*) fast path. Modify only a generated fixture
 # after all ordinary index tests have completed.
