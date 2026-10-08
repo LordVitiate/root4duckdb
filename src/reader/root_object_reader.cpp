@@ -224,7 +224,12 @@ void* RootObjectContext::Read(uint64_t entry)
         RootDebug("OBJECT.BOUND", "class=" + class_name);
     }
     const auto bytes = tree->GetEntry(static_cast<Long64_t>(entry));
-    return bytes < 0 ? nullptr : address_slot;
+    if (bytes < 0)
+    {
+        throw IOException("ROOT TTree::GetEntry failed for class " + class_name +
+                          " at entry " + std::to_string(entry));
+    }
+    return address_slot;
 }
 
 bool RootObjectContext::IsBound() const noexcept
