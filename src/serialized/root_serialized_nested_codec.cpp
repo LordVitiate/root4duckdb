@@ -3,6 +3,7 @@
 #include "root4duckdb/serialized/root_serialized_codec_utils.hpp"
 #include "root4duckdb/serialized/root_serialized_reader.hpp"
 #include "root4duckdb/core/root_headers.hpp"
+#include "root4duckdb/core/root_debug.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -232,15 +233,50 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
             flat_indices.clear();
             return false;
         }
+        const auto* raw = reinterpret_cast<const uint8_t*>(buffer.Buffer()) + current_position;
+        const auto raw_byte_count = serialized_codec::ReadBE32(raw);
+        const auto raw_version = serialized_codec::ReadBE16(raw + 4);
         UInt_t start = 0;
         UInt_t byte_count = 0;
         const Version_t version = buffer.ReadVersion(&start, &byte_count, plan.nested_container_class);
+        const Int_t decoded_position = buffer.Length();
         const uint64_t nested_end = static_cast<uint64_t>(start) + byte_count + 4;
-        if ((version & TBufferFile::kStreamedMemberWise) == 0 ||
-            (version & ~TBufferFile::kStreamedMemberWise) < 8 ||
-            !byte_count || nested_end > entry_size || nested_end < static_cast<uint64_t>(buffer.Length()))
+        if (outer == 0)
         {
-            failure_reason = "nested STL is not a bounded member-wise version >= 8";
+            RootDebug("SERIALIZED.NESTED_FIXED_HEADER",
+                      "path=" + plan.logical_path +
+                          " cursor=" + std::to_string(current_position) +
+                          " raw_byte_count=" + std::to_string(raw_byte_count) +
+                          " raw_version=" + std::to_string(raw_version) +
+                          " version=" + std::to_string(version) +
+                          " start=" + std::to_string(start) +
+                          " byte_count=" + std::to_string(byte_count) +
+                          " header_end=" + std::to_string(decoded_position) +
+                          " frame_end=" + std::to_string(nested_end) +
+                          " entry_size=" + std::to_string(entry_size) +
+                          " outer_count=" + std::to_string(outer_count));
+        }
+        const bool memberwise = (version & TBufferFile::kStreamedMemberWise) != 0;
+        const auto stl_version = static_cast<uint16_t>(version & ~TBufferFile::kStreamedMemberWise);
+        if (!memberwise)
+        {
+            failure_reason = "nested STL uses object-wise encoding (version=" + std::to_string(stl_version) + ")";
+        }
+        else if (stl_version < 8)
+        {
+            failure_reason = "nested STL uses legacy member-wise encoding (version=" +
+                             std::to_string(stl_version) + ")";
+        }
+        else if (!byte_count || decoded_position < 0 || nested_end > entry_size ||
+                 nested_end < static_cast<uint64_t>(decoded_position))
+        {
+            failure_reason = "nested STL has inconsistent framed byte count (version=" +
+                             std::to_string(stl_version) + ", frame_end=" +
+                             std::to_string(nested_end) + ", entry_size=" +
+                             std::to_string(entry_size) + ")";
+        }
+        if (!failure_reason.empty())
+        {
             values.clear();
             flat_indices.clear();
             return false;
