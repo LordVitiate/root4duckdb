@@ -309,12 +309,8 @@ unique_ptr<FunctionData> RootScanBinder::Bind(ClientContext& context, TableFunct
     auto bind_data = make_uniq<RootScanBindData>();
     ConfigureOptions(*bind_data, context, input);
     const bool dictionary_loaded = LoadRequestedDictionary(context, input);
-    auto cleanup_parameter = input.named_parameters.find("dictionary_cleanup");
-    const std::string cleanup_mode =
-        cleanup_parameter == input.named_parameters.end() ? "auto" : cleanup_parameter->second.ToString();
-    bind_data->root_access.dictionary_cleanup_mode = rootlake::ParseDictionaryCleanupMode(
-        cleanup_mode,
-        dictionary_loaded ? rootlake::RootDictionaryCleanupMode::RETAIN : rootlake::RootDictionaryCleanupMode::FULL);
+    bind_data->root_access.dictionary_cleanup_mode =
+        dictionary_loaded ? rootlake::RootDictionaryCleanupMode::RETAIN : rootlake::RootDictionaryCleanupMode::FULL;
     if (input.named_parameters.find("path_prefix") == input.named_parameters.end())
     {
         BindRootBrowse(*bind_data, return_names, return_types);
