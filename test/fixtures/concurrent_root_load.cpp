@@ -350,6 +350,7 @@ bool RunPhastConcurrency(int argc, char** argv)
         return false;
     }
     const PhastCase cases[] = {
+        {"/PaSetup", "entry_id, run, ver, experiment"},
         {"/PaEvent/vecTrack/vecTPar/Par", "entry_id, vecTrack_idx, vecTPar_idx, Par_idx, Par"},
         {"/PaEvent/vecTrack/vecTPar/Cov", "entry_id, vecTrack_idx, vecTPar_idx, Cov_idx, Cov"},
         {"/PaEvent/vecVertex", "entry_id, vecVertex_idx, chi2tot, bestprim"}
