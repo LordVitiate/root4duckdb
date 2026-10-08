@@ -131,7 +131,7 @@ RootFileOpenResult OpenRootFile(const std::string& path, uint32_t max_attempts)
 RootFileOpenResult RootFileHandle::Open(const std::string& file_path, const std::string& tree_name,
                                         std::mutex* sync_mutex)
 {
-    tree_name_ = tree_name;
+    Close();
     RootFileOpenResult result;
     if (sync_mutex)
     {
@@ -142,17 +142,20 @@ RootFileOpenResult RootFileHandle::Open(const std::string& file_path, const std:
     {
         result = OpenRootFile(file_path);
     }
-    file_ = std::move(result.file);
-    if (!file_ || file_->IsZombie())
+    if (!result)
     {
         throw RootFileUnavailableException("Failed to open ROOT file " + file_path + ": " + result.error,
                                            result.attempts, result.elapsed_us);
     }
-    file_->GetObject(tree_name_.c_str(), tree_);
-    if (!tree_)
+    TTree* selected_tree = nullptr;
+    result.file->GetObject(tree_name.c_str(), selected_tree);
+    if (!selected_tree)
     {
-        throw IOException("TTree not found: " + tree_name_ + " in " + file_path);
+        throw IOException("TTree not found: " + tree_name + " in " + file_path);
     }
+    file_ = std::move(result.file);
+    tree_ = selected_tree;
+    tree_name_ = tree_name;
     return result;
 }
 
