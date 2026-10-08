@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <barrier>
+#include <cstdint>
+#include <dlfcn.h>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -204,6 +206,14 @@ uint64_t ResidentMemoryKiB()
 
 bool RunMemoryProbe(duckdb_database database, const TestQueries& queries)
 {
+    using Counter = std::uint64_t (*)();
+    const auto constructed = reinterpret_cast<Counter>(dlsym(RTLD_DEFAULT, "root4duckdb_fixture_constructed_events"));
+    const auto destroyed = reinterpret_cast<Counter>(dlsym(RTLD_DEFAULT, "root4duckdb_fixture_destroyed_events"));
+    if (!constructed || !destroyed)
+    {
+        std::cerr << "memory probe: fixture object lifecycle counters are unavailable\n";
+        return false;
+    }
     duckdb_connection connection = nullptr;
     std::string error;
     if (!OpenConnection(database, connection, error))
@@ -213,7 +223,9 @@ bool RunMemoryProbe(duckdb_database database, const TestQueries& queries)
     }
     constexpr int warmup = 50;
     constexpr int batch = 750;
-    uint64_t samples[3] = {};
+    const auto initial_created = constructed();
+    const auto initial_destroyed = destroyed();
+    std::uint64_t samples[3] = {};
     bool success = true;
     for (int iteration = 0; iteration < warmup + batch * 2; ++iteration)
     {
@@ -241,13 +253,20 @@ bool RunMemoryProbe(duckdb_database database, const TestQueries& queries)
         std::cerr << "memory probe: " << error << '\n';
         return false;
     }
+    const auto created_delta = constructed() - initial_created;
+    const auto destroyed_delta = destroyed() - initial_destroyed;
+    if (created_delta < warmup + batch * 2 || created_delta != destroyed_delta)
+    {
+        std::cerr << "ROOT object ownership violation: created=" << created_delta
+                  << ", destroyed=" << destroyed_delta << "\n";
+        return false;
+    }
+    std::cout << "[OK] ROOT object lifetime: " << created_delta << " constructed, "
+              << destroyed_delta << " destroyed during 1550 queries\n";
     if (samples[0] && samples[1] && samples[2])
     {
         std::cout << "[MEMORY] ROOT object-mode VmRSS KiB after 50/800/1550 queries: "
                   << samples[0] << '/' << samples[1] << '/' << samples[2] << '\n';
-        // Diagnostic only: RSS includes allocator arenas, ROOT caches and
-        // the currently intentional RETAIN policy. A flat RSS is not proof
-        // of leak freedom, and a growing RSS alone cannot identify its owner.
     }
     return true;
 }
