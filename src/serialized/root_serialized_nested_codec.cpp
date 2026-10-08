@@ -223,6 +223,15 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
     SerializedEntryLayout inner_layout;
     for (uint64_t outer = 0; outer < outer_count; ++outer)
     {
+        const Int_t current_position = buffer.Length();
+        if (current_position < 0 || static_cast<uint64_t>(current_position) > entry_size ||
+            entry_size - static_cast<uint64_t>(current_position) < 6)
+        {
+            failure_reason = "nested STL header exceeds the serialized entry";
+            values.clear();
+            flat_indices.clear();
+            return false;
+        }
         UInt_t start = 0;
         UInt_t byte_count = 0;
         const Version_t version = buffer.ReadVersion(&start, &byte_count, plan.nested_container_class);
