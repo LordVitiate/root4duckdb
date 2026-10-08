@@ -121,6 +121,28 @@ if [[ "$(printf '%s\n' "$ID_ONLY_RESULT" | grep -xc true)" != 2 ]]; then
     exit 1
 fi
 
+# Repeated object materialization exercises the FULL ownership cleanup
+# policy on a dictionary class with a real TObject base.
+cat > "$WORK_DIR/object-cleanup.sql" <<SQL
+SELECT count(*) = 3 AND sum(run) = 303
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    dictionary_cleanup := 'full',
+    reader_mode := 'object',
+    path_prefix := '/TestEvent'
+);
+SQL
+for iteration in 1 2 3 4 5 6 7 8 9 10; do
+    "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/object-cleanup.sql" \
+        > "$WORK_DIR/object-cleanup.log" 2>&1
+    if ! grep -qx true "$WORK_DIR/object-cleanup.log"; then
+        echo "ROOT object ownership cleanup failed on iteration $iteration" >&2
+        cat "$WORK_DIR/object-cleanup.log" >&2
+        exit 1
+    fi
+done
+
 cat > "$WORK_DIR/direct-read.sql" <<SQL
 LOAD parquet;
 SELECT count(*) >= 10
