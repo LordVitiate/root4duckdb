@@ -13,6 +13,14 @@ target_compile_definitions(${ROOT4DUCKDB_PAYLOAD_TARGET} PRIVATE ROOT4DUCKDB_PAY
 
 root4duckdb_configure_target(${ROOT4DUCKDB_PAYLOAD_TARGET})
 
+# DuckDB hosts may already expose symbols from a statically linked root extension.
+# Keep payload-local C++ helpers private so dlopen never binds them to stale host copies.
+# Explicit DUCKDB_EXTENSION_API entrypoints remain publicly exported for dlsym.
+set_target_properties(${ROOT4DUCKDB_PAYLOAD_TARGET} PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
+)
+
 # Host DuckDB resolves payload API symbols; Iceberg stays inside the payload.
 root4duckdb_embed_static_iceberg(
     ${ROOT4DUCKDB_PAYLOAD_TARGET}
