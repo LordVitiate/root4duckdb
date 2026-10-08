@@ -56,8 +56,11 @@ void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column,
     }
     for (idx_t value_index = 0; value_index < value_count; ++value_index)
     {
-        const auto first = flat_indices.begin() + value_index * plan.index_depth;
-        result.vector_indices[value_index].assign(first, first + plan.index_depth);
+        using IndexDifference = std::vector<int32_t>::difference_type;
+        const auto row_offset = static_cast<IndexDifference>(value_index * plan.index_depth);
+        const auto row_width = static_cast<IndexDifference>(plan.index_depth);
+        const auto first = flat_indices.cbegin() + row_offset;
+        result.vector_indices[value_index].assign(first, first + row_width);
     }
 }
 
