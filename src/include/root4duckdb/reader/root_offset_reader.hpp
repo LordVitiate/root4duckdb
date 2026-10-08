@@ -40,6 +40,10 @@ class OffsetValueReader
     /// Collects numeric values and flattened indices.
     static void CollectFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
                             std::vector<double>& values, std::vector<int32_t>& flat_indices);
+    /// Collects exact primitive values and flat indices without creating per-value rows.
+    static void CollectTypedFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
+                                 int64_t max_values, std::vector<RootPrimitiveValue>& values,
+                                 std::vector<int32_t>& flat_indices);
     /// Collects the mixed direct-scan row representation.
     static void CollectDirect(void* root_object, const std::vector<PathLevel>& levels, int64_t max_values,
                               int64_t entry_id, ReadResult& out);
