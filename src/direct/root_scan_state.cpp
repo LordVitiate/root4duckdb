@@ -755,19 +755,22 @@ bool RootScanFileManager::EnsureReady(const RootScanBindData& bind_data, RootSca
             gstate.file_scheduler->RecordUnavailable(local_state.file_task, exception.Attempts(),
                                                      exception.ElapsedUs());
             Reset(gstate, local_state, false);
-            continue;
+            throw IOException("Required ROOT input is unavailable: " + local_state.file_task.path + ": " +
+                              exception.what());
         }
         catch (const std::exception& exception)
         {
             gstate.file_scheduler->RecordFailure(local_state.file_task, exception.what());
             Reset(gstate, local_state, false);
-            continue;
+            throw IOException("Required ROOT input failed: " + local_state.file_task.path + ": " +
+                              exception.what());
         }
         catch (...)
         {
             gstate.file_scheduler->RecordFailure(local_state.file_task, "unknown ROOT reader error");
             Reset(gstate, local_state, false);
-            continue;
+            throw IOException("Required ROOT input failed: " + local_state.file_task.path +
+                              ": unknown ROOT reader error");
         }
     }
 }
