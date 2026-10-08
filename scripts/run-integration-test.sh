@@ -1407,8 +1407,8 @@ if [[ "$PATH_PREDICATE_INDEXES" != "2" || "$PREDICATE_INTERSECTIONS" != "1" ]]; 
     exit 1
 fi
 
-# A catalog with a committed snapshot but no commit ledger must fail
-# rather than silently selecting that snapshot without a valid commit.
+# An explicitly requested commit ledger must be present and queryable.
+# Ordinary SQL catalogs use their _snapshots table as the commit log.
 cat > "$WORK_DIR/missing-commit-ledger.sql" <<SQL
 CREATE TABLE main.broken_root_snapshots (
     snapshot_id VARCHAR,
@@ -1419,7 +1419,11 @@ CREATE TABLE main.broken_root_snapshots (
 INSERT INTO main.broken_root_snapshots
 VALUES ('unverified', 'COMMITTED', 12, 1);
 SELECT count(*)
-FROM read_root_dataset('main.broken_root', '/TestEvent/run');
+FROM read_root_dataset(
+    'main.broken_root',
+    '/TestEvent/run',
+    commits_table := 'main.broken_root_commits'
+);
 SQL
 if "$DUCKDB_BIN" -csv -noheader :memory: \
     < "$WORK_DIR/missing-commit-ledger.sql" > "$WORK_DIR/missing-commit-ledger.log" 2>&1; then
