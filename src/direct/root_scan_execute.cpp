@@ -277,18 +277,12 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
             }
         }
     }
-    if (!has_data)
+    if (!has_data && lstate.has_container_columns)
     {
-        if (lstate.has_container_columns)
-        {
-            lstate.local_current_row++;
-            return CacheResult::CONTINUE_LOOP;
-        }
-        if (entry > 0)
-        {
-            lstate.local_current_row = lstate.local_end_row;
-            return CacheResult::BREAK_LOOP;
-        }
+        // An empty collection has no flattened rows. For scalar relations,
+        // however, a projection of entry_id alone still has one row per event.
+        lstate.local_current_row++;
+        return CacheResult::CONTINUE_LOOP;
     }
     lstate.current_entry = entry;
     lstate.current_elem_idx = 0;
