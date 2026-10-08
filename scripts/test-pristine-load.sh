@@ -54,9 +54,9 @@ env -i \
   HOME="$HOME" \
   PATH=/usr/bin:/bin \
   timeout 45 \
-  "$DUCKDB" -unsigned -c "
+  "$DUCKDB" -unsigned -csv -noheader -c "
       LOAD '$EXT';
-      SELECT count(DISTINCT function_name) AS registered
+      SELECT count(DISTINCT function_name) = 6 AS registration_ok
       FROM duckdb_functions()
       WHERE function_name IN
         ('read_root','read_root_dataset','root_build_index',
@@ -65,11 +65,25 @@ env -i \
 rc=${PIPESTATUS[0]}
 set -e
 
+# ROOT/Cling may emit a fatal compiler diagnostic while DuckDB exits 0.
+# The SQL result alone is therefore not sufficient for acceptance.
+if ! grep -Fxq 'true' "$LOG"; then
+  echo '[FAIL] Expected registration_ok=true from all six SQL functions' >&2
+  rc=1
+fi
+
+if grep -Eq \
+  'fatal error:|Fatal in <|Error in <UnknownClass::FindDynamicLibrary>|CheckABICompatibility|Possible C\\+\\+ standard library mismatch' \
+  "$LOG"; then
+  echo '[FAIL] ROOT/Cling reported an initialization or compiler error' >&2
+  rc=1
+fi
+
 echo
 echo "PRISTINE LOAD STATUS: $rc"
 if ((rc == 0)); then
-  echo '[OK] Extension loads without a prepared environment'
+  echo '[OK] All six SQL functions load without runtime setup or ROOT/Cling diagnostics'
 else
-  echo '[BLOCKED] Standalone LOAD still needs runtime discovery/resolution work'
+  echo '[BLOCKED] Pristine LOAD failed or ROOT/Cling emitted an error'
 fi
 exit "$rc"
