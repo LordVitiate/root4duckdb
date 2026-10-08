@@ -488,6 +488,7 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
             }
             return true;
         }
+        const Int_t nested_column_start = buffer.Length();
         if (!ConsumeSerializedSelectedMembers(buffer, plan, element_version, outer_count, outer_collection_scratch,
                                               resolved_prefix_element_ids, cached_action_sequence, failure_reason))
         {
@@ -500,8 +501,29 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
         }
         if (plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER))
         {
-            return DecodeSerializedNestedFixedColumn(buffer, plan, entry_size, outer_count, max_values_per_entry,
-                                                     values, flat_indices, failure_reason, collect_indices);
+            if (DecodeSerializedNestedFixedColumn(buffer, plan, entry_size, outer_count, max_values_per_entry,
+                                                  values, flat_indices, failure_reason, collect_indices))
+            {
+                return true;
+            }
+            const auto offset_reason = failure_reason;
+            RootDebug("SERIALIZED.NESTED_FIXED_FALLBACK",
+                      "path=" + plan.logical_path + " reason=" + offset_reason);
+            buffer.SetBufferOffset(nested_column_start);
+            cached_action_sequence.reset();
+            SerializedReadPlan selected_plan = plan;
+            selected_plan.Select(SerializedProjectionKind::SELECTED_SUBTREE);
+            if (!ConsumeSerializedSelectedMembers(buffer, selected_plan, element_version, outer_count,
+                                                  outer_collection_scratch, resolved_prefix_element_ids,
+                                                  cached_action_sequence, failure_reason))
+            {
+                failure_reason = offset_reason + "; selected subtree fallback failed: " + failure_reason;
+                cached_action_sequence.reset();
+                return false;
+            }
+            cached_action_sequence.reset();
+            return CollectSerializedSelectedSubtree(selected_plan, outer_collection_scratch, max_values_per_entry,
+                                                   values, flat_indices, failure_reason, collect_indices);
         }
         const Int_t root_offset = buffer.Length();
         if (root_offset < 0 || static_cast<size_t>(root_offset) > entry_size)
