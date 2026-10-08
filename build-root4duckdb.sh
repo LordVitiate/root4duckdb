@@ -338,7 +338,7 @@ check_root_abi() {
         # build-script exit. Capture its status explicitly and report it.
         if root_probe="$(
             root -l -b -q \
-                -e 'std::cout << "__ROOT4DUCKDB_GLIBCXX__=" << __GLIBCXX__ << std::endl; gSystem->Exit(0);' \
+                -e 'std::cout << "__ROOT4DUCKDB_GLIBCXX__=" << __GLIBCXX__ << std::endl;' \
                 2>&1
         )"; then
             :
