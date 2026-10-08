@@ -445,7 +445,8 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     }
     std::vector<uint32_t> dimensions;
     const auto array_length = FixedArrayLength(target, &dimensions);
-    const auto type = PrimitiveBaseType(StreamerPrimitiveType(target->GetType(), target->GetTypeName()));
+    const auto type = PrimitiveBaseType(StreamerPrimitiveType(target->GetType(),
+                                                              target->GetTypeName() ? target->GetTypeName() : ""));
     const auto value_width = PrimitiveTypeSize(type);
     if (!array_length || !value_width || array_length > std::numeric_limits<uint64_t>::max() / value_width ||
         target_width != array_length * value_width || ClassifySerializedPrimitive(type) == SerializedPrimitiveKind::UNKNOWN)
