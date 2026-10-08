@@ -143,8 +143,8 @@ if [[ "$(printf '%s\n' "$ID_ONLY_RESULT" | grep -xc true)" != 2 ]]; then
     exit 1
 fi
 
-# Exercise repeated object reads through the public read_root API using
-# its automatic external-dictionary ownership policy (RETAIN), not FULL.
+# Exercise repeated object reads using automatic caller-owned cleanup
+# for objects created through a loaded ROOT dictionary.
 cat > "$WORK_DIR/object-mode-repeat.sql" <<SQL
 SELECT count(*) = 3 AND sum(run) = 303
 FROM read_root(
