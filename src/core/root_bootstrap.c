@@ -66,6 +66,17 @@ static char g_runtime_error[8192];
 static void* g_payload_handle = NULL;
 static root4duckdb_payload_init_fn g_payload_init = NULL;
 
+static void bootstrap_trace(const char* stage)
+{
+    const char* debug = getenv("ROOT4DUCKDB_DEBUG");
+    if (!debug || !*debug || strcmp(debug, "0") == 0)
+    {
+        return;
+    }
+    (void)fprintf(stderr, "[ROOT4DUCKDB][BOOTSTRAP] %s\n", stage);
+    (void)fflush(stderr);
+}
+
 static void set_message(char* dst, size_t dst_size, const char* fmt, ...)
 {
     va_list args;
@@ -758,12 +769,14 @@ static int load_root_runtime(char* error, size_t error_size)
     size_t i;
 
     memset(&runtime, 0, sizeof(runtime));
+    bootstrap_trace("before discover_runtime");
 
     if (!discover_runtime(&runtime, error, error_size))
     {
         return 0;
     }
 
+    bootstrap_trace("after discover_runtime");
     if (!verify_loaded_root(&runtime, error, error_size))
     {
         return 0;
@@ -791,10 +804,15 @@ static int load_root_runtime(char* error, size_t error_size)
             return 0;
         }
 
+        char stage[128];
+        (void)snprintf(stage, sizeof(stage), "before dlopen %s", libraries[i].name);
+        bootstrap_trace(stage);
         if (!dlopen_checked(path, libraries[i].flags, error, error_size))
         {
             return 0;
         }
+        (void)snprintf(stage, sizeof(stage), "after dlopen %s", libraries[i].name);
+        bootstrap_trace(stage);
     }
 
     return verify_loaded_root(&runtime, error, error_size);
@@ -868,7 +886,9 @@ static int load_embedded_payload(char* error, size_t error_size)
         return 0;
     }
 
+    bootstrap_trace("before dlopen embedded payload");
     g_payload_handle = dlopen_checked(fd_path, RTLD_NOW | RTLD_LOCAL, error, error_size);
+    bootstrap_trace("after dlopen embedded payload");
 
     close(fd);
 
@@ -899,6 +919,7 @@ static int load_embedded_payload(char* error, size_t error_size)
      * ISO-C object-pointer/function-pointer conversion diagnostic.
      */
     memcpy(&g_payload_init, &symbol, sizeof(g_payload_init));
+    bootstrap_trace("embedded payload entry resolved");
 
     return 1;
 }
@@ -906,15 +927,18 @@ static int load_embedded_payload(char* error, size_t error_size)
 static int initialize_runtime(char* error, size_t error_size)
 {
 
+    bootstrap_trace("before ROOT runtime load");
     if (!load_root_runtime(error, error_size))
     {
         return 0;
     }
+    bootstrap_trace("after ROOT runtime load");
 
     if (!load_embedded_payload(error, error_size))
     {
         return 0;
     }
+    bootstrap_trace("after embedded payload load");
 
     return 1;
 }
@@ -972,6 +996,7 @@ bool root_init_c_api(duckdb_extension_info info, struct duckdb_extension_access*
     }
 
     error[0] = '\0';
+    bootstrap_trace("root_init_c_api entered");
 
     if (!ensure_runtime(error, sizeof(error)))
     {
@@ -979,6 +1004,7 @@ bool root_init_c_api(duckdb_extension_info info, struct duckdb_extension_access*
         return false;
     }
 
+    bootstrap_trace("runtime ready");
     if (!g_payload_init)
     {
         access->set_error(info, "ROOT4DuckDB payload initialization function is unavailable");
@@ -994,7 +1020,9 @@ bool root_init_c_api(duckdb_extension_info info, struct duckdb_extension_access*
         return false;
     }
 
+    bootstrap_trace("before payload init");
     result = g_payload_init(info, access);
+    bootstrap_trace("after payload init");
 
     (void)pthread_mutex_unlock(&g_registration_mutex);
 
