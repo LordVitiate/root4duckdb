@@ -376,24 +376,45 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
                                     TClass* outer_element_class, SerializedReadPlan& plan)
 {
     const char* enabled = std::getenv("ROOT4DUCKDB_NESTED_FIXED_OFFSET");
-    if (!enabled || std::string(enabled) != "1" || path.fields.size() != 3 || levels.size() != 3 ||
-        !outer_element_class || !levels[1].is_container || !IsContiguousVectorType(levels[1].type) ||
-        levels[1].is_pointer || !levels[1].klass || !levels[1].element_class ||
-        !levels[2].is_primitive || !levels[2].is_fixed_array || levels[2].is_pointer ||
-        levels[2].is_container || !levels[0].klass)
+    if (!enabled || std::string(enabled) != "1")
     {
         return false;
+    }
+    const auto reject = [&](const std::string& reason)
+    {
+        RootDebug("SERIALIZED.NESTED_FIXED_PLAN_REJECT",
+                  "path=" + plan.logical_path + " reason=" + reason);
+        return false;
+    };
+    if (path.fields.size() != 3 || levels.size() != 3)
+    {
+        return reject("requires exactly three persistent path levels");
+    }
+    if (!outer_element_class || !levels[0].klass || !levels[1].is_container ||
+        !IsContiguousVectorType(levels[1].type) || levels[1].is_pointer ||
+        !levels[1].klass || !levels[1].element_class)
+    {
+        return reject("nested field must be an inline vector of objects (type=" + levels[1].type +
+                      ", is_container=" + std::to_string(levels[1].is_container) +
+                      ", has_value_class=" + std::to_string(levels[1].element_class != nullptr) + ")");
+    }
+    if (!levels[2].is_primitive || !levels[2].is_fixed_array ||
+        levels[2].is_pointer || levels[2].is_container)
+    {
+        return reject("terminal field must be a fixed primitive array (type=" + levels[2].type +
+                      ", is_primitive=" + std::to_string(levels[2].is_primitive) +
+                      ", is_fixed_array=" + std::to_string(levels[2].is_fixed_array) + ")");
     }
     auto* outer_streamer = outer_element_class->GetStreamerInfo();
     auto* outer_elements = outer_streamer ? outer_streamer->GetElements() : nullptr;
     if (!outer_elements)
     {
-        return false;
+        return reject("outer element class lacks streamer members");
     }
     auto* nested_proxy = levels[1].klass->GetCollectionProxy();
     if (!nested_proxy || nested_proxy->GetValueClass() != levels[1].element_class || nested_proxy->HasPointers())
     {
-        return false;
+        return reject("nested collection proxy has an incompatible value class or pointers");
     }
     int selected_index = -1;
     for (int i = 0; i < outer_elements->GetEntries(); ++i)
@@ -401,13 +422,13 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
         auto* element = dynamic_cast<TStreamerElement*>(outer_elements->At(i));
         if (!element)
         {
-            return false;
+            return reject("outer element has invalid streamer member");
         }
         if (!element->IsBase() && path.fields[1] == element->GetName())
         {
             if (element->IsaPointer() || element->GetArrayDim() != 0 || element->GetClassPointer() != levels[1].klass)
             {
-                return false;
+                return reject("outer nested collection streamer member shape or class differs");
             }
             selected_index = i;
             break;
@@ -415,13 +436,13 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     }
     if (selected_index < 0)
     {
-        return false;
+        return reject("nested collection member missing from dictionary streamer");
     }
     auto* nested_streamer = levels[1].element_class->GetStreamerInfo();
     auto* nested_elements = nested_streamer ? nested_streamer->GetElements() : nullptr;
     if (!nested_elements)
     {
-        return false;
+        return reject("nested element class lacks streamer members");
     }
     auto* target = static_cast<TStreamerElement*>(nullptr);
     for (int i = 0; i < nested_elements->GetEntries(); ++i)
@@ -429,7 +450,7 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
         auto* element = dynamic_cast<TStreamerElement*>(nested_elements->At(i));
         if (!element)
         {
-            return false;
+            return reject("nested element has invalid streamer member");
         }
         if (!element->IsBase() && path.fields[2] == element->GetName())
         {
@@ -441,7 +462,7 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     std::string width_reason;
     if (!target || !FixedPrimitiveWidth(target, target_width, width_reason))
     {
-        return false;
+        return reject("fixed member is missing or has non-fixed encoding: " + width_reason);
     }
     std::vector<uint32_t> dimensions;
     const auto array_length = FixedArrayLength(target, &dimensions);
@@ -451,7 +472,7 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     if (!array_length || !value_width || array_length > std::numeric_limits<uint64_t>::max() / value_width ||
         target_width != array_length * value_width || ClassifySerializedPrimitive(type) == SerializedPrimitiveKind::UNKNOWN)
     {
-        return false;
+        return reject("fixed member primitive width, dimensions, or encoding are unsupported");
     }
     plan.Select(SerializedProjectionKind::NESTED_FIXED_MEMBER);
     plan.container_name = levels[0].name;
@@ -476,6 +497,9 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     {
         plan.prefix_element_ids.push_back(i);
     }
+    RootDebug("SERIALIZED.NESTED_FIXED_PLAN", "path=" + plan.logical_path +
+              " nested_member=" + plan.projected_member_name +
+              " values_per_element=" + std::to_string(plan.fixed_array_length));
     return true;
 }
 
