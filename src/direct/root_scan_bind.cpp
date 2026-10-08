@@ -256,28 +256,26 @@ bool RootScanBinder::BindSemanticPath(RootScanBindData& bind_data, TFile* file, 
 
 std::unique_ptr<TFile> RootScanBinder::OpenRepresentativeFile(RootScanBindData& bind_data) const
 {
-    for (idx_t source_id = 0; source_id < bind_data.root_paths.size(); ++source_id)
+    if (bind_data.root_paths.empty())
     {
-        const auto& path = bind_data.root_paths[source_id];
-        RootDebug("FILE.BEFORE_OPEN", "mode=representative source_id=" + std::to_string(source_id) +
-                                          " path=" + path);
-        auto result = rootlake::OpenRootFile(path);
-        bind_data.bind_open_us += result.elapsed_us;
-        RootDebug("FILE.AFTER_OPEN", "mode=representative source_id=" + std::to_string(source_id) +
-                                         " attempts=" + std::to_string(result.attempts) +
-                                         " elapsed_us=" + std::to_string(result.elapsed_us) +
-                                         " zombie=" + std::to_string(result.file && result.file->IsZombie() ? 1 : 0));
-        if (!result)
-        {
-            throw IOException(rootlake::RootOpenFailureMessage(
-                "Failed to open a required ROOT input while selecting a representative file",
-                {path + ": " + result.error}));
-        }
-        bind_data.representative_source_id = source_id;
-        bind_data.root_path = path;
-        return std::move(result.file);
+        throw InternalException("ROOT input resolver returned no files");
     }
-    throw InternalException("ROOT input resolver returned no files");
+    const auto& path = bind_data.root_paths.front();
+    RootDebug("FILE.BEFORE_OPEN", "mode=representative source_id=0 path=" + path);
+    auto result = rootlake::OpenRootFile(path);
+    bind_data.bind_open_us += result.elapsed_us;
+    RootDebug("FILE.AFTER_OPEN", "mode=representative source_id=0 attempts=" + std::to_string(result.attempts) +
+                                     " elapsed_us=" + std::to_string(result.elapsed_us) +
+                                     " zombie=" + std::to_string(result.file && result.file->IsZombie() ? 1 : 0));
+    if (!result)
+    {
+        throw IOException(rootlake::RootOpenFailureMessage(
+            "Failed to open a required ROOT input while selecting a representative file",
+            {path + ": " + result.error}));
+    }
+    bind_data.representative_source_id = 0;
+    bind_data.root_path = path;
+    return std::move(result.file);
 }
 
 void RootScanBinder::AddMultiFileIdentityColumns(RootScanBindData& bind_data, std::vector<std::string>& return_names,
