@@ -495,7 +495,8 @@ static int runtime_from_prefix(const char* prefix, struct root_runtime* runtime,
 static int validate_runtime(const struct root_runtime* runtime, char* error, size_t error_size)
 {
 
-    static const char* const required[] = {"libCore.so", "libRIO.so", "libHist.so", "libTree.so", "libCling.so"};
+    static const char* const required[] = {"libCore.so", "libRIO.so", "libHist.so", "libTree.so",
+                                           "libCling.so", "libPhysics.so"};
 
     size_t i;
     char root_header[PATH_MAX];
@@ -764,6 +765,7 @@ static int load_root_runtime(char* error, size_t error_size)
                      {"libRIO.so", RTLD_NOW | RTLD_GLOBAL},
                      {"libHist.so", RTLD_NOW | RTLD_GLOBAL},
                      {"libTree.so", RTLD_NOW | RTLD_GLOBAL},
+                     {"libPhysics.so", RTLD_NOW | RTLD_GLOBAL},
                      {"libCling.so", RTLD_LAZY | RTLD_LOCAL}};
 
     size_t i;
