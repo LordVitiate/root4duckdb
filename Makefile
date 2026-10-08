@@ -5,7 +5,7 @@ EXT_CONFIG := ${PROJ_DIR}extension_config.cmake
 
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
-# Drop extension-ci options unused by DuckDB 1.4.5.
+# Drop extension-ci options unused by the pinned DuckDB build.
 BUILD_FLAGS := $(filter-out -DBENCHMARK_ROOT_DIRECTORY=% -DBUILD_EXTENSION_TEST_DEPS=%,$(BUILD_FLAGS))
 
 .PHONY: release-package

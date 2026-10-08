@@ -1,17 +1,13 @@
-#pragma once
+#ifndef ROOT4DUCKDB_INDEX_ROOT_INDEX_PIPELINE_UTILS_HPP
+#define ROOT4DUCKDB_INDEX_ROOT_INDEX_PIPELINE_UTILS_HPP
 
 #include "root4duckdb/index/root_index_pipeline.hpp"
 
-#include <sys/stat.h>
+#include "root4duckdb/core/root_file_metadata.hpp"
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-/// Reads local file metadata without following remote URIs.
-bool LocalFileStat(const std::string& path, struct stat& status);
-/// Returns a local file size or zero for remote and unavailable inputs.
-uint64_t LocalFileSize(const std::string& path);
-/// Returns a local nanosecond mtime or zero when unavailable.
-int64_t LocalMtimeNS(const std::string& path);
 /// Creates a sortable timestamp identifier.
 std::string TimestampId();
 /// Parses one or more requested logical paths.
@@ -29,3 +25,5 @@ void WriteFailureReport(const fs::path& output_dir, const std::string& snapshot_
 bool IsSafePublishTableName(const std::string& name);
 
 } // namespace duckdb::rootlake
+
+#endif

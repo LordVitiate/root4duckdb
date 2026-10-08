@@ -1,18 +1,17 @@
-#pragma once
+#ifndef ROOT4DUCKDB_CORE_ROOT_INPUT_RESOLVER_HPP
+#define ROOT4DUCKDB_CORE_ROOT_INPUT_RESOLVER_HPP
 
 #include "duckdb/main/client_context.hpp"
 
 #include <string>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-/// Canonical source layer for ROOT scans and index builders.
-///
-/// Syntax expansion belongs here; credentials do not. Exact remote URIs are
-/// passed unchanged to ROOT while URI globbing is delegated to DuckDB's
-/// filesystem layer.
-class RootInputResolver final {
+/// Resolve input syntax without moving credentials into query plans.
+class RootInputResolver final
+{
   public:
     explicit RootInputResolver(ClientContext& context);
 
@@ -34,3 +33,5 @@ bool IsRootFileName(const std::string& path);
 bool HasRootGlob(const std::string& path);
 
 } // namespace duckdb::rootlake
+
+#endif

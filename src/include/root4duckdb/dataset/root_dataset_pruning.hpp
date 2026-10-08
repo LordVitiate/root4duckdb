@@ -1,8 +1,10 @@
-#pragma once
+#ifndef ROOT4DUCKDB_DATASET_ROOT_DATASET_PRUNING_HPP
+#define ROOT4DUCKDB_DATASET_ROOT_DATASET_PRUNING_HPP
 
 #include "root4duckdb/dataset/root_dataset_scan_internal.hpp"
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Conservatively evaluates indexed metadata for one path predicate.
 bool PredicateMetadataMayMatch(const PathPredicateBinding& predicate, const Value& min_value, const Value& max_value,
@@ -47,3 +49,5 @@ void ParseEntrySelection(DatasetBindData& bind, const std::string& raw_json);
 void BuildPredicateIntersection(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global);
 
 } // namespace duckdb::rootlake
+
+#endif

@@ -7,7 +7,7 @@ ContinuationIndentWidth: 4
 PointerAlignment: Left
 ReferenceAlignment: Left
 DerivePointerAlignment: false
-BreakBeforeBraces: Attach
+BreakBeforeBraces: Allman
 AllowShortBlocksOnASingleLine: Never
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: Never
@@ -17,3 +17,4 @@ BinPackArguments: true
 BinPackParameters: true
 SortIncludes: Never
 SpaceBeforeParens: ControlStatements
+AllowShortLambdasOnASingleLine: None

@@ -4,7 +4,8 @@
 
 #include <vector>
 
-class TestHit {
+class TestHit
+{
   public:
     Int_t legacy_prefix = 0;
     Float_t u = 0.0F;
@@ -16,7 +17,8 @@ class TestHit {
     ClassDef(TestHit, 5);
 };
 
-class TestEvent {
+class TestEvent
+{
   public:
     std::vector<TestHit> vecHit;
 

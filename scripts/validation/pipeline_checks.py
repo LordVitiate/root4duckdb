@@ -119,7 +119,8 @@ def _check_feature_groups(validator: ProjectValidator) -> None:
 
     file_checks = {
         "src/core/root_debug.cpp": ("ROOT4DUCKDB_DEBUG", "ROOT4DUCKDB_DEBUG_VERBOSE"),
-        "src/serialized/root_serialized_plan.cpp": ("BuildSerializedReadPlan", "WarnRootFallbackOnce"),
+        "src/serialized/root_serialized_plan.cpp": ("BuildSerializedReadPlan",),
+        "src/serialized/root_reader_mode.cpp": ("ParseRootReaderMode", "RootReaderModeName", "WarnRootFallbackOnce"),
         "src/serialized/root_serialized_reader.cpp": ("SerializedBasketReader::Decode", "SERIALIZED.BASKET"),
         "src/serialized/root_serialized_codec.cpp": ("DecodeSerializedVectorEntry", "EqualDecodedValues"),
         "src/serialized/root_serialized_nested_codec.cpp": ("DecodeSerializedNestedPrimitiveVectorColumn",),

@@ -18,32 +18,37 @@ using duckdb::rootlake::RootPrimitiveValue;
 using duckdb::rootlake::SerializedEntryLayout;
 using duckdb::rootlake::serialized_codec::CheckedByteCursor;
 
-static void PutBE32(std::vector<uint8_t>& bytes, size_t offset, uint32_t value) {
+static void PutBE32(std::vector<uint8_t>& bytes, size_t offset, uint32_t value)
+{
     bytes[offset + 0] = static_cast<uint8_t>(value >> 24U);
     bytes[offset + 1] = static_cast<uint8_t>(value >> 16U);
     bytes[offset + 2] = static_cast<uint8_t>(value >> 8U);
     bytes[offset + 3] = static_cast<uint8_t>(value);
 }
 
-static void PutBE16(std::vector<uint8_t>& bytes, size_t offset, uint16_t value) {
+static void PutBE16(std::vector<uint8_t>& bytes, size_t offset, uint16_t value)
+{
     bytes[offset + 0] = static_cast<uint8_t>(value >> 8U);
     bytes[offset + 1] = static_cast<uint8_t>(value);
 }
 
-static void PutBE64(std::vector<uint8_t>& bytes, size_t offset, uint64_t value) {
+static void PutBE64(std::vector<uint8_t>& bytes, size_t offset, uint64_t value)
+{
     PutBE32(bytes, offset, static_cast<uint32_t>(value >> 32U));
     PutBE32(bytes, offset + 4, static_cast<uint32_t>(value));
 }
 
 static std::vector<uint8_t> FloatEntry(uint32_t count, uint32_t prefix_per_element, const std::vector<float>& values,
-                                       uint32_t header = 0x4009001eU) {
+                                       uint32_t header = 0x4009001eU)
+{
     const size_t size = 12 + static_cast<size_t>(count) * prefix_per_element + values.size() * 4;
     std::vector<uint8_t> bytes(size, 0xa5);
     PutBE32(bytes, 0, 0x40000000U | static_cast<uint32_t>(size - 4));
     PutBE32(bytes, 4, header);
     PutBE32(bytes, 8, count);
     size_t offset = 12 + static_cast<size_t>(count) * prefix_per_element;
-    for (const auto value : values) {
+    for (const auto value : values)
+    {
         uint32_t bits = 0;
         std::memcpy(&bits, &value, sizeof(bits));
         PutBE32(bytes, offset, bits);
@@ -52,7 +57,8 @@ static std::vector<uint8_t> FloatEntry(uint32_t count, uint32_t prefix_per_eleme
     return bytes;
 }
 
-static std::vector<uint8_t> NestedShortColumn(size_t column_offset) {
+static std::vector<uint8_t> NestedShortColumn(size_t column_offset)
+{
     // Three outer objects: {-1, 7}, {}, {8, 9, 10}. The bytes before and after
     // the framed target column stand in for other member-wise columns.
     const size_t column_size = 6 + (4 + 4) + 4 + (4 + 6);
@@ -75,7 +81,8 @@ static std::vector<uint8_t> NestedShortColumn(size_t column_offset) {
     return bytes;
 }
 
-int main() {
+int main()
+{
     const std::vector<uint8_t> cursor_bytes{0x01, 0x02, 0x03, 0x04, 0x05};
     CheckedByteCursor checked_cursor(cursor_bytes.data(), cursor_bytes.size());
     uint32_t cursor_u32 = 0;

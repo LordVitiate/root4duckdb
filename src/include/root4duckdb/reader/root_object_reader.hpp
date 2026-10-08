@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_READER_ROOT_OBJECT_READER_HPP
+#define ROOT4DUCKDB_READER_ROOT_OBJECT_READER_HPP
 
 #include "root4duckdb/reader/root_semantic_types.hpp"
 
@@ -7,9 +8,15 @@
 class TFile;
 class TTree;
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-enum class RootDictionaryCleanupMode : uint8_t { FULL = 0, DESTRUCT_ONLY = 1, RETAIN = 2 };
+enum class RootDictionaryCleanupMode : uint8_t
+{
+    FULL = 0,
+    DESTRUCT_ONLY = 1,
+    RETAIN = 2
+};
 
 /// Parses the object cleanup policy used by PHAST dictionaries.
 RootDictionaryCleanupMode
@@ -17,7 +24,8 @@ ParseDictionaryCleanupMode(std::string mode,
                            RootDictionaryCleanupMode automatic_mode = RootDictionaryCleanupMode::FULL);
 
 /// Owns one dictionary-created ROOT object and its branch address.
-class RootObjectContext {
+class RootObjectContext
+{
   public:
     /// @name Ownership
     /// @{
@@ -55,7 +63,8 @@ class RootObjectContext {
 };
 
 /// Materializes top-level ROOT objects through TTree::GetEntry.
-class RootObjectReader {
+class RootObjectReader
+{
   public:
     /// @name Ownership
     /// @{
@@ -93,7 +102,8 @@ class RootObjectReader {
 };
 
 /// Caches one object load shared by all projected paths for an entry.
-class RootEntryReader {
+class RootEntryReader
+{
   public:
     /// Creates an entry cache over an already bound object reader.
     explicit RootEntryReader(RootObjectReader& reader);
@@ -131,3 +141,5 @@ std::string SchemaFingerprint(const std::string& root_class, const std::vector<P
 /// @}
 
 } // namespace duckdb::rootlake
+
+#endif

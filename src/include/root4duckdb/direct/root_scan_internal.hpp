@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_DIRECT_ROOT_SCAN_INTERNAL_HPP
+#define ROOT4DUCKDB_DIRECT_ROOT_SCAN_INTERNAL_HPP
 
 #include "root4duckdb/core/root_headers.hpp"
 
@@ -46,7 +47,8 @@
 #include "root4duckdb/reader/root_path_reader.hpp"
 #include "root4duckdb/core/root_runtime_settings.hpp"
 
-namespace duckdb {
+namespace duckdb
+{
 
 class Expression;
 class LogicalGet;
@@ -55,28 +57,37 @@ class LogicalGet;
 rootlake::RootScalarActual PrimitiveScalarActual(const LogicalType& logical_type,
                                                  const rootlake::RootPrimitiveValue& value);
 
-
 /// Physical primitive branch used by compatibility scans.
-struct RootPrimitiveBranch {
+struct RootPrimitiveBranch
+{
     std::string name;
     std::string type_name;
     TBranch* branch = nullptr;
     TLeaf* leaf = nullptr;
 };
 
-struct RootSemanticScanMode {};
-struct RootPrimitiveTreeScanMode {};
-struct RootEmptyScanMode {};
+struct RootSemanticScanMode
+{
+};
+struct RootPrimitiveTreeScanMode
+{
+};
+struct RootEmptyScanMode
+{
+};
 
-struct RootBrowseScanMode {
+struct RootBrowseScanMode
+{
     std::vector<std::string> children;
 };
 
-struct RootDirectBranchScanMode {
+struct RootDirectBranchScanMode
+{
     RootPrimitiveBranch branch;
 };
 
-struct RootHistogramScanMode {
+struct RootHistogramScanMode
+{
     rootlake::RootHistogramBinding binding;
     std::unique_ptr<TH1> object;
 };
@@ -86,7 +97,8 @@ using RootScanMode = std::variant<RootSemanticScanMode, RootBrowseScanMode, Root
                                   RootPrimitiveTreeScanMode, RootHistogramScanMode, RootEmptyScanMode>;
 
 /// One logical output column in the direct scan plan.
-struct RootScanColumn {
+struct RootScanColumn
+{
     std::string name;
     std::string logical_path;
     std::string branch_name;
@@ -98,13 +110,11 @@ struct RootScanColumn {
 };
 
 /// Claims non-overlapping entry batches for single-file scans.
-class RootEntryScheduler {
-    uint64_t& next_row_;
-    uint64_t total_rows_;
-    std::mutex& mutex_;
-
+class RootEntryScheduler
+{
   public:
-    struct WorkBatch {
+    struct WorkBatch
+    {
         uint64_t start;
         uint64_t end;
         [[nodiscard]] bool HasWork() const;
@@ -115,12 +125,17 @@ class RootEntryScheduler {
     static constexpr uint64_t DEFAULT_BATCH_SIZE = 65536;
 
     WorkBatch ClaimWork(uint64_t preferred_batch_size = DEFAULT_BATCH_SIZE);
-    [[nodiscard]] static idx_t EstimateWorkUnits(uint64_t total_rows,
-                                                 uint64_t batch_size = DEFAULT_BATCH_SIZE);
+    [[nodiscard]] static idx_t EstimateWorkUnits(uint64_t total_rows, uint64_t batch_size = DEFAULT_BATCH_SIZE);
+
+  private:
+    uint64_t& next_row_;
+    uint64_t total_rows_;
+    std::mutex& mutex_;
 };
 
 /// Immutable bind-time plan for read_root.
-struct RootScanBindData : public TableFunctionData {
+struct RootScanBindData : public TableFunctionData
+{
     RootDebugLifetimeSentinel lifetime_sentinel{"RootScanBindData"};
     std::string root_path;
     std::string input_specification;
@@ -163,7 +178,8 @@ struct RootScanBindData : public TableFunctionData {
 };
 
 /// Shared scheduling and profiling state for read_root.
-struct RootScanGlobalState : public GlobalTableFunctionState {
+struct RootScanGlobalState : public GlobalTableFunctionState
+{
     uint64_t next_row = 0;
     uint64_t total_rows = 0;
     uint64_t scheduled_rows = 0;
@@ -192,7 +208,8 @@ struct RootScanGlobalState : public GlobalTableFunctionState {
 };
 
 /// One serialized primitive projection owned by a single DuckDB worker.
-struct RootSerializedColumnState {
+struct RootSerializedColumnState
+{
     idx_t column_id = DConstants::INVALID_INDEX;
     rootlake::RootPathReader path_reader;
     std::vector<rootlake::RootPrimitiveValue> values;
@@ -203,7 +220,8 @@ struct RootSerializedColumnState {
 };
 
 /// Thread-local ROOT handles and decoded row buffers.
-struct RootScanLocalState : public LocalTableFunctionState {
+struct RootScanLocalState : public LocalTableFunctionState
+{
     rootlake::RootFileHandle root_file;
     std::unordered_map<std::string, rootlake::RootObjectReader> root_readers;
 
@@ -233,10 +251,16 @@ struct RootScanLocalState : public LocalTableFunctionState {
     ~RootScanLocalState();
 };
 
-enum class CacheResult { CACHED, CONTINUE_LOOP, BREAK_LOOP };
+enum class CacheResult
+{
+    CACHED,
+    CONTINUE_LOOP,
+    BREAK_LOOP
+};
 
 /// Builds direct scan schemas and semantic access plans.
-class RootScanBinder final {
+class RootScanBinder final
+{
   public:
     unique_ptr<FunctionData> Bind(ClientContext& context, TableFunctionBindInput& input,
                                   vector<LogicalType>& return_types, vector<string>& return_names);
@@ -271,7 +295,8 @@ class RootScanBinder final {
 };
 
 /// Opens, reuses, and closes one ROOT input per local state.
-class RootScanFileManager final {
+class RootScanFileManager final
+{
   public:
     void Open(const RootScanBindData& bind_data, RootScanGlobalState& global, RootScanLocalState& local,
               const std::string& file_path, bool synchronize_open);
@@ -284,7 +309,8 @@ void RootScanCollectPruningHints(ClientContext& context, LogicalGet& get, Functi
                                  vector<unique_ptr<Expression>>& filters);
 
 /// Constructs direct scan global and local states.
-class RootScanStateFactory final {
+class RootScanStateFactory final
+{
   public:
     unique_ptr<GlobalTableFunctionState> CreateGlobal(ClientContext& context, TableFunctionInitInput& input);
     unique_ptr<LocalTableFunctionState> CreateLocal(TableFunctionInitInput& input,
@@ -292,8 +318,11 @@ class RootScanStateFactory final {
 };
 
 /// Executes the selected direct read mode.
-class RootScanExecutor final {
+class RootScanExecutor final
+{
   public:
+    static bool ClaimEntryBatch(RootScanGlobalState& global, RootScanLocalState& local);
+
     void Execute(ClientContext& context, TableFunctionInput& input, DataChunk& output);
 
   private:
@@ -332,10 +361,13 @@ class RootScanExecutor final {
 };
 
 /// Renders stable direct scan profiling fields.
-class RootScanExplain final {
+class RootScanExplain final
+{
   public:
     InsertionOrderPreservingMap<string> Bound(TableFunctionToStringInput& input);
     InsertionOrderPreservingMap<string> Running(TableFunctionDynamicToStringInput& input);
 };
 
 } // namespace duckdb
+
+#endif

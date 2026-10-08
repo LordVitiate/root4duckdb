@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_INDEX_ROOT_FILTER_HPP
+#define ROOT4DUCKDB_INDEX_ROOT_FILTER_HPP
 
 #include "duckdb/common/types/value.hpp"
 
@@ -9,16 +10,19 @@
 #include <string>
 #include <unordered_map>
 
-namespace duckdb {
+namespace duckdb
+{
 class ClientContext;
 class ExpressionExecutor;
 class ExpressionFilter;
 class TableFilter;
 
-namespace rootlake {
+namespace rootlake
+{
 
 /// Exact scalar supplied to DuckDB table-filter evaluation.
-struct RootScalarActual {
+struct RootScalarActual
+{
     LogicalType type;
     bool is_null = false;
     double numeric = 0;
@@ -37,7 +41,8 @@ struct RootScalarActual {
 };
 
 /// Conservative inclusive range extracted from an unsigned filter.
-struct RootUnsignedFilterRange {
+struct RootUnsignedFilterRange
+{
     bool known = false;
     bool impossible = false;
     uint64_t lower = 0;
@@ -48,7 +53,8 @@ struct RootUnsignedFilterRange {
 RootUnsignedFilterRange ExtractRootUnsignedRange(const TableFilter& filter);
 
 /// Evaluates DuckDB filters against scalar ROOT values.
-class RootFilterEvaluator {
+class RootFilterEvaluator
+{
   public:
     RootFilterEvaluator();
     ~RootFilterEvaluator();
@@ -65,3 +71,5 @@ class RootFilterEvaluator {
 
 } // namespace rootlake
 } // namespace duckdb
+
+#endif

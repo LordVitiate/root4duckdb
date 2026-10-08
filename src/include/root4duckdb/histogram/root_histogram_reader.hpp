@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_HISTOGRAM_ROOT_HISTOGRAM_READER_HPP
+#define ROOT4DUCKDB_HISTOGRAM_ROOT_HISTOGRAM_READER_HPP
 
 #include "root4duckdb/core/root_headers.hpp"
 #include "root4duckdb/index/root_filter.hpp"
@@ -10,19 +11,27 @@
 #include <string>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Canonical relational view of a ROOT histogram.
-enum class RootHistogramView { BINS, AXES, META };
+enum class RootHistogramView
+{
+    BINS,
+    AXES,
+    META
+};
 
 /// Ordered names and types returned by one view.
-struct RootHistogramSchema {
+struct RootHistogramSchema
+{
     std::vector<std::string> names;
     std::vector<LogicalType> types;
 };
 
 /// Bound ROOT object and its canonical SQL schema.
-struct RootHistogramBinding {
+struct RootHistogramBinding
+{
     std::string object_path;
     std::string class_name;
     RootHistogramView view = RootHistogramView::BINS;
@@ -47,3 +56,5 @@ void WriteRootHistogramActual(Vector& vector, idx_t row, const RootScalarActual&
 const char* RootHistogramViewName(RootHistogramView view);
 
 } // namespace duckdb::rootlake
+
+#endif

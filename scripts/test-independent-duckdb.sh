@@ -79,32 +79,9 @@ if [[ ! -s "$WORK_DIR/data/a.root" ||
       ! -s "$WORK_DIR/data/ancestor.root" ||
       ! -s "$WORK_DIR/build/libTestEvent.so" ]]; then
     echo '[INFO] Compiling ROOT fixture and dictionary with build GCC'
-    ROOT_CFLAGS_STRING="$("$ROOT_CONFIG" --cflags)"
-    ROOT_LIBS_STRING="$("$ROOT_CONFIG" --libs)"
-    read -r -a ROOT_CFLAGS <<<"$ROOT_CFLAGS_STRING"
-    read -r -a ROOT_LIBS <<<"$ROOT_LIBS_STRING"
-
-    rootcling \
-        -f "$WORK_DIR/build/TestEventDict.cpp" \
-        -c \
-        -I"$FIXTURE_DIR" \
-        "$FIXTURE_DIR/TestEvent.hpp" \
-        "$FIXTURE_DIR/TestEventLinkDef.h"
-
-    "$CXX" -std=c++17 -O2 -fPIC -shared \
-        "${ROOT_CFLAGS[@]}" -I"$FIXTURE_DIR" \
-        "$FIXTURE_DIR/TestEvent.cpp" \
-        "$WORK_DIR/build/TestEventDict.cpp" \
-        -o "$WORK_DIR/build/libTestEvent.so" \
-        "${ROOT_LIBS[@]}"
-
-    "$CXX" -std=c++17 -O2 \
-        "${ROOT_CFLAGS[@]}" -I"$FIXTURE_DIR" \
-        "$FIXTURE_DIR/make_fixture.cpp" \
-        -L"$WORK_DIR/build" -lTestEvent \
-        "-Wl,-rpath,$WORK_DIR/build" \
-        -o "$WORK_DIR/build/make_fixture" \
-        "${ROOT_LIBS[@]}"
+    # shellcheck source=lib/fixtures.sh
+    source "$PROJECT_DIR/scripts/lib/fixtures.sh"
+    build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX" "$ROOT_CONFIG"
 
     "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
 fi

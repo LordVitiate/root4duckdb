@@ -9,22 +9,28 @@
 
 class TBuffer;
 
-class TestBase {
+class TestBase
+{
   public:
     Int_t inherited = 0;
     ClassDef(TestBase, 1);
 };
 
-enum class TestKind : Int_t { PRIMARY = 0, SECONDARY = 1 };
+enum class TestKind : Int_t
+{
+    PRIMARY = 0,
+    SECONDARY = 1
+};
 
-class TestHit {
+class TestHit
+{
   public:
     Float_t u = 0.0F;
     Float_t uv[2] = {0.0F, 0.0F};
     TestKind kind = TestKind::PRIMARY;
     Long64_t exact_id = 0;
     ULong64_t exact_uid = 0;
-    Float16_t compressed = 0.0F; //[0,100,16]
+    Float16_t compressed = 0.0F;      //[0,100,16]
     Double32_t compressed_wide = 0.0; //[0,1000,20]
     // Variable-width member before refs exercises member-wise prefix handling.
     std::vector<Float_t> weights;
@@ -37,7 +43,8 @@ class TestHit {
     ClassDef(TestHit, 6);
 };
 
-class TestGroup {
+class TestGroup
+{
   public:
     Int_t group_id = 0;
     std::vector<TestHit> hits;
@@ -45,7 +52,8 @@ class TestGroup {
     ClassDef(TestGroup, 1);
 };
 
-class TestLayer {
+class TestLayer
+{
   public:
     Int_t layer_id = 0;
     std::vector<TestGroup> groups;
@@ -53,7 +61,8 @@ class TestLayer {
     ClassDef(TestLayer, 1);
 };
 
-class TestPoint {
+class TestPoint
+{
   public:
     Double_t x = 0.0;
     Double_t y = 0.0;
@@ -61,7 +70,8 @@ class TestPoint {
     ClassDef(TestPoint, 1);
 };
 
-class TestCustom {
+class TestCustom
+{
   public:
     Int_t tag = 0;
     Double_t score = 0.0;
@@ -69,14 +79,15 @@ class TestCustom {
     ClassDef(TestCustom, 1);
 };
 
-class TestEvent : public TestBase {
+class TestEvent : public TestBase
+{
   public:
     Int_t run = 0;
     UChar_t flags = 0;
     Char_t signed_code = 0;
     Long64_t big_signed = 0;
     ULong64_t big_unsigned = 0;
-    Float16_t compressed_float = 0.0F; //[0,100,16]
+    Float16_t compressed_float = 0.0F;  //[0,100,16]
     Double32_t compressed_double = 0.0; //[0,1000,20]
     Float_t vertex[3] = {0.0F, 0.0F, 0.0F};
     Float_t matrix[2][3] = {{0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F}};

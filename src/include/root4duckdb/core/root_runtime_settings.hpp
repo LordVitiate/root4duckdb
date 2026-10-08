@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_CORE_ROOT_RUNTIME_SETTINGS_HPP
+#define ROOT4DUCKDB_CORE_ROOT_RUNTIME_SETTINGS_HPP
 
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -6,9 +7,11 @@
 
 #include <cstdint>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-struct RootRuntimeSettings {
+struct RootRuntimeSettings
+{
     idx_t threads = 1;
     idx_t max_in_flight_files = 1;
     idx_t memory_limit_bytes = 0;
@@ -24,3 +27,5 @@ struct RootRuntimeSettings {
 void RegisterRootRuntimeSettings(ExtensionLoader& loader);
 
 } // namespace duckdb::rootlake
+
+#endif

@@ -1,11 +1,14 @@
 #include "root4duckdb/index/root_index_pipeline.hpp"
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-void RootIndexResultWriter::Write(TableFunctionInput& input, DataChunk& output) const {
+void RootIndexResultWriter::Write(TableFunctionInput& input, DataChunk& output) const
+{
     auto& state = input.global_state->Cast<BuildIndexGlobalState>();
     idx_t count = 0;
-    while (state.offset < state.statuses.size() && count < STANDARD_VECTOR_SIZE) {
+    while (state.offset < state.statuses.size() && count < STANDARD_VECTOR_SIZE)
+    {
         const auto& row = state.statuses[state.offset++];
         output.SetValue(0, count, Value(row.file_path));
         output.SetValue(1, count, Value(row.file_id));
@@ -30,19 +33,23 @@ void RootIndexResultWriter::Write(TableFunctionInput& input, DataChunk& output) 
 }
 
 unique_ptr<FunctionData> BuildIndexBindCallback(ClientContext&, TableFunctionBindInput& input,
-                                                vector<LogicalType>& return_types, vector<string>& return_names) {
+                                                vector<LogicalType>& return_types, vector<string>& return_names)
+{
     return RootIndexBinder().Bind(input, return_types, return_names);
 }
 
-unique_ptr<GlobalTableFunctionState> BuildIndexInitCallback(ClientContext& context, TableFunctionInitInput& input) {
+unique_ptr<GlobalTableFunctionState> BuildIndexInitCallback(ClientContext& context, TableFunctionInitInput& input)
+{
     return RootIndexCoordinator().Run(context, input);
 }
 
-void BuildIndexCallback(ClientContext&, TableFunctionInput& input, DataChunk& output) {
+void BuildIndexCallback(ClientContext&, TableFunctionInput& input, DataChunk& output)
+{
     RootIndexResultWriter().Write(input, output);
 }
 
-static TableFunction MakeBuildIndexFunction(const std::string& name) {
+static TableFunction MakeBuildIndexFunction(const std::string& name)
+{
     TableFunction function(name,
                            {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
                            BuildIndexCallback, BuildIndexBindCallback, BuildIndexInitCallback);
@@ -76,12 +83,11 @@ static TableFunction MakeBuildIndexFunction(const std::string& name) {
     return function;
 }
 
-void RegisterRootLakeIndex(ExtensionLoader& loader) {
+void RegisterRootLakeIndex(ExtensionLoader& loader)
+{
     auto single_or_multi = MakeBuildIndexFunction("root_build_index");
     loader.RegisterFunction(single_or_multi);
-    // Production-facing alias: accepts file, directory, glob, JSON array,
-    // comma-separated masks, or @URI-list and indexes all logical paths in one
-    // top-level object read per entry.
+    // Index all requested paths in one top-level object read per entry.
     auto dataset = MakeBuildIndexFunction("root_build_dataset_index");
     loader.RegisterFunction(dataset);
 }

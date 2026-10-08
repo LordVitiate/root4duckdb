@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_DIRECT_ROOT_DIRECT_SCHEDULER_HPP
+#define ROOT4DUCKDB_DIRECT_ROOT_DIRECT_SCHEDULER_HPP
 
 #include "duckdb/common/common.hpp"
 
@@ -11,16 +12,19 @@
 #include <unordered_set>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// One source claimed by a direct-scan worker.
-struct RootDirectFileTask {
+struct RootDirectFileTask
+{
     idx_t source_id = 0;
     std::string path;
 };
 
 /// Coordinates file claims and direct-scan telemetry.
-class RootDirectFileScheduler {
+class RootDirectFileScheduler
+{
   public:
     RootDirectFileScheduler(const std::vector<std::string>& files, idx_t worker_limit);
 
@@ -83,3 +87,5 @@ class RootDirectFileScheduler {
 };
 
 } // namespace duckdb::rootlake
+
+#endif

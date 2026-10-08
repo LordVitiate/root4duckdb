@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_READER_ROOT_PATH_READER_HPP
+#define ROOT4DUCKDB_READER_ROOT_PATH_READER_HPP
 
 #include "root4duckdb/reader/root_semantic_reader.hpp"
 #include "root4duckdb/serialized/root_serialized_reader.hpp"
@@ -8,12 +9,12 @@
 #include <string>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-/// Common ROOT access policy shared by direct scans, dataset scans, and index builds.
-/// Keeping the limits and cleanup policy in one value object prevents the three
-/// public execution paths from silently developing different safety defaults.
-struct RootAccessOptions {
+/// Shared access limits and cleanup policy for scans and index builds.
+struct RootAccessOptions
+{
     RootReaderMode reader_mode = RootReaderMode::AUTO;
     uint32_t validation_entries = 0;
     uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL;
@@ -28,20 +29,32 @@ struct RootAccessOptions {
 
 using RootPathReaderOptions = RootAccessOptions;
 
-enum class RootPathStartRoute : uint8_t { OBJECT_ONLY = 0, SERIALIZED = 1, OBJECT_FALLBACK = 2 };
+enum class RootPathStartRoute : uint8_t
+{
+    OBJECT_ONLY = 0,
+    SERIALIZED = 1,
+    OBJECT_FALLBACK = 2
+};
 
 /// Mutually exclusive result of starting the serialized reader.
-struct RootPathReaderStartResult {
+struct RootPathReaderStartResult
+{
     RootPathStartRoute route = RootPathStartRoute::OBJECT_ONLY;
 
     [[nodiscard]] bool SerializedActive() const noexcept;
     [[nodiscard]] bool FallbackActivated() const noexcept;
 };
 
-enum class RootPathReadRoute : uint8_t { NOT_ATTEMPTED = 0, SERIALIZED = 1, OBJECT_FALLBACK = 2 };
+enum class RootPathReadRoute : uint8_t
+{
+    NOT_ATTEMPTED = 0,
+    SERIALIZED = 1,
+    OBJECT_FALLBACK = 2
+};
 
 /// Mutually exclusive routing result of one serialized read attempt.
-struct RootPathReadResult {
+struct RootPathReadResult
+{
     RootPathReadRoute route = RootPathReadRoute::NOT_ATTEMPTED;
     // A validation mismatch may decode successfully and still select fallback.
     bool attempt_decoded = false;
@@ -51,7 +64,8 @@ struct RootPathReadResult {
     [[nodiscard]] bool FallbackActivated() const noexcept;
 };
 
-class RootPathReader {
+class RootPathReader
+{
   public:
     /// @name Ownership
     /// @{
@@ -124,3 +138,5 @@ class RootPathReader {
 };
 
 } // namespace duckdb::rootlake
+
+#endif

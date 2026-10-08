@@ -42,63 +42,12 @@ print(match.group(0))
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/data" "$WORK_DIR/build" "$WORK_DIR/legacy"
 
-ROOT_CFLAGS="$(root-config --cflags)"
-ROOT_LIBS="$(root-config --libs)"
+# shellcheck source=lib/fixtures.sh
+source "$PROJECT_DIR/scripts/lib/fixtures.sh"
 CXX_BIN="${CXX:-c++}"
-
-rootcling \
-    -f "$WORK_DIR/build/TestEventDict.cpp" \
-    -c \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/TestEvent.hpp" \
-    "$FIXTURE_DIR/TestEventLinkDef.h"
-
-# shellcheck disable=SC2086
-"$CXX_BIN" -std=c++17 -O2 -fPIC -shared \
-    $ROOT_CFLAGS \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/TestEvent.cpp" \
-    "$WORK_DIR/build/TestEventDict.cpp" \
-    -o "$WORK_DIR/build/libTestEvent.so" \
-    $ROOT_LIBS
-
-# shellcheck disable=SC2086
-"$CXX_BIN" -std=c++17 -O2 \
-    $ROOT_CFLAGS \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/make_fixture.cpp" \
-    -L"$WORK_DIR/build" -lTestEvent \
-    -Wl,-rpath,"$WORK_DIR/build" \
-    -o "$WORK_DIR/build/make_fixture" \
-    $ROOT_LIBS
-
+build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX_BIN"
 "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
-
-rootcling \
-    -f "$WORK_DIR/build/LegacyTestEventDict.cpp" \
-    -c \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/LegacyTestEvent.hpp" \
-    "$FIXTURE_DIR/LegacyTestEventLinkDef.h"
-
-# shellcheck disable=SC2086
-"$CXX_BIN" -std=c++17 -O2 -fPIC -shared \
-    $ROOT_CFLAGS \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/LegacyTestEvent.cpp" \
-    "$WORK_DIR/build/LegacyTestEventDict.cpp" \
-    -o "$WORK_DIR/build/libLegacyTestEvent.so" \
-    $ROOT_LIBS
-
-# shellcheck disable=SC2086
-"$CXX_BIN" -std=c++17 -O2 \
-    $ROOT_CFLAGS \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/make_legacy_fixture.cpp" \
-    -L"$WORK_DIR/build" -lLegacyTestEvent \
-    -Wl,-rpath,"$WORK_DIR/build" \
-    -o "$WORK_DIR/build/make_legacy_fixture" \
-    $ROOT_LIBS
+build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" LegacyTestEvent make_legacy_fixture "$CXX_BIN"
 
 "$WORK_DIR/build/make_legacy_fixture" "$WORK_DIR/legacy/legacy.root"
 printf '%s\n' "$WORK_DIR/data/a.root" "$WORK_DIR/data/b.root" > "$WORK_DIR/data/two-files.list"

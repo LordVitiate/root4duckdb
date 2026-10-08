@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_READER_ROOT_SEMANTIC_TYPES_HPP
+#define ROOT4DUCKDB_READER_ROOT_SEMANTIC_TYPES_HPP
 
 #include "root4duckdb/reader/root_primitive_value.hpp"
 
@@ -12,10 +13,12 @@
 class TBranch;
 class TClass;
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Parsed logical path rooted at a persistent ROOT class.
-struct ParsedPath {
+struct ParsedPath
+{
     std::string root_class;
     std::vector<std::string> fields;
 };
@@ -37,7 +40,8 @@ bool ContiguousVectorPathEnabled();
 bool IsPointerType(std::string raw_type);
 
 /// Shape and primitive type of a fixed ROOT array.
-struct FixedArrayTypeInfo {
+struct FixedArrayTypeInfo
+{
     std::string base_type;
     std::vector<uint32_t> dimensions;
     uint64_t length = 1;
@@ -59,7 +63,8 @@ bool IsLosslessDoubleBackedType(const std::string& raw_type);
 double ReadPrimitiveAsDouble(void* pointer, const std::string& raw_type);
 
 /// One resolved semantic step through a ROOT object or container.
-struct PathLevel {
+struct PathLevel
+{
     std::string name;
     std::string type;
     int64_t offset_in_parent = -1;
@@ -77,7 +82,8 @@ struct PathLevel {
 };
 
 /// One immediate child returned by metadata-only semantic browsing.
-struct SemanticPathChild {
+struct SemanticPathChild
+{
     std::string path;
     std::string name;
     std::string kind;
@@ -90,14 +96,16 @@ struct SemanticPathChild {
 };
 
 /// Primitive children selected when binding a relation path.
-struct SemanticPathSelection {
+struct SemanticPathSelection
+{
     std::string bind_prefix;
     std::vector<std::string> primitive_paths;
     std::set<std::string> child_paths;
 };
 
 /// Flattened values and indices produced by direct semantic reads.
-struct ReadResult {
+struct ReadResult
+{
     std::vector<std::string> strings;
     std::vector<RootPrimitiveValue> numbers;
     std::vector<bool> is_string_flag;
@@ -118,9 +126,12 @@ struct ReadResult {
 };
 
 /// Physical branch selected for basket metadata and serialized decoding.
-struct PhysicalBranchResolution {
+struct PhysicalBranchResolution
+{
     TBranch* branch = nullptr;
     std::string mode;
 };
 
 } // namespace duckdb::rootlake
+
+#endif

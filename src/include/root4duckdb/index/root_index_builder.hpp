@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_INDEX_ROOT_INDEX_BUILDER_HPP
+#define ROOT4DUCKDB_INDEX_ROOT_INDEX_BUILDER_HPP
 
 #include "root4duckdb/index/root_index_metadata.hpp"
 #include "root4duckdb/reader/root_path_reader.hpp"
@@ -8,10 +9,12 @@
 #include <string>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Immutable options shared by all file index workers.
-struct RootIndexBuildOptions {
+struct RootIndexBuildOptions
+{
     std::string tree_name;
     std::vector<std::string> logical_paths;
     uint32_t bloom_bytes = 0;
@@ -20,7 +23,8 @@ struct RootIndexBuildOptions {
 };
 
 /// File-level build outcome and counters.
-struct RootIndexBuildStatus {
+struct RootIndexBuildStatus
+{
     std::string file_path;
     std::string file_id;
     std::string schema_id;
@@ -32,7 +36,8 @@ struct RootIndexBuildStatus {
 };
 
 /// Inspected file bounds used by the coordinator.
-struct RootIndexFilePlan {
+struct RootIndexFilePlan
+{
     std::string path;
     uint64_t entries = 0;
     uint64_t event_base = 0;
@@ -43,7 +48,8 @@ struct RootIndexFilePlan {
 RootIndexFilePlan InspectRootIndexFile(const RootIndexBuildOptions& options, const std::string& path);
 
 /// Builds format-12 metadata for one ROOT file.
-class RootIndexFileBuilder {
+class RootIndexFileBuilder
+{
   public:
     /// Captures the shared build configuration and publication identity.
     RootIndexFileBuilder(const RootIndexBuildOptions& options, std::string dataset_id, std::string snapshot_id);
@@ -59,3 +65,5 @@ class RootIndexFileBuilder {
 };
 
 } // namespace duckdb::rootlake
+
+#endif

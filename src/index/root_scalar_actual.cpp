@@ -1,22 +1,26 @@
 #include "root4duckdb/index/root_filter.hpp"
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-RootScalarActual RootScalarActual::Null(const LogicalType& type) {
+RootScalarActual RootScalarActual::Null(const LogicalType& type)
+{
     RootScalarActual result;
     result.type = type;
     result.is_null = true;
     return result;
 }
 
-RootScalarActual RootScalarActual::Event(uint64_t value) {
+RootScalarActual RootScalarActual::Event(uint64_t value)
+{
     RootScalarActual result;
     result.type = LogicalType::UBIGINT;
     result.unsigned_value = value;
     return result;
 }
 
-RootScalarActual RootScalarActual::Signed(int64_t value, const LogicalType& logical_type) {
+RootScalarActual RootScalarActual::Signed(int64_t value, const LogicalType& logical_type)
+{
     RootScalarActual result;
     result.type = logical_type;
     result.signed_value = value;
@@ -25,7 +29,8 @@ RootScalarActual RootScalarActual::Signed(int64_t value, const LogicalType& logi
     return result;
 }
 
-RootScalarActual RootScalarActual::Unsigned(uint64_t value, const LogicalType& logical_type) {
+RootScalarActual RootScalarActual::Unsigned(uint64_t value, const LogicalType& logical_type)
+{
     RootScalarActual result;
     result.type = logical_type;
     result.unsigned_value = value;
@@ -33,7 +38,8 @@ RootScalarActual RootScalarActual::Unsigned(uint64_t value, const LogicalType& l
     return result;
 }
 
-RootScalarActual RootScalarActual::Index(std::optional<int32_t> value) {
+RootScalarActual RootScalarActual::Index(std::optional<int32_t> value)
+{
     RootScalarActual result;
     result.type = LogicalType::INTEGER;
     result.is_null = !value.has_value();
@@ -41,14 +47,16 @@ RootScalarActual RootScalarActual::Index(std::optional<int32_t> value) {
     return result;
 }
 
-RootScalarActual RootScalarActual::String(std::string value) {
+RootScalarActual RootScalarActual::String(std::string value)
+{
     RootScalarActual result;
     result.type = LogicalType::VARCHAR;
     result.string_value = std::move(value);
     return result;
 }
 
-RootScalarActual RootScalarActual::Numeric(const LogicalType& logical_type, double value) {
+RootScalarActual RootScalarActual::Numeric(const LogicalType& logical_type, double value)
+{
     RootScalarActual result;
     result.type = logical_type;
     result.numeric = value;
@@ -57,11 +65,14 @@ RootScalarActual RootScalarActual::Numeric(const LogicalType& logical_type, doub
     return result;
 }
 
-Value RootScalarActual::ToValue() const {
-    if (is_null) {
+Value RootScalarActual::ToValue() const
+{
+    if (is_null)
+    {
         return Value(type);
     }
-    switch (type.id()) {
+    switch (type.id())
+    {
     case LogicalTypeId::BOOLEAN:
         return Value::BOOLEAN(numeric != 0);
     case LogicalTypeId::TINYINT:

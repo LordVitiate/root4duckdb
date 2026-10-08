@@ -1,6 +1,4 @@
-# Use shared Iceberg for the bundled DuckDB CLI and static Iceberg for the
-# independently loadable extension. This avoids duplicate dependency symbols
-# in DuckDB while keeping the release extension self-contained.
+# Shared Iceberg for the bundled CLI; static Iceberg for the standalone extension.
 
 set(ROOT4DUCKDB_ICEBERG_PREFIX "" CACHE PATH
     "Prefix produced by build-iceberg.sh")
@@ -214,9 +212,7 @@ function(root4duckdb_embed_static_iceberg target_name)
             "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/root_extension.exports.map"
         )
 
-        # A normal self-contained extension must resolve every symbol at link
-        # time.  The embedded bootstrap payload is intentionally different:
-        # its DuckDB API is supplied by the already-running host process.
+        # Require resolved symbols except for payload symbols supplied by host DuckDB.
         if(NOT _r4d_allow_host_duckdb_symbols)
             target_link_options(
                 ${target_name}

@@ -1,11 +1,14 @@
-#pragma once
+#ifndef ROOT4DUCKDB_READER_ROOT_OFFSET_READER_HPP
+#define ROOT4DUCKDB_READER_ROOT_OFFSET_READER_HPP
 
 #include "root4duckdb/reader/root_semantic_types.hpp"
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Resolves a logical path through ROOT streamer metadata.
-class PathResolver {
+class PathResolver
+{
   public:
     /// Resolves a path or throws on incompatible streamer metadata.
     static std::vector<PathLevel> Resolve(TClass* root_class, const std::vector<std::string>& fields);
@@ -29,7 +32,8 @@ bool SelectSemanticPath(TClass* root_class, const ParsedPath& path, const std::s
                         SemanticPathSelection& selection);
 
 /// Traverses materialized ROOT objects using resolved offsets.
-class OffsetValueReader {
+class OffsetValueReader
+{
   public:
     /// Collects numeric values without index columns.
     static void CollectValues(void* root_object, const std::vector<PathLevel>& levels, std::vector<double>& out);
@@ -42,3 +46,5 @@ class OffsetValueReader {
 };
 
 } // namespace duckdb::rootlake
+
+#endif

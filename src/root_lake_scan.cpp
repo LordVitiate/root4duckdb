@@ -1,24 +1,29 @@
 #include "root4duckdb/dataset/root_dataset_scan_internal.hpp"
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-static virtual_column_map_t DatasetVirtualColumns(ClientContext&, optional_ptr<FunctionData>) {
+static virtual_column_map_t DatasetVirtualColumns(ClientContext&, optional_ptr<FunctionData>)
+{
     virtual_column_map_t columns;
     columns.emplace(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN));
     return columns;
 }
 
-struct DatasetStatsBindData final : public TableFunctionData {
-    unique_ptr<FunctionData> Copy() const override {
+struct DatasetStatsBindData final : public TableFunctionData
+{
+    unique_ptr<FunctionData> Copy() const override
+    {
         return make_uniq<DatasetStatsBindData>(*this);
     }
-    bool Equals(const FunctionData&) const override {
+    bool Equals(const FunctionData&) const override
+    {
         return false;
     }
-    bool SupportStatementCache() const override {
+    bool SupportStatementCache() const override
+    {
         return false;
     }
-
     uint64_t row_count = 0;
     uint64_t non_null_count = 0;
     uint64_t null_count = 0;
@@ -32,15 +37,18 @@ struct DatasetStatsBindData final : public TableFunctionData {
     std::string snapshot_id;
 };
 
-struct DatasetStatsGlobalState final : public GlobalTableFunctionState {
+struct DatasetStatsGlobalState final : public GlobalTableFunctionState
+{
     std::atomic<bool> emitted{false};
-    idx_t MaxThreads() const override {
+    idx_t MaxThreads() const override
+    {
         return 1;
     }
 };
 
 static unique_ptr<FunctionData> DatasetStatsBind(ClientContext& context, TableFunctionBindInput& input,
-                                                 vector<LogicalType>& return_types, vector<string>& return_names) {
+                                                 vector<LogicalType>& return_types, vector<string>& return_names)
+{
     const auto catalog_path = input.inputs[0].ToString();
     const auto logical_path = NormalizePath(input.inputs[1].ToString());
     RootDatasetCatalog catalog(context, catalog_path, input.named_parameters);
@@ -50,7 +58,8 @@ static unique_ptr<FunctionData> DatasetStatsBind(ClientContext& context, TableFu
     const auto baskets_relation = CatalogRelationSQL(sources.baskets, sources.sql_tables);
     std::string snapshot_files;
     std::string snapshot_baskets;
-    if (!sources.snapshot_id.empty()) {
+    if (!sources.snapshot_id.empty())
+    {
         snapshot_files = " AND f.snapshot_id=" + SqlLiteral(sources.snapshot_id);
         snapshot_baskets = " AND b.snapshot_id=" + SqlLiteral(sources.snapshot_id);
     }
@@ -93,13 +102,16 @@ static unique_ptr<FunctionData> DatasetStatsBind(ClientContext& context, TableFu
     return bind;
 }
 
-static unique_ptr<GlobalTableFunctionState> DatasetStatsInit(ClientContext&, TableFunctionInitInput&) {
+static unique_ptr<GlobalTableFunctionState> DatasetStatsInit(ClientContext&, TableFunctionInitInput&)
+{
     return make_uniq<DatasetStatsGlobalState>();
 }
 
-static void DatasetStatsScan(ClientContext&, TableFunctionInput& input, DataChunk& output) {
+static void DatasetStatsScan(ClientContext&, TableFunctionInput& input, DataChunk& output)
+{
     auto& global = input.global_state->Cast<DatasetStatsGlobalState>();
-    if (global.emitted.exchange(true)) {
+    if (global.emitted.exchange(true))
+    {
         output.SetCardinality(0);
         return;
     }
@@ -118,7 +130,8 @@ static void DatasetStatsScan(ClientContext&, TableFunctionInput& input, DataChun
     output.SetCardinality(1);
 }
 
-static void ConfigureCatalogParameters(TableFunction& function) {
+static void ConfigureCatalogParameters(TableFunction& function)
+{
     function.named_parameters["catalog_prefix"] = LogicalType::VARCHAR;
     function.named_parameters["files_table"] = LogicalType::VARCHAR;
     function.named_parameters["schemas_table"] = LogicalType::VARCHAR;
@@ -130,40 +143,49 @@ static void ConfigureCatalogParameters(TableFunction& function) {
 }
 
 unique_ptr<FunctionData> DatasetBindCallback(ClientContext& context, TableFunctionBindInput& input,
-                                             vector<LogicalType>& return_types, vector<string>& return_names) {
+                                             vector<LogicalType>& return_types, vector<string>& return_names)
+{
     return DatasetScanBinder().Bind(context, input, return_types, return_names);
 }
 
-unique_ptr<GlobalTableFunctionState> DatasetInitCallback(ClientContext& context, TableFunctionInitInput& input) {
+unique_ptr<GlobalTableFunctionState> DatasetInitCallback(ClientContext& context, TableFunctionInitInput& input)
+{
     return DatasetScanStateFactory().CreateGlobal(context, input);
 }
 
 unique_ptr<LocalTableFunctionState> DatasetInitLocalCallback(ExecutionContext&, TableFunctionInitInput&,
-                                                             GlobalTableFunctionState*) {
+                                                             GlobalTableFunctionState*)
+{
     return DatasetScanStateFactory().CreateLocal();
 }
 
-void DatasetScanCallback(ClientContext& context, TableFunctionInput& input, DataChunk& output) {
+void DatasetScanCallback(ClientContext& context, TableFunctionInput& input, DataChunk& output)
+{
     DatasetScanExecutor().Scan(context, input, output);
 }
 
-InsertionOrderPreservingMap<string> DatasetToStringCallback(TableFunctionToStringInput& input) {
+InsertionOrderPreservingMap<string> DatasetToStringCallback(TableFunctionToStringInput& input)
+{
     return DatasetScanExplain().Bound(input);
 }
 
-InsertionOrderPreservingMap<string> DatasetDynamicToStringCallback(TableFunctionDynamicToStringInput& input) {
+InsertionOrderPreservingMap<string> DatasetDynamicToStringCallback(TableFunctionDynamicToStringInput& input)
+{
     return DatasetScanExplain().Running(input);
 }
 
-double DatasetProgressCallback(ClientContext&, const FunctionData*, const GlobalTableFunctionState* state) {
+double DatasetProgressCallback(ClientContext&, const FunctionData*, const GlobalTableFunctionState* state)
+{
     return DatasetScanExecutor().Progress(state);
 }
 
-unique_ptr<NodeStatistics> DatasetCardinalityCallback(ClientContext&, const FunctionData* bind_data) {
+unique_ptr<NodeStatistics> DatasetCardinalityCallback(ClientContext&, const FunctionData* bind_data)
+{
     return DatasetScanStateFactory().Cardinality(bind_data);
 }
 
-void RegisterRootLakeScan(ExtensionLoader& loader) {
+void RegisterRootLakeScan(ExtensionLoader& loader)
+{
     TableFunction function("read_root_dataset", {LogicalType::VARCHAR, LogicalType::VARCHAR}, DatasetScanCallback,
                            DatasetBindCallback, DatasetInitCallback, DatasetInitLocalCallback);
     function.named_parameters["dictionary"] = LogicalType::VARCHAR;
@@ -194,7 +216,6 @@ void RegisterRootLakeScan(ExtensionLoader& loader) {
     function.cardinality = DatasetCardinalityCallback;
     function.get_virtual_columns = DatasetVirtualColumns;
     loader.RegisterFunction(function);
-
     TableFunction stats("root_dataset_stats", {LogicalType::VARCHAR, LogicalType::VARCHAR}, DatasetStatsScan,
                         DatasetStatsBind, DatasetStatsInit);
     ConfigureCatalogParameters(stats);

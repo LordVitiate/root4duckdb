@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_DATASET_ROOT_DATASET_CATALOG_HPP
+#define ROOT4DUCKDB_DATASET_ROOT_DATASET_CATALOG_HPP
 
 #include "root4duckdb/reader/root_semantic_reader.hpp"
 
@@ -9,10 +10,12 @@
 #include <unordered_map>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Physical relations backing one committed dataset catalog.
-struct CatalogSources {
+struct CatalogSources
+{
     std::string files;
     std::string schemas;
     std::string access;
@@ -25,7 +28,8 @@ struct CatalogSources {
 };
 
 /// Resolved schema and access plan for one logical path.
-struct SchemaBinding {
+struct SchemaBinding
+{
     std::string schema_id;
     std::string column_id;
     std::string root_class;
@@ -36,7 +40,8 @@ struct SchemaBinding {
 };
 
 /// Compatible schema variants selected for a dataset scan.
-struct DatasetSchemaSet {
+struct DatasetSchemaSet
+{
     std::vector<SchemaBinding> schemas;
     std::unordered_map<std::string, idx_t> lookup;
     std::vector<std::string> index_names;
@@ -47,7 +52,8 @@ struct DatasetSchemaSet {
 std::string CatalogRelationSQL(const std::string& source, bool sql_tables);
 
 /// Resolves catalog visibility and typed access plans.
-class RootDatasetCatalog final {
+class RootDatasetCatalog final
+{
   public:
     RootDatasetCatalog(ClientContext& context, const std::string& catalog_path,
                        const named_parameter_map_t& parameters);
@@ -70,3 +76,5 @@ class RootDatasetCatalog final {
 };
 
 } // namespace duckdb::rootlake
+
+#endif

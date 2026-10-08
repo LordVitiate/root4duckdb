@@ -1,14 +1,22 @@
-#pragma once
+#ifndef ROOT4DUCKDB_READER_ROOT_PRIMITIVE_VALUE_HPP
+#define ROOT4DUCKDB_READER_ROOT_PRIMITIVE_VALUE_HPP
 
 #include <cstdint>
 #include <string>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-enum class RootPrimitiveKind : uint8_t { SIGNED, UNSIGNED, FLOATING };
+enum class RootPrimitiveKind : uint8_t
+{
+    SIGNED,
+    UNSIGNED,
+    FLOATING
+};
 
 /// Exact numeric transport shared by object and serialized readers.
-struct RootPrimitiveValue {
+struct RootPrimitiveValue
+{
     RootPrimitiveKind kind = RootPrimitiveKind::FLOATING;
     int64_t signed_value = 0;
     uint64_t unsigned_value = 0;
@@ -27,3 +35,5 @@ struct RootPrimitiveValue {
 };
 
 } // namespace duckdb::rootlake
+
+#endif

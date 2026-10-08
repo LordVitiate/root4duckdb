@@ -1,13 +1,16 @@
-#pragma once
+#ifndef ROOT4DUCKDB_INDEX_ROOT_BLOOM_HPP
+#define ROOT4DUCKDB_INDEX_ROOT_BLOOM_HPP
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Builds the self-describing Bloom payload used by index format 12.
-class RootBloomBuilder {
+class RootBloomBuilder
+{
   public:
     /// Configures the bounded adaptive Bloom payload.
     RootBloomBuilder(uint32_t max_payload_bytes, double false_positive_rate);
@@ -26,10 +29,13 @@ class RootBloomBuilder {
 };
 
 /// Reads optional Bloom metadata without risking false rejection.
-class RootBloomFilter {
+class RootBloomFilter
+{
   public:
     /// Returns true for matches and for unsupported payloads.
     static bool MayContain(const std::string& bytes, double value);
 };
 
 } // namespace duckdb::rootlake
+
+#endif

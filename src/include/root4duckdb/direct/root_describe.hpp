@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_DIRECT_ROOT_DESCRIBE_HPP
+#define ROOT4DUCKDB_DIRECT_ROOT_DESCRIBE_HPP
 
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -7,9 +8,12 @@
 #include <string>
 #include <vector>
 
-namespace duckdb {
+namespace duckdb
+{
 
 /// Registers metadata-only next-level semantic browsing.
 void RegisterRootDescribe(ExtensionLoader& loader);
 
 } // namespace duckdb
+
+#endif

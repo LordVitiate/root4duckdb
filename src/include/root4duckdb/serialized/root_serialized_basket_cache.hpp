@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_SERIALIZED_ROOT_SERIALIZED_BASKET_CACHE_HPP
+#define ROOT4DUCKDB_SERIALIZED_ROOT_SERIALIZED_BASKET_CACHE_HPP
 
 #include <cstddef>
 #include <cstdint>
@@ -7,10 +8,12 @@
 class TBranch;
 class TBasket;
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Physical metadata for the currently loaded basket.
-struct SerializedBasketInfo {
+struct SerializedBasketInfo
+{
     int32_t basket_number = -1;
     uint64_t entry_begin = 0;
     uint64_t entry_end = 0;
@@ -20,14 +23,9 @@ struct SerializedBasketInfo {
     uint32_t uncompressed_size = 0;
 };
 
-/// Worker-local cache for one physical ROOT branch basket.
-///
-/// Multiple logical projections of the same ROOT object commonly resolve to
-/// the same physical TBranch. Sharing this cache prevents each projection
-/// from independently dropping, loading and decompressing the same basket.
-/// The cache is intentionally worker-local: TBranch/TBasket state is never
-/// shared across DuckDB workers.
-class SerializedBasketCache {
+/// Worker-local physical basket cache shared by projections of one branch.
+class SerializedBasketCache
+{
   public:
     SerializedBasketCache();
     ~SerializedBasketCache() noexcept;
@@ -43,8 +41,7 @@ class SerializedBasketCache {
     TBranch* Branch() const noexcept;
 
   private:
-    bool LoadBasket(uint64_t entry, bool& loaded_new_basket, uint64_t& compressed_bytes,
-                    std::string& failure_reason);
+    bool LoadBasket(uint64_t entry, bool& loaded_new_basket, uint64_t& compressed_bytes, std::string& failure_reason);
 
     TBranch* branch = nullptr;
     TBasket* basket = nullptr;
@@ -55,3 +52,5 @@ class SerializedBasketCache {
 };
 
 } // namespace duckdb::rootlake
+
+#endif
