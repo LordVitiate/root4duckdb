@@ -70,14 +70,14 @@ void PushArrayCoordinates(uint64_t flat_index, const std::vector<uint32_t>& dime
         indices.push_back(static_cast<int32_t>(flat_index));
         return;
     }
-    std::vector<int32_t> coordinates(dimensions.size(), 0);
+    const auto base = indices.size();
+    indices.resize(base + dimensions.size());
     for (size_t reverse = dimensions.size(); reverse > 0; --reverse)
     {
         const size_t dim = reverse - 1;
-        coordinates[dim] = static_cast<int32_t>(flat_index % dimensions[dim]);
+        indices[base + dim] = static_cast<int32_t>(flat_index % dimensions[dim]);
         flat_index /= dimensions[dim];
     }
-    indices.insert(indices.end(), coordinates.begin(), coordinates.end());
 }
 
 struct ContainerAccess
