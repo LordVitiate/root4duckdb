@@ -307,28 +307,18 @@ void RootDatasetCatalog::ResolveCommittedSnapshot()
     Connection connection(*context.db);
     if (!sources.commits.empty())
     {
-        try
+        auto result =
+            connection.Query("SELECT s.snapshot_id FROM " + sources.snapshots + " s JOIN " + sources.commits +
+                             " c ON c.snapshot_id=s.snapshot_id WHERE s.state='COMMITTED' "
+                             "AND c.state='COMMITTED' AND s.index_version=" +
+                             std::to_string(ROOT_LAKE_INDEX_VERSION) + " ORDER BY c.committed_at_ns DESC LIMIT 1");
+        EnsureQueryOK(*result, "resolve committed ROOT dataset generation");
+        if (!result->RowCount())
         {
-            auto result =
-                connection.Query("SELECT s.snapshot_id FROM " + sources.snapshots + " s JOIN " + sources.commits +
-                                 " c ON c.snapshot_id=s.snapshot_id WHERE s.state='COMMITTED' "
-                                 "AND c.state='COMMITTED' AND s.index_version=" +
-                                 std::to_string(ROOT_LAKE_INDEX_VERSION) + " ORDER BY c.committed_at_ns DESC LIMIT 1");
-            EnsureQueryOK(*result, "resolve committed ROOT dataset generation");
-            if (result->RowCount())
-            {
-                sources.snapshot_id = result->GetValue(0, 0).ToString();
-                return;
-            }
             throw InvalidInputException("No fully committed ROOT dataset generation in " + sources.commits);
         }
-        catch (const InvalidInputException&)
-        {
-            throw;
-        }
-        catch (...)
-        {
-        }
+        sources.snapshot_id = result->GetValue(0, 0).ToString();
+        return;
     }
     auto result =
         connection.Query("SELECT snapshot_id FROM " + sources.snapshots +
