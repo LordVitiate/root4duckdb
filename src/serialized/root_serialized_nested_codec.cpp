@@ -439,20 +439,26 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
             failure_reason = "nested STL header exceeds the serialized entry";
             break;
         }
+        const auto* header = reinterpret_cast<const uint8_t*>(buffer.Buffer()) + current_position;
+        const uint16_t stored_version = serialized_codec::ReadBE16(header + 4);
+        constexpr uint16_t memberwise_mask = static_cast<uint16_t>(TBufferFile::kStreamedMemberWise);
+        // ROOT can resolve a dictionary/checksum version in ReadVersion; the
+        // encoding flag belongs to the *stored* STL header, not the resolved class.
+        const bool memberwise = (stored_version & memberwise_mask) != 0;
+        const uint16_t stl_version = static_cast<uint16_t>(stored_version & ~memberwise_mask);
         UInt_t start = 0;
         UInt_t byte_count = 0;
         const Version_t version = buffer.ReadVersion(&start, &byte_count, plan.nested_container_class);
         const Int_t decoded_position = buffer.Length();
         const uint64_t frame_end = static_cast<uint64_t>(start) + byte_count + 4;
-        const bool memberwise = (version & TBufferFile::kStreamedMemberWise) != 0;
-        const auto stl_version = static_cast<uint16_t>(version & ~TBufferFile::kStreamedMemberWise);
         if (outer == 0)
         {
             RootDebug("SERIALIZED.NESTED_FIXED_HEADER",
                       "path=" + plan.logical_path +
                           " cursor=" + std::to_string(current_position) +
-                          " version=" + std::to_string(version) +
-                          " memberwise_mask=" + std::to_string(TBufferFile::kStreamedMemberWise) +
+                          " stored_version=" + std::to_string(stored_version) +
+                          " resolved_version=" + std::to_string(version) +
+                          " memberwise_mask=" + std::to_string(memberwise_mask) +
                           " streamed_memberwise=" + std::to_string(memberwise) +
                           " frame_end=" + std::to_string(frame_end) +
                           " entry_size=" + std::to_string(entry_size) +
