@@ -678,6 +678,18 @@ unique_ptr<LocalTableFunctionState> RootScanStateFactory::CreateLocal(TableFunct
     auto& bind_data = input.bind_data->Cast<RootScanBindData>();
     auto& gstate = global_state_p->Cast<RootScanGlobalState>();
     auto local_state = make_uniq<RootScanLocalState>();
+    for (const auto column_index : gstate.scan_column_ids)
+    {
+        if (column_index == COLUMN_IDENTIFIER_ROW_ID || column_index >= bind_data.columns.size())
+        {
+            continue;
+        }
+        const auto& column = bind_data.columns[column_index];
+        if (!column.levels.empty() && !column.is_virtual_index && column.name != "entry_id")
+        {
+            local_state->projected_branch_columns[column.branch_name].push_back(column_index);
+        }
+    }
     if (!bind_data.IsEmptyMode() && !bind_data.IsBrowseMode() && !bind_data.IsHistogramMode() &&
         !bind_data.IsMultiFile())
     {
