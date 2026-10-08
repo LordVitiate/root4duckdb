@@ -15,7 +15,8 @@ namespace duckdb::rootlake
 bool IsSerializedNestedProjection(SerializedProjectionKind kind)
 {
     return kind == SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR ||
-           kind == SerializedProjectionKind::SELECTED_SUBTREE;
+           kind == SerializedProjectionKind::SELECTED_SUBTREE ||
+           kind == SerializedProjectionKind::NESTED_FIXED_MEMBER;
 }
 
 const char* SerializedProjectionName(SerializedProjectionKind kind)
@@ -34,6 +35,8 @@ const char* SerializedProjectionName(SerializedProjectionKind kind)
         return "root_selected_subtree";
     case SerializedProjectionKind::COLLECTION_BRANCH:
         return "collection_branch";
+    case SerializedProjectionKind::NESTED_FIXED_MEMBER:
+        return "nested_fixed_member";
     }
     return "unknown";
 }
@@ -59,6 +62,8 @@ bool SerializedReadPlan::Is(SerializedProjectionKind kind) const noexcept
         return std::holds_alternative<SerializedRootSubtreeProjection>(projection);
     case SerializedProjectionKind::COLLECTION_BRANCH:
         return std::holds_alternative<SerializedCollectionBranchProjection>(projection);
+    case SerializedProjectionKind::NESTED_FIXED_MEMBER:
+        return std::holds_alternative<SerializedNestedFixedProjection>(projection);
     }
     return false;
 }
@@ -68,7 +73,8 @@ SerializedProjectionKind SerializedReadPlan::Kind() const
     for (const auto kind :
          {SerializedProjectionKind::FIXED_MEMBER, SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR,
           SerializedProjectionKind::SELECTED_SUBTREE, SerializedProjectionKind::LEAF_BRANCH,
-          SerializedProjectionKind::ROOT_SELECTED_SUBTREE, SerializedProjectionKind::COLLECTION_BRANCH})
+          SerializedProjectionKind::ROOT_SELECTED_SUBTREE, SerializedProjectionKind::COLLECTION_BRANCH,
+          SerializedProjectionKind::NESTED_FIXED_MEMBER})
     {
         if (Is(kind))
         {
@@ -106,6 +112,9 @@ void SerializedReadPlan::Select(SerializedProjectionKind kind)
         return;
     case SerializedProjectionKind::COLLECTION_BRANCH:
         projection.emplace<SerializedCollectionBranchProjection>();
+        return;
+    case SerializedProjectionKind::NESTED_FIXED_MEMBER:
+        projection.emplace<SerializedNestedFixedProjection>();
         return;
     }
 }
