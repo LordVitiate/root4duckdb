@@ -158,49 +158,6 @@ static int is_root_runtime_library(const char* path)
     return 0;
 }
 
-
-static int loaded_jvm_callback(struct dl_phdr_info* info, size_t size, void* opaque)
-{
-    int* found = (int*)opaque;
-    (void)size;
-
-    if (info && info->dlpi_name && strcmp(base_name(info->dlpi_name), "libjvm.so") == 0)
-    {
-        *found = 1;
-        return 1;
-    }
-
-    return 0;
-}
-
-static int verify_jvm_signal_chaining(char* error, size_t error_size)
-{
-    int jvm_loaded = 0;
-    Dl_info owner;
-    void* signal_symbol;
-    const char* override = getenv("ROOT4DUCKDB_ALLOW_UNCHAINED_JVM");
-
-    (void)dl_iterate_phdr(loaded_jvm_callback, &jvm_loaded);
-    if (!jvm_loaded || (override && strcmp(override, "1") == 0))
-    {
-        return 1;
-    }
-
-    memset(&owner, 0, sizeof(owner));
-    signal_symbol = dlsym(RTLD_DEFAULT, "sigaction");
-    if (signal_symbol && dladdr(signal_symbol, &owner) != 0 &&
-        starts_with(base_name(owner.dli_fname), "libjsig.so"))
-    {
-        return 1;
-    }
-
-    set_message(error, error_size,
-                "JVM detected without active libjsig.so signal chaining. "
-                "Preload $JAVA_HOME/lib/libjsig.so via LD_PRELOAD before starting Java. "
-                "Use ROOT4DUCKDB_ALLOW_UNCHAINED_JVM=1 only if the host manages signals independently.");
-    return 0;
-}
-
 static int canonical_path(const char* path, char* out, size_t out_size, char* error, size_t error_size)
 {
 
@@ -969,11 +926,6 @@ static int load_embedded_payload(char* error, size_t error_size)
 
 static int initialize_runtime(char* error, size_t error_size)
 {
-
-    if (!verify_jvm_signal_chaining(error, error_size))
-    {
-        return 0;
-    }
 
     bootstrap_trace("before ROOT runtime load");
     if (!load_root_runtime(error, error_size))
