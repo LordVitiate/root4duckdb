@@ -45,7 +45,9 @@ enum class SerializedProjectionKind : uint8_t
     /// Member-wise actions over an unsplit top-level branch or one standalone inline-object member branch.
     ROOT_SELECTED_SUBTREE = 4,
     /// One self-contained split STL member decoded into a private root scratch object.
-    COLLECTION_BRANCH = 5
+    COLLECTION_BRANCH = 5,
+    // Opt-in byte-offset decoder for nested vector<object>/vector<object>/fixed primitive.
+    NESTED_FIXED_MEMBER = 6
 };
 
 /// Parses and formats reader and projection modes.
@@ -78,11 +80,14 @@ struct SerializedRootSubtreeProjection
 struct SerializedCollectionBranchProjection
 {
 };
+struct SerializedNestedFixedProjection
+{
+};
 
 using SerializedProjectionState =
     std::variant<SerializedPlanRejected, SerializedFixedProjection, SerializedNestedPrimitiveProjection,
                  SerializedSelectedSubtreeProjection, SerializedLeafBranchProjection, SerializedRootSubtreeProjection,
-                 SerializedCollectionBranchProjection>;
+                 SerializedCollectionBranchProjection, SerializedNestedFixedProjection>;
 
 /// Conservative plan for decoding one physical basket projection.
 struct SerializedReadPlan
@@ -99,6 +104,9 @@ struct SerializedReadPlan
     // Loaded dictionaries own these pointers; ROOT resolves variable-width prefixes.
     TClass* outer_container_class = nullptr;
     TClass* outer_element_class = nullptr;
+    TClass* nested_container_class = nullptr;
+    TClass* nested_element_class = nullptr;
+    std::string nested_member_name;
     TClass* scratch_class = nullptr;
     std::vector<int> prefix_element_ids;
     std::vector<int> root_action_ids;
@@ -140,6 +148,16 @@ bool ResolveSerializedNestedVersion(const SerializedReadPlan& plan, int32_t elem
 /// Rebuilds a fixed primitive projection from the on-file element version.
 bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
                                   SerializedEntryLayout& resolved_layout, std::string& failure_reason);
+
+/// Calculates the versioned offset of a nested fixed member using the fixed-member validator.
+bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
+                                        SerializedEntryLayout& resolved_layout, std::string& failure_reason);
+
+/// Reads a nested member-wise vector directly by checked serialized byte offsets.
+bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedReadPlan& plan, size_t entry_size,
+                                       uint64_t outer_count, uint64_t max_values_per_entry,
+                                       std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
+                                       std::string& failure_reason, bool collect_indices);
 
 /// Lets ROOT consume selected member-wise prefix actions.
 bool ConsumeSerializedSelectedMembers(TBufferFile& buffer, const SerializedReadPlan& plan, int32_t element_version,
