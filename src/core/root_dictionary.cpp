@@ -8,6 +8,7 @@
 #include "duckdb/main/client_context.hpp"
 
 #include <dlfcn.h>
+#include <link.h>
 #include <mutex>
 #include <set>
 
@@ -28,15 +29,27 @@ std::set<std::string>& LoadedDictionaryPaths()
     return paths;
 }
 
+int LocateRootCoreLibrary(dl_phdr_info* info, size_t, void* context)
+{
+    if (!info || !info->dlpi_name || !*info->dlpi_name)
+    {
+        return 0;
+    }
+    const std::string path(info->dlpi_name);
+    const auto separator = path.find_last_of('/');
+    const std::string name = path.substr(separator == std::string::npos ? 0 : separator + 1);
+    if (name != "libCore.so" && name.rfind("libCore.so.", 0) != 0)
+    {
+        return 0;
+    }
+    *static_cast<std::string*>(context) = path;
+    return 1;
+}
+
 bool LoadRootGeometryDependency(std::string& error)
 {
-    Dl_info root_info{};
-    if (!dladdr(static_cast<const void*>(&gROOT), &root_info) || !root_info.dli_fname)
-    {
-        error = "cannot locate the loaded ROOT libCore.so";
-        return false;
-    }
-    const std::string root_library(root_info.dli_fname);
+    std::string root_library;
+    dl_iterate_phdr(LocateRootCoreLibrary, &root_library);
     const auto separator = root_library.find_last_of('/');
     if (separator == std::string::npos)
     {
