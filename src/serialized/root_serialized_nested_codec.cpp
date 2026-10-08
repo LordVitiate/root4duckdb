@@ -452,6 +452,7 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
                       "path=" + plan.logical_path +
                           " cursor=" + std::to_string(current_position) +
                           " version=" + std::to_string(version) +
+                          " memberwise_mask=" + std::to_string(TBufferFile::kStreamedMemberWise) +
                           " streamed_memberwise=" + std::to_string(memberwise) +
                           " frame_end=" + std::to_string(frame_end) +
                           " entry_size=" + std::to_string(entry_size) +
