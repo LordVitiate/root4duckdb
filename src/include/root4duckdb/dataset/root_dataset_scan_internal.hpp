@@ -231,6 +231,7 @@ class DatasetTaskPlanner final
     void PlanMetadataCount(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global) const;
 
   private:
+    void ValidateFreshIndex(ClientContext& context, const DatasetBindData& bind) const;
     void BuildFileTaskGroups(DatasetGlobalState& global) const;
 };
 
