@@ -91,8 +91,12 @@ bool Load(const std::string& path, bool detailed_debug)
     // Keep the handle alive for the process lifetime: ROOT stores class
     // metadata and collection proxies that refer to code in this library.
     // Never dlclose a dictionary while ROOT may still reference its classes.
+    // External experiment dictionaries may refer to optional reconstruction functions.
+    // Resolve functions when used; data decoding needs their class registration, not
+    // every external function in the experiment software. Data-symbol relocations
+    // still resolve immediately and genuinely missing functions remain unusable.
     dlerror();
-    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    void* handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
     if (!handle)
     {
         const char* message = dlerror();
@@ -106,7 +110,7 @@ bool Load(const std::string& path, bool detailed_debug)
                                   "; " + dependency_error);
             }
             dlerror();
-            handle = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+            handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
         }
         if (!handle)
         {
