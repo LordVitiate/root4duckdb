@@ -1,7 +1,7 @@
 #include "root4duckdb/dataset/root_dataset_pruning.hpp"
 
 #include <cerrno>
-#include <cstring>
+#include <system_error>
 
 namespace duckdb::rootlake
 {
@@ -80,7 +80,7 @@ void DatasetTaskPlanner::ValidateFreshIndex(ClientContext& context, const Datase
         {
             const int saved_errno = errno;
             throw IOException("Cannot verify ROOT index freshness for " + root_uri + ": " +
-                              std::strerror(saved_errno) +
+                              std::generic_category().message(saved_errno) +
                               " (use require_fresh_index := false only to accept an unverified index)");
         }
         if (current_stat.st_size < 0 ||
