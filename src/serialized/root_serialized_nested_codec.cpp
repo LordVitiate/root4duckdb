@@ -4,6 +4,7 @@
 #include "root4duckdb/serialized/root_serialized_reader.hpp"
 #include "root4duckdb/core/root_headers.hpp"
 
+#include <algorithm>
 #include <limits>
 
 namespace duckdb::rootlake
@@ -258,8 +259,8 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
         const uint64_t count = static_cast<uint32_t>(signed_count);
         if (count > max_values_per_entry / plan.fixed_array_length ||
             count * plan.fixed_array_length > max_values_per_entry - values.size() ||
-            inner_layout.bytes_before_value_per_element > 0 &&
-                count > std::numeric_limits<uint64_t>::max() / inner_layout.bytes_before_value_per_element)
+            (inner_layout.bytes_before_value_per_element > 0 &&
+             count > std::numeric_limits<uint64_t>::max() / inner_layout.bytes_before_value_per_element))
         {
             failure_reason = "nested fixed value count or prefix exceeds safety limits";
             values.clear();
