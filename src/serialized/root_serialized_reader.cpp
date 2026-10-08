@@ -498,6 +498,11 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
             return CollectSerializedSelectedSubtree(plan, outer_collection_scratch, max_values_per_entry, values,
                                                     flat_indices, failure_reason, collect_indices);
         }
+        if (plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER))
+        {
+            return DecodeSerializedNestedFixedColumn(buffer, plan, entry_size, outer_count, max_values_per_entry,
+                                                     values, flat_indices, failure_reason, collect_indices);
+        }
         const Int_t root_offset = buffer.Length();
         if (root_offset < 0 || static_cast<size_t>(root_offset) > entry_size)
         {
