@@ -248,7 +248,8 @@ void RootScanExecutor::ProcessPrimitiveTree(ClientContext& context, const RootSc
         {
             if (tree->GetEntry(static_cast<Long64_t>(entry)) < 0)
             {
-                break;
+                throw IOException("ROOT TTree::GetEntry failed in " + lstate.file_task.path +
+                                  " at entry " + std::to_string(entry));
             }
         }
         if (!PassesPrimitiveTreeFilters(context, bind_data, gstate, lstate, entry))
@@ -380,9 +381,14 @@ void RootScanExecutor::ProcessDirectBranch(ClientContext& context, const RootSca
         // Bare primitive-branch compatibility only.  Even here the entry is loaded
         // through TTree so no physical branch becomes an alternative semantic reader.
         auto* direct_tree = lstate.root_file.GetTTree();
-        if (!direct_tree || direct_tree->GetEntry(static_cast<Long64_t>(entry)) < 0)
+        if (!direct_tree)
         {
-            break;
+            throw InternalException("ROOT TTree is unavailable for direct branch scan");
+        }
+        if (direct_tree->GetEntry(static_cast<Long64_t>(entry)) < 0)
+        {
+            throw IOException("ROOT TTree::GetEntry failed in " + lstate.file_task.path +
+                              " at entry " + std::to_string(entry));
         }
         const auto val = rootlake::RootPrimitiveValue::FromPointer(lstate.direct_leaf->GetValuePointer(),
                                                                    direct_mode->branch.type_name);
