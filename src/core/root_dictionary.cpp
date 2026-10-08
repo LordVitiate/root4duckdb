@@ -9,6 +9,7 @@
 
 #include <dlfcn.h>
 #include <mutex>
+#include <set>
 
 namespace duckdb::rootlake
 {
@@ -19,6 +20,12 @@ std::mutex& DictionaryMutex()
 {
     static std::mutex mutex;
     return mutex;
+}
+
+std::set<std::string>& LoadedDictionaryPaths()
+{
+    static std::set<std::string> paths;
+    return paths;
 }
 
 bool Load(const std::string& path, bool detailed_debug)
@@ -32,6 +39,10 @@ bool Load(const std::string& path, bool detailed_debug)
         RootDebug("DICT.MUTEX_WAIT", "path=" + path);
     }
     const std::lock_guard<std::mutex> lock(DictionaryMutex());
+    if (LoadedDictionaryPaths().contains(path))
+    {
+        return true;
+    }
     if (detailed_debug)
     {
         RootDebug("DICT.BEFORE_LOAD", "path=" + path);
@@ -48,6 +59,7 @@ bool Load(const std::string& path, bool detailed_debug)
         throw IOException("Failed to load ROOT dictionary " + path + ": " +
                           (message ? std::string(message) : std::string("dynamic loader error")));
     }
+    LoadedDictionaryPaths().insert(path);
     if (detailed_debug)
     {
         RootDebug("DICT.AFTER_LOAD", "path=" + path + " result=ok");
