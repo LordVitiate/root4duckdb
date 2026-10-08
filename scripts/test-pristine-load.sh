@@ -73,7 +73,7 @@ if ! grep -Fxq 'true' "$LOG"; then
 fi
 
 if grep -Eq \
-  'fatal error:|Fatal in <|Error in <UnknownClass::FindDynamicLibrary>|CheckABICompatibility|Possible C\\+\\+ standard library mismatch' \
+  'fatal error:|Fatal in <|Error in <UnknownClass::FindDynamicLibrary>|CheckABICompatibility|Possible C\+\+ standard library mismatch' \
   "$LOG"; then
   echo '[FAIL] ROOT/Cling reported an initialization or compiler error' >&2
   rc=1
