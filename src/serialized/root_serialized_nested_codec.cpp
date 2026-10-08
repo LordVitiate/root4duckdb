@@ -341,68 +341,94 @@ bool DecodeNestedObjectWise(TBufferFile& buffer, const SerializedReadPlan& plan,
 }
 
 bool DecodeNestedMemberWise(TBufferFile& buffer, const SerializedReadPlan& plan, uint64_t frame_end,
-                            uint64_t outer, uint64_t max_values_per_entry,
+                            uint64_t outer_count, uint64_t max_values_per_entry,
                             SerializedPrimitiveKind primitive_kind, std::vector<RootPrimitiveValue>& values,
                             std::vector<int32_t>& flat_indices, std::string& failure_reason, bool collect_indices)
 {
+    // An STL array streamed by ROOT has ONE framed version/header for the
+    // entire outer vector's selected member. Each outer element then carries
+    // its own element count followed by member-wise PaTPar columns.
     const Version_t element_version = buffer.ReadVersionForMemberWise(plan.nested_element_class);
     SerializedEntryLayout layout;
     if (!ResolveSerializedNestedFixedLayout(plan, element_version, layout, failure_reason))
     {
         return false;
     }
-    const Int_t count_position = buffer.Length();
-    if (count_position < 0 || static_cast<uint64_t>(count_position) > frame_end ||
-        frame_end - static_cast<uint64_t>(count_position) < 4)
+    uint64_t element_stride = 0;
+    if (!ResolveSerializedNestedMemberWiseStride(plan, element_version, element_stride, failure_reason))
     {
-        failure_reason = "member-wise nested STL count is outside its frame";
         return false;
     }
-    Int_t signed_count = -1;
-    buffer.ReadInt(signed_count);
-    if (signed_count < 0 || static_cast<uint64_t>(signed_count) > max_values_per_entry / plan.fixed_array_length ||
-        static_cast<uint64_t>(signed_count) * plan.fixed_array_length > max_values_per_entry - values.size())
+    if (!layout.value_bytes ||
+        plan.fixed_array_length > std::numeric_limits<uint64_t>::max() / layout.value_bytes)
     {
-        failure_reason = "member-wise nested STL count exceeds configured value limits";
+        failure_reason = "nested member-wise projected array size overflows";
         return false;
     }
-    const uint64_t count = static_cast<uint32_t>(signed_count);
-    const uint64_t prefix_width = layout.bytes_before_value_per_element;
-    if ((prefix_width && count > std::numeric_limits<uint64_t>::max() / prefix_width) ||
-        !layout.value_bytes || count > std::numeric_limits<uint64_t>::max() / plan.fixed_array_length)
+    const uint64_t projected_width = plan.fixed_array_length * layout.value_bytes;
+    if (layout.bytes_before_value_per_element > element_stride ||
+        projected_width > element_stride - layout.bytes_before_value_per_element)
     {
-        failure_reason = "member-wise nested column width overflow";
+        failure_reason = "nested member-wise projected field lies outside the complete element layout";
         return false;
     }
-    const uint64_t column_values = count * plan.fixed_array_length;
-    if (column_values > std::numeric_limits<uint64_t>::max() / layout.value_bytes)
+    if (outer_count > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
     {
-        failure_reason = "member-wise nested value width overflow";
+        failure_reason = "nested member-wise outer count exceeds index limits";
         return false;
     }
-    const uint64_t prefix_bytes = count * prefix_width;
-    const uint64_t value_bytes = column_values * layout.value_bytes;
-    const Int_t cursor = buffer.Length();
-    if (cursor < 0 || static_cast<uint64_t>(cursor) > frame_end ||
-        prefix_bytes > frame_end - static_cast<uint64_t>(cursor) ||
-        value_bytes > frame_end - static_cast<uint64_t>(cursor) - prefix_bytes)
-    {
-        failure_reason = "member-wise nested values exceed their container frame";
-        return false;
-    }
-    const uint64_t payload = static_cast<uint64_t>(cursor) + prefix_bytes;
+
     const auto* bytes = reinterpret_cast<const uint8_t*>(buffer.Buffer());
-    for (uint64_t inner = 0; inner < count; ++inner)
+    for (uint64_t outer = 0; outer < outer_count; ++outer)
     {
-        if (!AppendNestedFixedValues(bytes, frame_end,
-                                     payload + inner * plan.fixed_array_length * layout.value_bytes,
-                                     outer, inner, plan, layout, primitive_kind, max_values_per_entry,
-                                     values, flat_indices, failure_reason, collect_indices))
+        const Int_t count_position = buffer.Length();
+        if (count_position < 0 || static_cast<uint64_t>(count_position) > frame_end ||
+            frame_end - static_cast<uint64_t>(count_position) < 4)
         {
+            failure_reason = "nested member-wise STL count is outside its frame";
             return false;
         }
+        Int_t signed_count = -1;
+        buffer.ReadInt(signed_count);
+        if (signed_count < 0 || static_cast<uint64_t>(signed_count) > max_values_per_entry / plan.fixed_array_length ||
+            static_cast<uint64_t>(signed_count) * plan.fixed_array_length > max_values_per_entry - values.size())
+        {
+            failure_reason = "nested member-wise STL count exceeds configured limits";
+            return false;
+        }
+        const uint64_t count = static_cast<uint32_t>(signed_count);
+        const Int_t data_position = buffer.Length();
+        if (data_position < 0 || static_cast<uint64_t>(data_position) > frame_end ||
+            (element_stride && count > (frame_end - static_cast<uint64_t>(data_position)) / element_stride))
+        {
+            failure_reason = "nested member-wise STL columns exceed their container frame";
+            return false;
+        }
+        const uint64_t body_start = static_cast<uint64_t>(data_position);
+        const uint64_t body_end = body_start + count * element_stride;
+        const uint64_t payload_start = body_start + count * layout.bytes_before_value_per_element;
+        if (count > 0 && (projected_width > (body_end - payload_start) / count))
+        {
+            failure_reason = "nested member-wise projected column exceeds its container body";
+            return false;
+        }
+        for (uint64_t inner = 0; inner < count; ++inner)
+        {
+            if (!AppendNestedFixedValues(bytes, body_end,
+                                         payload_start + inner * projected_width, outer, inner, plan, layout,
+                                         primitive_kind, max_values_per_entry, values, flat_indices,
+                                         failure_reason, collect_indices))
+            {
+                return false;
+            }
+        }
+        buffer.SetBufferOffset(static_cast<Int_t>(body_end));
     }
-    buffer.SetBufferOffset(static_cast<Int_t>(frame_end));
+    if (static_cast<uint64_t>(buffer.Length()) != frame_end)
+    {
+        failure_reason = "nested member-wise array does not consume its declared STL frame";
+        return false;
+    }
     return true;
 }
 
@@ -473,7 +499,7 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
         bool decoded = false;
         if (memberwise && stl_version >= 8)
         {
-            decoded = DecodeNestedMemberWise(buffer, plan, frame_end, outer, max_values_per_entry,
+            decoded = DecodeNestedMemberWise(buffer, plan, frame_end, outer_count, max_values_per_entry,
                                              primitive_kind, values, flat_indices, failure_reason, collect_indices);
         }
         else if (!memberwise && stl_version == 9)
@@ -487,6 +513,12 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
                              (memberwise ? " (member-wise)" : " (object-wise)");
         }
         if (!decoded)
+        {
+            break;
+        }
+        // A member-wise STL array contains ALL outer elements inside the
+        // single versioned frame. Do not parse another header after it.
+        if (memberwise)
         {
             break;
         }
