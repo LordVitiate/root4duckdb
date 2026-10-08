@@ -559,20 +559,15 @@ FROM read_root(
     path_prefix := '/TestEvent'
 );
 SQL
-if ! MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
     < "$WORK_DIR/direct-missing-input.sql" > "$WORK_DIR/direct-missing-input.log" 2>&1; then
-    echo "multi-file direct scan failed instead of skipping an unavailable input" >&2
+    echo "multi-file direct scan silently accepted an unavailable required input" >&2
     cat "$WORK_DIR/direct-missing-input.log" >&2
     exit 1
 fi
-if ! grep -q "\[ROOT4DUCKDB\]\[WARN\]\[ROOT_FILE_UNAVAILABLE\].*missing.root" \
+if ! grep -q 'Required ROOT input is unavailable:.*missing.root' \
     "$WORK_DIR/direct-missing-input.log"; then
-    echo "multi-file missing-input warning was not emitted" >&2
-    cat "$WORK_DIR/direct-missing-input.log" >&2
-    exit 1
-fi
-if ! grep -q '^303$' "$WORK_DIR/direct-missing-input.log"; then
-    echo "multi-file missing-input scan did not preserve the readable-file result" >&2
+    echo "multi-file missing-input failure was not propagated" >&2
     cat "$WORK_DIR/direct-missing-input.log" >&2
     exit 1
 fi
@@ -1292,6 +1287,69 @@ PATH_PREDICATE_INDEXES="$(profile_metric 'Path Predicate Indexes' <<<"$PUBLICATI
 PREDICATE_INTERSECTIONS="$(profile_metric 'Predicate Intersections' <<<"$PUBLICATION_RESULT" || true)"
 if [[ "$PATH_PREDICATE_INDEXES" != "2" || "$PREDICATE_INTERSECTIONS" != "1" ]]; then
     echo "multi-path predicate intersection metrics are absent: $PUBLICATION_RESULT" >&2
+    exit 1
+fi
+
+# Freshness must be checked before pruning (including Bloom pruning) and
+# before the metadata-only COUNT(*) fast path. Modify only a generated fixture
+# after all ordinary index tests have completed.
+touch -m -d '2030-01-01 00:00:00 UTC' "$WORK_DIR/data/a.root"
+
+cat > "$WORK_DIR/stale-index-count.sql" <<SQL
+LOAD parquet;
+SELECT count(*)
+FROM read_root_dataset(
+    '$WORK_DIR/index',
+    '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+SQL
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+    < "$WORK_DIR/stale-index-count.sql" > "$WORK_DIR/stale-index-count.log" 2>&1; then
+    echo "COUNT(*) accepted stale ROOT index metadata" >&2
+    exit 1
+fi
+if ! grep -q 'ROOT file mtime changed after indexing' "$WORK_DIR/stale-index-count.log"; then
+    echo "stale COUNT(*) failed for an unexpected reason" >&2
+    cat "$WORK_DIR/stale-index-count.log" >&2
+    exit 1
+fi
+
+cat > "$WORK_DIR/stale-index-pruning.sql" <<SQL
+LOAD parquet;
+SELECT count(*)
+FROM read_root_dataset(
+    '$WORK_DIR/index',
+    '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so'
+)
+WHERE value IN (-999999.0);
+SQL
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+    < "$WORK_DIR/stale-index-pruning.sql" > "$WORK_DIR/stale-index-pruning.log" 2>&1; then
+    echo "pruned dataset scan accepted stale ROOT index metadata" >&2
+    exit 1
+fi
+if ! grep -q 'ROOT file mtime changed after indexing' "$WORK_DIR/stale-index-pruning.log"; then
+    echo "stale pruning scan failed for an unexpected reason" >&2
+    cat "$WORK_DIR/stale-index-pruning.log" >&2
+    exit 1
+fi
+
+# Explicit opt-out remains available for intentional use of stored metadata.
+STALE_OVERRIDE_RESULT="$("$DUCKDB_BIN" -csv -noheader :memory: <<SQL
+LOAD parquet;
+SELECT count(*) = 11
+FROM read_root_dataset(
+    '$WORK_DIR/index',
+    '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    require_fresh_index := false
+);
+SQL
+)"
+if [[ "$STALE_OVERRIDE_RESULT" != "true" ]]; then
+    echo "explicit require_fresh_index := false did not preserve metadata COUNT(*)" >&2
     exit 1
 fi
 
