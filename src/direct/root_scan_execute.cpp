@@ -217,7 +217,7 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
             }
         }
     }
-    if (branch_columns.empty() && lstate.has_container_columns)
+    if (lstate.projected_branch_columns.empty() && lstate.has_container_columns)
     {
         idx_t sample_col_idx = DConstants::INVALID_INDEX;
         std::string sample_branch;
