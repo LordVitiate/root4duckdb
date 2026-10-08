@@ -20,24 +20,17 @@ std::string ReadRootString(void* pointer, const std::string& raw_type)
     {
         return {};
     }
-    try
+    if (TrimType(raw_type) == "TString")
     {
-        if (TrimType(raw_type) == "TString")
+        const auto* value = static_cast<const TString*>(pointer);
+        const auto length = value->Length();
+        if (length < 0)
         {
-            auto* value = static_cast<TString*>(pointer);
-            const auto length = value->Length();
-            if (length < 0)
-            {
-                throw IOException("ROOT TString reported a negative length");
-            }
-            return std::string(value->Data(), static_cast<std::string::size_type>(length));
+            throw IOException("ROOT TString reported a negative length");
         }
-        return *reinterpret_cast<std::string*>(pointer);
+        return std::string(value->Data(), static_cast<std::string::size_type>(length));
     }
-    catch (...)
-    {
-        return TrimType(raw_type) == "TString" ? "<tstring_error>" : "<string_error>";
-    }
+    return *static_cast<const std::string*>(pointer);
 }
 
 int32_t CheckedContainerIndex(size_t index)
