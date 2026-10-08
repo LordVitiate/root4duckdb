@@ -25,9 +25,9 @@ static uint64_t CanonicalDoubleHash(double value)
     uint64_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
     bits ^= bits >> 33U;
-    bits *= 0xff51afd7ed558ccdULL;
+    bits *= 0xFF51AFD7ED558CCDULL;
     bits ^= bits >> 33U;
-    bits *= 0xc4ceb9fe1a85ec53ULL;
+    bits *= 0xC4CEB9FE1A85EC53ULL;
     bits ^= bits >> 33U;
     return bits;
 }
@@ -35,24 +35,24 @@ static uint64_t CanonicalDoubleHash(double value)
 static uint64_t Mix64(uint64_t value)
 {
     value ^= value >> 30;
-    value *= 0xbf58476d1ce4e5b9ULL;
+    value *= 0xBF58476D1CE4E5B9ULL;
     value ^= value >> 27;
-    value *= 0x94d049bb133111ebULL;
+    value *= 0x94D049BB133111EBULL;
     value ^= value >> 31;
     return value;
 }
 
 static void AppendUInt16(std::string& out, uint16_t value)
 {
-    out.push_back(static_cast<char>(value & 0xff));
-    out.push_back(static_cast<char>((value >> 8) & 0xff));
+    out.push_back(static_cast<char>(value & 0xFF));
+    out.push_back(static_cast<char>((value >> 8) & 0xFF));
 }
 
 static void AppendUInt64(std::string& out, uint64_t value)
 {
     for (size_t i = 0; i < 8; ++i)
     {
-        out.push_back(static_cast<char>((value >> (8 * i)) & 0xff));
+        out.push_back(static_cast<char>((value >> (8 * i)) & 0xFF));
     }
 }
 
@@ -126,7 +126,7 @@ std::string RootBloomBuilder::SerializeAndRelease()
     };
     for (const auto h1 : hashes)
     {
-        const auto h2 = Mix64(h1 ^ 0x9e3779b97f4a7c15ULL) | 1ULL;
+        const auto h2 = Mix64(h1 ^ 0x9E3779B97F4A7C15ULL) | 1ULL;
         for (uint8_t i = 0; i < hash_count; ++i)
         {
             set_bit((h1 + static_cast<uint64_t>(i) * h2) % effective_bits);
@@ -156,7 +156,7 @@ bool RootBloomFilter::MayContain(const std::string& bytes, double value)
         return true;
     }
     const auto h1 = CanonicalDoubleHash(value);
-    const auto h2 = Mix64(h1 ^ 0x9e3779b97f4a7c15ULL) | 1ULL;
+    const auto h2 = Mix64(h1 ^ 0x9E3779B97F4A7C15ULL) | 1ULL;
     for (uint8_t i = 0; i < hash_count; ++i)
     {
         const auto bit = (h1 + static_cast<uint64_t>(i) * h2) % bit_count;

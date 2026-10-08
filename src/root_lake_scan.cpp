@@ -51,7 +51,7 @@ static unique_ptr<FunctionData> DatasetStatsBind(ClientContext& context, TableFu
 {
     const auto catalog_path = input.inputs[0].ToString();
     const auto logical_path = NormalizePath(input.inputs[1].ToString());
-    RootDatasetCatalog catalog(context, catalog_path, input.named_parameters);
+    const RootDatasetCatalog catalog(context, catalog_path, input.named_parameters);
     const auto& sources = catalog.Sources();
     const auto files_relation = CatalogRelationSQL(sources.files, sources.sql_tables);
     const auto schemas_relation = CatalogRelationSQL(sources.schemas, sources.sql_tables);

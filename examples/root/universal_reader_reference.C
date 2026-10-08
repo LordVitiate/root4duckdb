@@ -52,7 +52,7 @@ struct ReadResult
     std::vector<Long64_t> event_ids;
     std::vector<std::vector<int>> vector_indices;
     std::vector<std::string> vector_names;
-    std::string source_path; // 🔧 Для отладки и заголовков
+    std::string source_path;
 
     size_t size() const
     {
@@ -73,7 +73,6 @@ struct ReadResult
         source_path.clear();
     }
 
-    // Сигнатура для группировки: "vecTrack_idx" или "vecTrack_idx,vecTPar_idx"
     std::string index_signature() const
     {
         std::string sig;
@@ -158,7 +157,6 @@ class PathParser
         return result;
     }
 
-    // Парсинг списка путей через запятую
     static std::vector<std::string> split_paths(const std::string& query)
     {
         std::vector<std::string> paths;
@@ -350,7 +348,6 @@ class ValueReader
 
         bool is_last = (level_idx == levels.size() - 1);
 
-        // 1. Контейнер примитивов на последнем уровне → разворачиваем
         if (is_last && lvl.is_container)
         {
             auto* proxy = lvl.klass ? lvl.klass->GetCollectionProxy() : nullptr;
@@ -400,7 +397,6 @@ class ValueReader
             return;
         }
 
-        // 2. Обычный лист
         if (is_last)
         {
             if (lvl.is_primitive)
@@ -414,7 +410,6 @@ class ValueReader
             return;
         }
 
-        // 3. Контейнер объектов → рекурсия
         if (lvl.is_container)
         {
             if (!lvl.klass || !lvl.klass->HasDictionary())
@@ -446,7 +441,6 @@ class ValueReader
             return;
         }
 
-        // 4. Вложенный объект
         if (lvl.klass)
         {
             collect_recursive(field_ptr, levels, level_idx + 1, max_values, evt_id, current_indices, vec_names, out);
@@ -538,7 +532,7 @@ class ResultMerger
     {
         Long64_t event_id;
         std::vector<int> indices;
-        std::vector<std::string> index_names;                    // 🔧 ДОБАВЛЕНО
+        std::vector<std::string> index_names;
         std::vector<std::pair<std::string, std::string>> values; // (column_name, value_str)
     };
 
@@ -562,14 +556,12 @@ class ResultMerger
             return {};
         }
 
-        // Берём имена индексов из первого результата
         std::vector<std::string> index_names;
         if (!results[0].vector_names.empty())
         {
             index_names = results[0].vector_names;
         }
 
-        // Ключ: (event_id, "idx1:idx2:...") → строка
         std::map<std::pair<Long64_t, std::string>, MergedRow> rows;
 
         for (const auto& res : results)
@@ -577,7 +569,6 @@ class ResultMerger
             std::string col_name = extract_leaf_name(res.source_path);
             for (size_t i = 0; i < res.size(); ++i)
             {
-                // Ключ по индексам
                 std::string idx_key;
                 for (int idx : res.vector_indices[i])
                 {
@@ -585,13 +576,11 @@ class ResultMerger
                 }
                 auto key = std::make_pair(res.event_ids[i], idx_key);
 
-                // Создаём строку если нет
                 if (rows.find(key) == rows.end())
                 {
                     rows[key] = {res.event_ids[i], res.vector_indices[i], index_names, {}};
                 }
 
-                // Форматируем значение
                 std::string val = res.is_string_flag[i] ? ("\"" + res.strings[i] + "\"")
                                                         : (res.numbers[i] == static_cast<long long>(res.numbers[i])
                                                                ? std::to_string(static_cast<long long>(res.numbers[i]))
@@ -600,7 +589,6 @@ class ResultMerger
             }
         }
 
-        // Собираем выход и сортируем колонки
         std::vector<MergedRow> out;
         for (auto& [_, row] : rows)
         {
@@ -623,7 +611,6 @@ class ResultMerger
 
         std::cout << "\n📋 Merged table (signature: \"" << signature << "\"):\n";
 
-        // Заголовок
         std::cout << "| event_id";
         for (const auto& in : rows[0].index_names)
         {
@@ -635,7 +622,6 @@ class ResultMerger
         }
         std::cout << " |\n";
 
-        // Разделитель
         std::cout << "| :---";
         for (size_t i = 0; i < rows[0].index_names.size(); ++i)
         {
@@ -647,7 +633,6 @@ class ResultMerger
         }
         std::cout << " |\n";
 
-        // Данные
         Long64_t printed = 0;
         for (const auto& row : rows)
         {
@@ -945,7 +930,6 @@ class UniversalReader
             return;
         }
 
-        // Список путей или листинг
         if (query_paths_.empty() || query_paths_ == "*")
         {
             PathExplorer::print_all_paths(file.get());
@@ -963,7 +947,6 @@ class UniversalReader
         std::cout << " Paths: " << query_paths_ << "\n";
         std::cout << "══════════════════════════════════════════════\n";
 
-        // Читаем каждый путь
         std::vector<ReadResult> all_results;
         for (const auto& qp : paths)
         {
@@ -1017,18 +1000,15 @@ class UniversalReader
             return;
         }
 
-        // Группируем и мерджим по сигнатуре индексов
         auto groups = ResultMerger::group_by_signature(all_results);
         for (auto& [sig, results] : groups)
         {
             if (results.size() == 1)
             {
-                // Один путь → обычная печать
                 TablePrinter::print(PathParser::parse(results[0].source_path).fields.back(), max_values_, results[0]);
             }
             else
             {
-                // Несколько путей с одинаковой сигнатурой → мердж
                 auto merged = ResultMerger::merge(results);
                 ResultMerger::print_table(sig, merged, max_values_);
             }

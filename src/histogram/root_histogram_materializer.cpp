@@ -159,7 +159,7 @@ std::string FunctionList(TH1& histogram)
     std::ostringstream output;
     TIter next(functions);
     bool first = true;
-    while (auto* object = dynamic_cast<TObject*>(next()))
+    while (auto* object = next())
     {
         if (!first)
         {

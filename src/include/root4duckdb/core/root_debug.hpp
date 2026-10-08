@@ -24,7 +24,11 @@ std::string RootPointer(const void* pointer);
 class RootDebugOperationScope
 {
   public:
-    explicit RootDebugOperationScope(std::string label);
+    explicit RootDebugOperationScope(std::string label_p);
+    RootDebugOperationScope(const RootDebugOperationScope&) = delete;
+    RootDebugOperationScope& operator=(const RootDebugOperationScope&) = delete;
+    RootDebugOperationScope(RootDebugOperationScope&&) = delete;
+    RootDebugOperationScope& operator=(RootDebugOperationScope&&) = delete;
     ~RootDebugOperationScope();
 
     uint64_t Id() const;

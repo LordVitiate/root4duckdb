@@ -55,9 +55,9 @@ std::string CatalogRelationSQL(const std::string& source, bool sql_tables);
 class RootDatasetCatalog final
 {
   public:
-    RootDatasetCatalog(ClientContext& context, const std::string& catalog_path,
+    RootDatasetCatalog(ClientContext& context_p, const std::string& catalog_path,
                        const named_parameter_map_t& parameters);
-    RootDatasetCatalog(ClientContext& context, CatalogSources sources);
+    RootDatasetCatalog(ClientContext& context_p, CatalogSources sources_p);
 
     /// Returns the committed physical catalog sources.
     const CatalogSources& Sources() const;

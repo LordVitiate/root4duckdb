@@ -187,7 +187,7 @@ std::string ZonemapClause(const TableFilter& filter, const std::string& min_expr
         {
             return {};
         }
-        lock_guard<mutex> guard(dynamic.filter_data->lock);
+        const lock_guard<mutex> guard(dynamic.filter_data->lock);
         if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
         {
             return {};
@@ -382,7 +382,7 @@ bool BloomMayContainFilter(const TableFilter& filter, const string& bytes, const
         {
             return true;
         }
-        lock_guard<mutex> guard(dynamic.filter_data->lock);
+        const lock_guard<mutex> guard(dynamic.filter_data->lock);
         if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
         {
             return true;
@@ -456,7 +456,7 @@ bool FilterNeedsBloom(const TableFilter& filter)
         {
             return false;
         }
-        lock_guard<mutex> guard(dynamic.filter_data->lock);
+        const lock_guard<mutex> guard(dynamic.filter_data->lock);
         return dynamic.filter_data->initialized && dynamic.filter_data->filter &&
                FilterNeedsBloom(*dynamic.filter_data->filter);
     }
@@ -571,7 +571,7 @@ std::string ExactStringFilterClause(const TableFilter& filter, const std::string
         {
             return {};
         }
-        lock_guard<mutex> guard(dynamic.filter_data->lock);
+        const lock_guard<mutex> guard(dynamic.filter_data->lock);
         if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
         {
             return {};
@@ -688,7 +688,7 @@ bool RejectsAllMaterializedRows(const TableFilter& filter)
         {
             return false;
         }
-        lock_guard<mutex> guard(dynamic.filter_data->lock);
+        const lock_guard<mutex> guard(dynamic.filter_data->lock);
         if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
         {
             return false;

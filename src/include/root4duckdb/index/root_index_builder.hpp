@@ -52,7 +52,7 @@ class RootIndexFileBuilder
 {
   public:
     /// Captures the shared build configuration and publication identity.
-    RootIndexFileBuilder(const RootIndexBuildOptions& options, std::string dataset_id, std::string snapshot_id);
+    RootIndexFileBuilder(const RootIndexBuildOptions& options_p, std::string dataset_id_p, std::string snapshot_id_p);
 
     /// Builds typed file, schema, access, and basket metadata.
     RootIndexBuildStatus Build(const std::string& root_path, uint64_t event_base, RootFileIndexMetadata& metadata,

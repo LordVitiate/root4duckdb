@@ -5,7 +5,7 @@ namespace duckdb::rootlake
 
 void RootIndexPublisher::PublishTables(DatabaseInstance& db, const fs::path& staging, const BuildIndexBindData& bind,
                                        const BuildIndexGlobalState& state, const std::string& dataset_id,
-                                       const std::string& snapshot_id)
+                                       const std::string& snapshot_id) const
 {
     if (bind.publish_mode == "none")
     {
@@ -118,7 +118,7 @@ void RootIndexPublisher::PublishTables(DatabaseInstance& db, const fs::path& sta
 }
 
 void RootIndexPublisher::CommitParquetSnapshot(const BuildIndexBindData& bind, const std::string& dataset_id,
-                                               BuildIndexGlobalState& state, const fs::path& staging)
+                                               BuildIndexGlobalState& state, const fs::path& staging) const
 {
     const fs::path root(bind.output_dir);
     const fs::path snapshots = root / "snapshots";
@@ -180,7 +180,7 @@ void RootIndexPublisher::CommitParquetSnapshot(const BuildIndexBindData& bind, c
 }
 
 void RootIndexPublisher::Publish(ClientContext& context, const BuildIndexBindData& bind, BuildIndexGlobalState& state,
-                                 const std::string& dataset_id, const fs::path& staging)
+                                 const std::string& dataset_id, const fs::path& staging) const
 {
     if (bind.catalog_mode == "tables")
     {

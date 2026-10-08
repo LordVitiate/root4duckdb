@@ -3,7 +3,7 @@
 namespace duckdb
 {
 
-bool RootScanExecutor::WriteNumericValue(Vector& vector, idx_t row, const rootlake::RootPrimitiveValue& value)
+bool RootScanExecutor::WriteNumericValue(Vector& vector, idx_t row, const rootlake::RootPrimitiveValue& value) const
 {
     switch (vector.GetType().id())
     {
@@ -50,7 +50,7 @@ bool RootScanExecutor::WriteNumericValue(Vector& vector, idx_t row, const rootla
 
 std::optional<int32_t> RootScanExecutor::ResolveCachedIndexValue(const RootScanBindData& bind_data,
                                                                  const RootScanLocalState& lstate, idx_t col_idx,
-                                                                 size_t elem_idx)
+                                                                 size_t elem_idx) const
 {
     if (col_idx >= bind_data.columns.size())
     {
@@ -93,7 +93,7 @@ std::optional<int32_t> RootScanExecutor::ResolveCachedIndexValue(const RootScanB
 
 rootlake::RootScalarActual RootScanExecutor::CachedScalar(const RootScanBindData& bind_data,
                                                           const RootScanLocalState& lstate, idx_t col_idx,
-                                                          uint64_t entry, size_t elem_idx)
+                                                          uint64_t entry, size_t elem_idx) const
 {
     if (col_idx == COLUMN_IDENTIFIER_ROW_ID)
     {
@@ -139,7 +139,7 @@ rootlake::RootScalarActual RootScanExecutor::CachedScalar(const RootScanBindData
 
 bool RootScanExecutor::PassesCachedFilters(ClientContext& context, const RootScanBindData& bind_data,
                                            const RootScanGlobalState& gstate, RootScanLocalState& lstate,
-                                           uint64_t entry, size_t elem_idx)
+                                           uint64_t entry, size_t elem_idx) const
 {
     if (!gstate.filters)
     {
@@ -162,7 +162,7 @@ bool RootScanExecutor::PassesCachedFilters(ClientContext& context, const RootSca
 
 bool RootScanExecutor::PassesPrimitiveTreeFilters(ClientContext& context, const RootScanBindData& bind_data,
                                                   const RootScanGlobalState& gstate, RootScanLocalState& lstate,
-                                                  uint64_t entry)
+                                                  uint64_t entry) const
 {
     if (!gstate.filters)
     {
@@ -220,7 +220,8 @@ bool RootScanExecutor::PassesPrimitiveTreeFilters(ClientContext& context, const 
 }
 
 void RootScanExecutor::ProcessPrimitiveTree(ClientContext& context, const RootScanBindData& bind_data,
-                                            RootScanGlobalState& gstate, RootScanLocalState& lstate, DataChunk& output)
+                                            RootScanGlobalState& gstate, RootScanLocalState& lstate,
+                                            DataChunk& output) const
 {
     auto* tree = lstate.root_file.GetTTree();
     if (!tree)
@@ -299,7 +300,7 @@ void RootScanExecutor::ProcessPrimitiveTree(ClientContext& context, const RootSc
 
 bool RootScanExecutor::PassesDirectBranchFilters(ClientContext& context, const RootScanBindData& bind_data,
                                                  const RootScanGlobalState& gstate, RootScanLocalState& lstate,
-                                                 uint64_t entry, const rootlake::RootPrimitiveValue& value)
+                                                 uint64_t entry, const rootlake::RootPrimitiveValue& value) const
 {
     if (!gstate.filters)
     {
@@ -348,7 +349,8 @@ bool RootScanExecutor::PassesDirectBranchFilters(ClientContext& context, const R
 }
 
 void RootScanExecutor::ProcessDirectBranch(ClientContext& context, const RootScanBindData& bind_data,
-                                           RootScanGlobalState& gstate, RootScanLocalState& lstate, DataChunk& output)
+                                           RootScanGlobalState& gstate, RootScanLocalState& lstate,
+                                           DataChunk& output) const
 {
     const auto* direct_mode = bind_data.DirectBranchMode();
     if (!direct_mode)
@@ -425,9 +427,9 @@ void RootScanExecutor::ProcessDirectBranch(ClientContext& context, const RootSca
 
 void RootScanExecutor::ProcessCachedEntry(ClientContext& context, const RootScanBindData& bind_data,
                                           RootScanGlobalState& gstate, RootScanLocalState& lstate, DataChunk& output,
-                                          idx_t& out_count)
+                                          idx_t& out_count) const
 {
-    uint64_t entry = lstate.current_entry;
+    const uint64_t entry = lstate.current_entry;
     size_t max_elements = 0;
     for (const auto& res : lstate.cached_results)
     {
@@ -440,7 +442,7 @@ void RootScanExecutor::ProcessCachedEntry(ClientContext& context, const RootScan
     {
         max_elements = 1;
     }
-    size_t start_elem = lstate.current_elem_idx;
+    const size_t start_elem = lstate.current_elem_idx;
     size_t next_elem = start_elem;
     for (size_t elem_idx = start_elem; elem_idx < max_elements && out_count < STANDARD_VECTOR_SIZE; ++elem_idx)
     {
@@ -451,7 +453,7 @@ void RootScanExecutor::ProcessCachedEntry(ClientContext& context, const RootScan
         }
         for (idx_t out_idx = 0; out_idx < gstate.output_column_ids.size(); ++out_idx)
         {
-            idx_t col_idx = gstate.output_column_ids[out_idx];
+            const idx_t col_idx = gstate.output_column_ids[out_idx];
             auto& vec = output.data[out_idx];
             if (col_idx == COLUMN_IDENTIFIER_ROW_ID)
             {

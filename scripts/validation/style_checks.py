@@ -18,7 +18,12 @@ def check_style(validator: ProjectValidator) -> None:
 
 def _check_cpp(validator: ProjectValidator) -> None:
     """Apply useful JSF-derived header and source hygiene rules."""
-    sources = list((validator.root / "src").rglob("*.cpp")) + list((validator.root / "src").rglob("*.hpp"))
+    sources = [
+        source
+        for directory in ("src", "test", "examples")
+        for source in (validator.root / directory).rglob("*")
+        if source.suffix in (".cpp", ".hpp", ".h", ".C", ".c")
+    ]
     for source in sources:
         text = source.read_text()
         relative = source.relative_to(validator.root)
@@ -26,7 +31,10 @@ def _check_cpp(validator: ProjectValidator) -> None:
             if len(line) > 120:
                 validator.errors.append(f"C++ line exceeds 120 columns: {relative}:{line_number}")
         if source.suffix == ".hpp":
-            header_path = str(source.relative_to(validator.root / "src/include")).removeprefix("root4duckdb/")
+            if source.is_relative_to(validator.root / "src/include"):
+                header_path = str(source.relative_to(validator.root / "src/include")).removeprefix("root4duckdb/")
+            else:
+                header_path = str(relative).replace("test/fixtures/", "test/", 1)
             guard = "ROOT4DUCKDB_" + re.sub(r"[^A-Za-z0-9]", "_", header_path).upper()
             if not text.startswith(f"#ifndef {guard}\n#define {guard}\n") or not text.rstrip().endswith("#endif"):
                 validator.errors.append(f"header guard is missing or inconsistent: {relative}")
@@ -38,7 +46,7 @@ def _check_cpp(validator: ProjectValidator) -> None:
             validator.errors.append(f"non-template implementation remains in header: {relative}")
         if re.search(r"^[ \t]*(?:if|for|while)\s*\([^\n]+\)[ \t]*\n(?![ \t]*\{)", text, re.MULTILINE):
             validator.errors.append(f"unbraced control statement remains: {relative}")
-        if source.name != "root_headers.hpp" and re.search(
+        if relative.parts[0] == "src" and source.name != "root_headers.hpp" and re.search(
             r'^\s*#include\s*[<"](?:Rtypes|T[A-Za-z0-9_]*\.h)', text, re.MULTILINE
         ):
             validator.errors.append(f"ROOT header bypasses root_headers.hpp: {relative}")

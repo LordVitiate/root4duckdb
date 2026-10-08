@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_TEST_TESTEVENT_HPP
+#define ROOT4DUCKDB_TEST_TESTEVENT_HPP
 
 #include "Rtypes.h"
 
@@ -102,3 +103,5 @@ class TestEvent : public TestBase
 
     ClassDef(TestEvent, 8);
 };
+
+#endif

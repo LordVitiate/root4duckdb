@@ -20,7 +20,7 @@ bool BuildIndexBindData::SupportStatementCache() const
 }
 
 unique_ptr<FunctionData> RootIndexBinder::Bind(TableFunctionBindInput& input, vector<LogicalType>& return_types,
-                                               vector<string>& return_names)
+                                               vector<string>& return_names) const
 {
     auto result = make_uniq<BuildIndexBindData>();
     result->root_glob = input.inputs[0].ToString();

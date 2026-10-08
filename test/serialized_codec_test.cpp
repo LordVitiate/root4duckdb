@@ -39,10 +39,10 @@ static void PutBE64(std::vector<uint8_t>& bytes, size_t offset, uint64_t value)
 }
 
 static std::vector<uint8_t> FloatEntry(uint32_t count, uint32_t prefix_per_element, const std::vector<float>& values,
-                                       uint32_t header = 0x4009001eU)
+                                       uint32_t header = 0x4009001EU)
 {
     const size_t size = 12 + static_cast<size_t>(count) * prefix_per_element + values.size() * 4;
-    std::vector<uint8_t> bytes(size, 0xa5);
+    std::vector<uint8_t> bytes(size, 0xA5);
     PutBE32(bytes, 0, 0x40000000U | static_cast<uint32_t>(size - 4));
     PutBE32(bytes, 4, header);
     PutBE32(bytes, 8, count);
@@ -62,13 +62,13 @@ static std::vector<uint8_t> NestedShortColumn(size_t column_offset)
     // Three outer objects: {-1, 7}, {}, {8, 9, 10}. The bytes before and after
     // the framed target column stand in for other member-wise columns.
     const size_t column_size = 6 + (4 + 4) + 4 + (4 + 6);
-    std::vector<uint8_t> bytes(column_offset + column_size + 3, 0xa5);
+    std::vector<uint8_t> bytes(column_offset + column_size + 3, 0xA5);
     PutBE32(bytes, column_offset, 0x40000000U | static_cast<uint32_t>(column_size - 4));
     PutBE16(bytes, column_offset + 4, 9);
     size_t cursor = column_offset + 6;
     PutBE32(bytes, cursor, 2);
     cursor += 4;
-    PutBE16(bytes, cursor, 0xffffU);
+    PutBE16(bytes, cursor, 0xFFFFU);
     PutBE16(bytes, cursor + 2, 7);
     cursor += 4;
     PutBE32(bytes, cursor, 0);
@@ -117,7 +117,7 @@ int main()
     // ROOT version/checksum headers are not universally 12 bytes.  Once ROOT
     // has parsed the frame, the arithmetic decoder must honor its exact
     // payload cursor rather than guessing a fixed header size.
-    std::vector<uint8_t> shifted_payload(24, 0xa5);
+    std::vector<uint8_t> shifted_payload(24, 0xA5);
     uint32_t first_bits = 0;
     uint32_t second_bits = 0;
     const float first_value = 12.0F;
@@ -153,7 +153,7 @@ int main()
                                         indices, reason));
     assert(!reason.empty());
 
-    auto changed_header = FloatEntry(2, 10, {12.0F, 59.5F}, 0x4009001fU);
+    auto changed_header = FloatEntry(2, 10, {12.0F, 59.5F}, 0x4009001FU);
     assert(!DecodeSerializedVectorEntry(changed_header.data(), changed_header.size(), scalar, 100, observed_header,
                                         values, indices, reason));
 
@@ -178,9 +178,9 @@ int main()
     signed_int.index_depth = 1;
     std::vector<uint8_t> int_entry(20, 0);
     PutBE32(int_entry, 0, 0x40000000U | 16U);
-    PutBE32(int_entry, 4, 0x4009001eU);
+    PutBE32(int_entry, 4, 0x4009001EU);
     PutBE32(int_entry, 8, 2);
-    PutBE32(int_entry, 12, 0xffffffffU);
+    PutBE32(int_entry, 12, 0xFFFFFFFFU);
     PutBE32(int_entry, 16, 42);
     observed_header = 0;
     assert(DecodeSerializedVectorEntry(int_entry.data(), int_entry.size(), signed_int, 100, observed_header, values,
@@ -194,7 +194,7 @@ int main()
     double_layout.index_depth = 1;
     std::vector<uint8_t> double_entry(20, 0);
     PutBE32(double_entry, 0, 0x40000000U | 16U);
-    PutBE32(double_entry, 4, 0x4009001eU);
+    PutBE32(double_entry, 4, 0x4009001EU);
     PutBE32(double_entry, 8, 1);
     double expected_double = -17.25;
     uint64_t double_bits = 0;
@@ -212,7 +212,7 @@ int main()
     int64_layout.index_depth = 1;
     std::vector<uint8_t> int64_entry(20, 0);
     PutBE32(int64_entry, 0, 0x40000000U | 16U);
-    PutBE32(int64_entry, 4, 0x4009001eU);
+    PutBE32(int64_entry, 4, 0x4009001EU);
     PutBE32(int64_entry, 8, 1);
     PutBE64(int64_entry, 12, 0x0020000000000001ULL);
     std::vector<RootPrimitiveValue> exact_values;
@@ -226,13 +226,13 @@ int main()
     auto uint64_layout = int64_layout;
     uint64_layout.value_type = "ULong64_t";
     std::vector<uint8_t> uint64_entry = int64_entry;
-    PutBE64(uint64_entry, 12, 0xfffffffffffffff0ULL);
+    PutBE64(uint64_entry, 12, 0xFFFFFFFFFFFFFFF0ULL);
     observed_header = 0;
     assert(DecodeSerializedVectorEntry(uint64_entry.data(), uint64_entry.size(), uint64_layout, 100, observed_header,
                                        exact_values, indices, reason));
     assert(exact_values.size() == 1);
     assert(exact_values[0].kind == RootPrimitiveKind::UNSIGNED);
-    assert(exact_values[0].unsigned_value == 0xfffffffffffffff0ULL);
+    assert(exact_values[0].unsigned_value == 0xFFFFFFFFFFFFFFF0ULL);
 
     auto bad_dimensions = fixed_array;
     bad_dimensions.array_dimensions = {3};
@@ -260,7 +260,7 @@ int main()
     assert(!DecodeSerializedNestedPrimitiveVectorColumn(nested_entry.data(), nested_entry.size(), nested_offset, 3,
                                                         nested_short, 4, values, indices, reason));
     auto negative_inner_count = nested_entry;
-    PutBE32(negative_inner_count, nested_offset + 6, 0xffffffffU);
+    PutBE32(negative_inner_count, nested_offset + 6, 0xFFFFFFFFU);
     assert(!DecodeSerializedNestedPrimitiveVectorColumn(negative_inner_count.data(), negative_inner_count.size(),
                                                         nested_offset, 3, nested_short, 100, values, indices, reason));
     auto truncated_nested = nested_entry;

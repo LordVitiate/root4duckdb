@@ -15,7 +15,7 @@ class RootInputResolver final
   public:
     explicit RootInputResolver(ClientContext& context);
 
-    std::vector<std::string> Resolve(const std::string& input) const;
+    std::vector<std::string> Resolve(const std::string& raw) const;
 
     static bool IsRootFileName(const std::string& path);
     static bool HasGlob(const std::string& path);

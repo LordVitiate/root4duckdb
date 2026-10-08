@@ -20,7 +20,7 @@ struct BranchProjectionResult
 };
 
 /// Enables proven ancestors; callers validate once against object reading.
-BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBranch*>& branches, uint64_t cache_bytes);
+BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes);
 
 /// Restores all branches and configures the optional tree cache.
 void EnableAllBranches(TTree* tree, uint64_t cache_bytes = 0);

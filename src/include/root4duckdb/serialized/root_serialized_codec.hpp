@@ -29,7 +29,7 @@ enum class SerializedPrimitiveKind : uint8_t
 };
 
 /// Maps ROOT primitive spelling to its serialized encoding.
-SerializedPrimitiveKind ClassifySerializedPrimitive(const std::string& type);
+SerializedPrimitiveKind ClassifySerializedPrimitive(const std::string& raw_type);
 
 /// Fixed layout required to decode one serialized entry.
 struct SerializedEntryLayout

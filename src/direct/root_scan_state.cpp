@@ -28,7 +28,7 @@ bool RootScanExecutor::ClaimEntryBatch(RootScanGlobalState& global, RootScanLoca
 
 RootEntryScheduler::WorkBatch RootEntryScheduler::ClaimWork(uint64_t preferred_batch_size)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
     if (next_row_ >= total_rows_)
     {
         return {0, 0};
@@ -157,7 +157,7 @@ idx_t RootScanGlobalState::MaxThreads() const
 RootScanLocalState::~RootScanLocalState() = default;
 
 unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientContext& context,
-                                                                        TableFunctionInitInput& input)
+                                                                        TableFunctionInitInput& input) const
 {
     auto& bind_data = input.bind_data->Cast<RootScanBindData>();
     auto global_state = make_uniq<RootScanGlobalState>();
@@ -303,9 +303,9 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
 }
 
 void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobalState& gstate,
-                               RootScanLocalState& target, const std::string& file_path, bool synchronize_open)
+                               RootScanLocalState& target, const std::string& file_path, bool synchronize_open) const
 {
-    RootDebugOperationScope debug_operation("RootScanInitLocal");
+    const RootDebugOperationScope debug_operation("RootScanInitLocal");
     RootDebug("INIT_LOCAL.BEGIN", "root_path=" + file_path + " tree=" + bind_data.tree_name +
                                       " columns=" + std::to_string(bind_data.columns.size()));
     auto* local_state = &target;
@@ -480,7 +480,7 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         throw IOException("Invalid ROOT file: " + file_path);
     }
     std::set<std::string> unique_root_classes;
-    for (idx_t col_idx : gstate.scan_column_ids)
+    for (const idx_t col_idx : gstate.scan_column_ids)
     {
         if (col_idx == COLUMN_IDENTIFIER_ROW_ID || col_idx >= bind_data.columns.size())
         {
@@ -673,7 +673,7 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
 }
 
 unique_ptr<LocalTableFunctionState> RootScanStateFactory::CreateLocal(TableFunctionInitInput& input,
-                                                                      GlobalTableFunctionState* global_state_p)
+                                                                      GlobalTableFunctionState* global_state_p) const
 {
     auto& bind_data = input.bind_data->Cast<RootScanBindData>();
     auto& gstate = global_state_p->Cast<RootScanGlobalState>();
@@ -686,7 +686,7 @@ unique_ptr<LocalTableFunctionState> RootScanStateFactory::CreateLocal(TableFunct
     return local_state;
 }
 
-void RootScanFileManager::Reset(RootScanGlobalState& gstate, RootScanLocalState& local_state, bool completed)
+void RootScanFileManager::Reset(RootScanGlobalState& gstate, RootScanLocalState& local_state, bool completed) const
 {
     if (completed && local_state.file_active && gstate.file_scheduler)
     {
@@ -714,7 +714,7 @@ void RootScanFileManager::Reset(RootScanGlobalState& gstate, RootScanLocalState&
 }
 
 bool RootScanFileManager::EnsureReady(const RootScanBindData& bind_data, RootScanGlobalState& gstate,
-                                      RootScanLocalState& local_state)
+                                      RootScanLocalState& local_state) const
 {
     if (!gstate.file_scheduler)
     {
@@ -752,7 +752,8 @@ bool RootScanFileManager::EnsureReady(const RootScanBindData& bind_data, RootSca
         }
         catch (const rootlake::RootFileUnavailableException& exception)
         {
-            gstate.file_scheduler->RecordUnavailable(local_state.file_task, exception.attempts, exception.elapsed_us);
+            gstate.file_scheduler->RecordUnavailable(local_state.file_task, exception.Attempts(),
+                                                     exception.ElapsedUs());
             Reset(gstate, local_state, false);
             continue;
         }

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_TEST_LEGACYTESTEVENT_HPP
+#define ROOT4DUCKDB_TEST_LEGACYTESTEVENT_HPP
 
 #include "Rtypes.h"
 
@@ -24,3 +25,5 @@ class TestEvent
 
     ClassDef(TestEvent, 6);
 };
+
+#endif

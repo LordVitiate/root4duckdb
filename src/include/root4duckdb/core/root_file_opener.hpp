@@ -32,8 +32,12 @@ class RootFileUnavailableException : public std::runtime_error
   public:
     RootFileUnavailableException(std::string message, uint32_t attempts, uint64_t elapsed_us);
 
-    uint32_t attempts;
-    uint64_t elapsed_us;
+    uint32_t Attempts() const noexcept;
+    uint64_t ElapsedUs() const noexcept;
+
+  private:
+    uint32_t attempts_;
+    uint64_t elapsed_us_;
 };
 
 /// Opens a file with a deliberately small transient retry budget.

@@ -101,7 +101,7 @@ class RootIndexBinder final
 {
   public:
     unique_ptr<FunctionData> Bind(TableFunctionBindInput& input, vector<LogicalType>& return_types,
-                                  vector<string>& return_names);
+                                  vector<string>& return_names) const;
 };
 
 /// Publishes validated metadata through Parquet or Iceberg commit paths.
@@ -109,21 +109,21 @@ class RootIndexPublisher final
 {
   public:
     void Publish(ClientContext& context, const BuildIndexBindData& bind, BuildIndexGlobalState& state,
-                 const std::string& dataset_id, const fs::path& staging);
+                 const std::string& dataset_id, const fs::path& staging) const;
 
   private:
     void PublishTables(DatabaseInstance& database, const fs::path& staging, const BuildIndexBindData& bind,
                        const BuildIndexGlobalState& state, const std::string& dataset_id,
-                       const std::string& snapshot_id);
+                       const std::string& snapshot_id) const;
     void CommitParquetSnapshot(const BuildIndexBindData& bind, const std::string& dataset_id,
-                               BuildIndexGlobalState& state, const fs::path& staging);
+                               BuildIndexGlobalState& state, const fs::path& staging) const;
 };
 
 /// Runs inspect, build, validate, and publish stages in order.
 class RootIndexCoordinator final
 {
   public:
-    unique_ptr<GlobalTableFunctionState> Run(ClientContext& context, TableFunctionInitInput& input);
+    unique_ptr<GlobalTableFunctionState> Run(ClientContext& context, TableFunctionInitInput& input) const;
 
   private:
     RootIndexBuildOptions ConfigureRuntime(ClientContext& context, BuildIndexBindData& bind,

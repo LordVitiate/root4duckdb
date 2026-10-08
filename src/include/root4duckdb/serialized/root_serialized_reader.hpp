@@ -184,9 +184,9 @@ class SerializedBasketReader
 
     /// @name Decode lifecycle
     /// @{
-    void Bind(TBranch* branch, SerializedReadPlan plan, uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL,
-              uint64_t max_values_per_entry = 10ULL * 1024ULL * 1024ULL,
-              std::shared_ptr<SerializedBasketCache> shared_basket_cache = {});
+    void Bind(TBranch* branch_p, SerializedReadPlan plan_p, uint64_t max_entry_bytes_p = 64ULL * 1024ULL * 1024ULL,
+              uint64_t max_values_per_entry_p = 10ULL * 1024ULL * 1024ULL,
+              std::shared_ptr<SerializedBasketCache> shared_basket_cache_p = {});
     /// Detaches branch-local ROOT addresses without discarding metrics/plan state.
     void ReleaseBindings() noexcept;
     void Reset() noexcept;

@@ -19,10 +19,19 @@ RootFileOpenResult::operator bool() const
     return file && !file->IsZombie();
 }
 
-RootFileUnavailableException::RootFileUnavailableException(std::string message, uint32_t attempts_p,
-                                                           uint64_t elapsed_us_p)
-    : std::runtime_error(std::move(message)), attempts(attempts_p), elapsed_us(elapsed_us_p)
+RootFileUnavailableException::RootFileUnavailableException(std::string message, uint32_t attempts, uint64_t elapsed_us)
+    : std::runtime_error(std::move(message)), attempts_(attempts), elapsed_us_(elapsed_us)
 {
+}
+
+uint32_t RootFileUnavailableException::Attempts() const noexcept
+{
+    return attempts_;
+}
+
+uint64_t RootFileUnavailableException::ElapsedUs() const noexcept
+{
+    return elapsed_us_;
 }
 
 namespace
@@ -57,7 +66,7 @@ void WarnUnavailableOnce(const std::string& path, const RootFileOpenResult& resu
 {
     static std::mutex mutex;
     static std::set<std::string> emitted;
-    std::lock_guard<std::mutex> guard(mutex);
+    const std::lock_guard<std::mutex> guard(mutex);
     if (!emitted.insert(path).second)
     {
         return;
@@ -126,7 +135,7 @@ RootFileOpenResult RootFileHandle::Open(const std::string& file_path, const std:
     RootFileOpenResult result;
     if (sync_mutex)
     {
-        std::lock_guard<std::mutex> lock(*sync_mutex);
+        const std::lock_guard<std::mutex> lock(*sync_mutex);
         result = OpenRootFile(file_path);
     }
     else

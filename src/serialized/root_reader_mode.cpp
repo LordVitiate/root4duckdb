@@ -75,7 +75,7 @@ void WarnRootFallbackOnce(const std::string& logical_path, const std::string& sc
     static std::mutex mutex;
     static std::set<std::string> emitted;
     const std::string key = logical_path + "\x1f" + schema_fingerprint + "\x1f" + reason;
-    std::lock_guard<std::mutex> guard(mutex);
+    const std::lock_guard<std::mutex> guard(mutex);
     if (!emitted.insert(key).second)
     {
         return;

@@ -122,7 +122,7 @@ ContainerAccess PrepareContainerAccess(const PathLevel& level, TVirtualCollectio
     }
     if (size > 1)
     {
-        auto* second = static_cast<char*>(proxy->At(1));
+        const auto* second = static_cast<const char*>(proxy->At(1));
         if (!second || second != first + stride)
         {
             return result;
@@ -136,11 +136,13 @@ ContainerAccess PrepareContainerAccess(const PathLevel& level, TVirtualCollectio
     return result;
 }
 
-struct DirectSink
+class DirectSink
 {
-    int64_t max_values;
-    int64_t entry_id;
-    ReadResult& result;
+  public:
+    DirectSink(int64_t max_values_p, int64_t entry_id_p, ReadResult& result_p)
+        : max_values(max_values_p), entry_id(entry_id_p), result(result_p)
+    {
+    }
     bool Full() const
     {
         return max_values >= 0 && result.size() >= static_cast<size_t>(max_values);
@@ -159,11 +161,19 @@ struct DirectSink
     {
         result.AddString(ReadRootString(pointer, type), entry_id, indices, names);
     }
+
+  private:
+    int64_t max_values;
+    int64_t entry_id;
+    ReadResult& result;
 };
 
-struct NumericOnlySink
+class NumericOnlySink
 {
-    std::vector<double>& result;
+  public:
+    explicit NumericOnlySink(std::vector<double>& result_p) : result(result_p)
+    {
+    }
     bool Full() const
     {
         return false;
@@ -179,13 +189,18 @@ struct NumericOnlySink
     void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&)
     {
     }
+
+  private:
+    std::vector<double>& result;
 };
 
-struct FlatNumericSink
+class FlatNumericSink
 {
-    idx_t index_depth;
-    std::vector<double>& values;
-    std::vector<int32_t>& indices;
+  public:
+    FlatNumericSink(idx_t index_depth_p, std::vector<double>& values_p, std::vector<int32_t>& indices_p)
+        : index_depth(index_depth_p), values(values_p), indices(indices_p)
+    {
+    }
     bool Full() const
     {
         return false;
@@ -208,6 +223,11 @@ struct FlatNumericSink
     void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&)
     {
     }
+
+  private:
+    idx_t index_depth;
+    std::vector<double>& values;
+    std::vector<int32_t>& indices;
 };
 
 template <class SINK>
@@ -259,7 +279,7 @@ void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels,
         {
             return;
         }
-        TVirtualCollectionProxy::TPushPop guard(proxy, field);
+        const TVirtualCollectionProxy::TPushPop guard(proxy, field);
         const auto inner = ExtractInnerType(level.type);
         const auto size = proxy->Size();
         if (index_names.size() < indices.size() + 1)
@@ -312,7 +332,7 @@ void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels,
         {
             return;
         }
-        TVirtualCollectionProxy::TPushPop guard(proxy, field);
+        const TVirtualCollectionProxy::TPushPop guard(proxy, field);
         const auto size = proxy->Size();
         if (index_names.size() < indices.size() + 1)
         {

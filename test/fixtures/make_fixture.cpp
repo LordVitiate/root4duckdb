@@ -83,7 +83,7 @@ static void WriteFixture(const fs::path& path, Int_t run_base, const std::vector
         ++event_index;
         event->vecHit.clear();
         size_t hit_index = 0;
-        for (double value : values)
+        for (const double value : values)
         {
             event->vecHit.emplace_back(value);
             auto& hit = event->vecHit.back();

@@ -178,7 +178,7 @@ std::shared_ptr<Table> GetOrCreateTable(const std::shared_ptr<SqlCatalog>& catal
         }
         return table;
     }
-    std::unordered_map<std::string, std::string> properties{
+    const std::unordered_map<std::string, std::string> properties{
         {"write.format.default", "parquet"},
         {"schema.name-mapping.default", inferred.name_mapping_json},
         {"root4duckdb.catalog-format", "iceberg-sqlite-v1"},

@@ -39,8 +39,9 @@ class RootObjectContext
 
     /// @name Object access
     /// @{
-    void Bind(TTree* tree, TBranch* branch, TClass* root_class,
-              RootDictionaryCleanupMode cleanup_mode = RootDictionaryCleanupMode::FULL, std::string class_name = {});
+    void Bind(TTree* tree_p, TBranch* branch_p, TClass* root_class_p,
+              RootDictionaryCleanupMode cleanup_mode_p = RootDictionaryCleanupMode::FULL,
+              std::string class_name_p = {});
     void* Read(uint64_t entry);
     void* CurrentObject() const;
     void Reset() noexcept;
@@ -78,7 +79,7 @@ class RootObjectReader
 
     /// @name Reader lifecycle
     /// @{
-    void Bind(TFile* file, const std::string& tree_name, const std::string& root_class_name,
+    void Bind(TFile* file_p, const std::string& tree_name, const std::string& root_class_name,
               RootDictionaryCleanupMode cleanup_mode = RootDictionaryCleanupMode::FULL);
     void Reset() noexcept;
     void* Read(uint64_t entry);
@@ -106,11 +107,15 @@ class RootEntryReader
 {
   public:
     /// Creates an entry cache over an already bound object reader.
-    explicit RootEntryReader(RootObjectReader& reader);
+    explicit RootEntryReader(RootObjectReader& reader_p);
+    RootEntryReader(const RootEntryReader&) = delete;
+    RootEntryReader& operator=(const RootEntryReader&) = delete;
+    RootEntryReader(RootEntryReader&&) = delete;
+    RootEntryReader& operator=(RootEntryReader&&) = delete;
 
     /// @name Entry lifecycle
     /// @{
-    void Begin(uint64_t entry);
+    void Begin(uint64_t entry_p);
     void* Read();
     /// Reads the cached entry from an address-isolated object source.
     void* ReadFrom(RootObjectReader& source);

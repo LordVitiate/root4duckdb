@@ -4,7 +4,8 @@ namespace duckdb
 {
 
 void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootScanBindData& bind_data,
-                                            RootScanGlobalState& gstate, RootScanLocalState& lstate, DataChunk& output)
+                                            RootScanGlobalState& gstate, RootScanLocalState& lstate,
+                                            DataChunk& output) const
 {
     const auto* histogram_mode = bind_data.HistogramMode();
     if (!histogram_mode || !histogram_mode->object)
@@ -82,7 +83,8 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
 }
 
 void RootScanExecutor::ProcessBrowseMode(ClientContext& context, const RootScanBindData& bind_data,
-                                         RootScanGlobalState& gstate, RootScanLocalState& lstate, DataChunk& output)
+                                         RootScanGlobalState& gstate, RootScanLocalState& lstate,
+                                         DataChunk& output) const
 {
     const auto* browse_mode = bind_data.BrowseMode();
     if (!browse_mode)
@@ -90,8 +92,8 @@ void RootScanExecutor::ProcessBrowseMode(ClientContext& context, const RootScanB
         throw InternalException("read_root browse execution has no browse plan");
     }
     const auto& children = browse_mode->children;
-    std::lock_guard<std::mutex> lock(gstate.coordination_mutex);
-    size_t start = gstate.browse_offset;
+    const std::lock_guard<std::mutex> lock(gstate.coordination_mutex);
+    const size_t start = gstate.browse_offset;
     if (start >= children.size())
     {
         output.SetCardinality(0);

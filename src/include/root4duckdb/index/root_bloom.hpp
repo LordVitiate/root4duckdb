@@ -13,7 +13,7 @@ class RootBloomBuilder
 {
   public:
     /// Configures the bounded adaptive Bloom payload.
-    RootBloomBuilder(uint32_t max_payload_bytes, double false_positive_rate);
+    RootBloomBuilder(uint32_t max_payload_bytes_p, double false_positive_rate_p);
 
     /// Adds one finite numeric value to the pending payload.
     void Add(double value);

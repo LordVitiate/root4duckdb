@@ -16,7 +16,7 @@ int64_t CheckedEntryId(uint64_t entry)
 
 } // namespace
 
-std::vector<std::string> RootScanExecutor::SplitIndexSignature(const std::string& signature)
+std::vector<std::string> RootScanExecutor::SplitIndexSignature(const std::string& signature) const
 {
     std::vector<std::string> names;
     std::stringstream stream(signature);
@@ -35,7 +35,7 @@ void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column,
                                                    const rootlake::SerializedReadPlan& plan,
                                                    const std::vector<rootlake::RootPrimitiveValue>& values,
                                                    const std::vector<int32_t>& flat_indices,
-                                                   rootlake::ReadResult& result)
+                                                   rootlake::ReadResult& result) const
 {
     result.Clear();
     const auto entry_id = CheckedEntryId(entry);
@@ -51,13 +51,13 @@ void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column,
         {
             indices[depth] = flat_indices[value_index * plan.index_depth + depth];
         }
-        std::vector<int32_t> flat_index_row(indices.begin(), indices.end());
+        const std::vector<int32_t> flat_index_row(indices.begin(), indices.end());
         result.AddNumber(values[value_index], entry_id, flat_index_row, index_names);
     }
 }
 
 CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_data, RootScanGlobalState& gstate,
-                                                RootScanLocalState& lstate, DataChunk& output, idx_t& out_count)
+                                                RootScanLocalState& lstate, DataChunk& output, idx_t& out_count) const
 {
     (void)output;
     (void)out_count;
@@ -296,7 +296,7 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
     return CacheResult::CACHED;
 }
 
-void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_p, DataChunk& output)
+void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_p, DataChunk& output) const
 {
     auto& bind_data = data_p.bind_data->Cast<RootScanBindData>();
     auto& gstate = data_p.global_state->Cast<RootScanGlobalState>();
@@ -396,7 +396,7 @@ void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_
                         break;
                     }
                 }
-                CacheResult res = ReadAndCacheEntry(bind_data, gstate, lstate, output, out_count);
+                const CacheResult res = ReadAndCacheEntry(bind_data, gstate, lstate, output, out_count);
                 if (res == CacheResult::CONTINUE_LOOP)
                 {
                     continue;
@@ -424,7 +424,7 @@ void RootScanExecutor::Execute(ClientContext& context, TableFunctionInput& data_
     }
 }
 
-InsertionOrderPreservingMap<string> RootScanExplain::Bound(TableFunctionToStringInput& input)
+InsertionOrderPreservingMap<string> RootScanExplain::Bound(TableFunctionToStringInput& input) const
 {
     InsertionOrderPreservingMap<string> result;
     if (!input.bind_data)
@@ -441,7 +441,7 @@ InsertionOrderPreservingMap<string> RootScanExplain::Bound(TableFunctionToString
     return result;
 }
 
-InsertionOrderPreservingMap<string> RootScanExplain::Running(TableFunctionDynamicToStringInput& input)
+InsertionOrderPreservingMap<string> RootScanExplain::Running(TableFunctionDynamicToStringInput& input) const
 {
     InsertionOrderPreservingMap<string> result;
     if (input.bind_data)

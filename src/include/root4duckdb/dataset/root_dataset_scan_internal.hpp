@@ -227,11 +227,11 @@ class DatasetTaskPlanner final
 {
   public:
     void Plan(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global,
-              optional_ptr<TableFilterSet> filters);
-    void PlanMetadataCount(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global);
+              optional_ptr<TableFilterSet> filters) const;
+    void PlanMetadataCount(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global) const;
 
   private:
-    void BuildFileTaskGroups(DatasetGlobalState& global);
+    void BuildFileTaskGroups(DatasetGlobalState& global) const;
 };
 
 /// Resolves catalog schemas and the SQL output contract.
@@ -239,42 +239,43 @@ class DatasetScanBinder final
 {
   public:
     unique_ptr<FunctionData> Bind(ClientContext& context, TableFunctionBindInput& input,
-                                  vector<LogicalType>& return_types, vector<string>& return_names);
+                                  vector<LogicalType>& return_types, vector<string>& return_names) const;
 };
 
 /// Constructs dataset scan execution states.
 class DatasetScanStateFactory final
 {
   public:
-    unique_ptr<NodeStatistics> Cardinality(const FunctionData* bind_data);
-    unique_ptr<GlobalTableFunctionState> CreateGlobal(ClientContext& context, TableFunctionInitInput& input);
-    unique_ptr<LocalTableFunctionState> CreateLocal();
+    unique_ptr<NodeStatistics> Cardinality(const FunctionData* bind_data) const;
+    unique_ptr<GlobalTableFunctionState> CreateGlobal(ClientContext& context, TableFunctionInitInput& input) const;
+    unique_ptr<LocalTableFunctionState> CreateLocal() const;
 };
 
 /// Decodes selected entries and emits exact filtered rows.
 class DatasetScanExecutor final
 {
   public:
-    void Scan(ClientContext& context, TableFunctionInput& input, DataChunk& output);
+    void Scan(ClientContext& context, TableFunctionInput& input, DataChunk& output) const;
     double Progress(const GlobalTableFunctionState* state) const;
 
   private:
     void ValidateAccessPlan(const SchemaBinding& schema, const std::vector<PathLevel>& actual) const;
     void SyncSerializedCounters(DatasetLocalState& local, DatasetGlobalState& global) const;
     void OpenTaskFile(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local,
-                      const RootBasketTask& task);
+                      const RootBasketTask& task) const;
     void PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size) const;
-    bool ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local);
-    bool PassesPathPredicates(const DatasetBindData& bind, DatasetLocalState& local, void* object) const;
-    bool LoadNextEntry(const DatasetBindData& bind, DatasetLocalState& local, DatasetGlobalState& global);
+    bool ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local) const;
+    bool PassesPathPredicates(const DatasetBindData& bind, const DatasetLocalState& local, void* object) const;
+    bool LoadNextEntry(const DatasetBindData& bind, DatasetLocalState& local, DatasetGlobalState& global) const;
     void SetPrimitiveAsType(Vector& vector, idx_t row, const LogicalType& type, const RootPrimitiveValue& value) const;
     void SetDoubleAsType(Vector& vector, idx_t row, const LogicalType& type, double value) const;
     void EmitProjectedTypedRow(const DatasetBindData& bind, const DatasetGlobalState& global, DataChunk& output,
                                idx_t output_row, uint64_t event_fk, const std::string& source_id, uint64_t entry_id,
-                               const RootPrimitiveValue& value, const int32_t* indices, idx_t index_count) const;
+                               const RootPrimitiveValue& numeric_value, const int32_t* indices,
+                               idx_t index_count) const;
     void EmitProjectedRow(const DatasetBindData& bind, const DatasetGlobalState& global, DataChunk& output,
                           idx_t output_row, uint64_t event_fk, const std::string& source_id, uint64_t entry_id,
-                          double value, const int32_t* indices, idx_t index_count) const;
+                          double numeric_value, const int32_t* indices, idx_t index_count) const;
     idx_t ReserveOutputRows(DatasetGlobalState& global, idx_t requested) const;
 };
 

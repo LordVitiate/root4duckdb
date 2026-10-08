@@ -65,7 +65,7 @@ std::vector<std::string> ParseLogicalPaths(const std::string& raw)
 
 std::string LogicalPathsJSON(const std::vector<std::string>& paths)
 {
-    nlohmann::json json = paths;
+    const nlohmann::json json = paths;
     return json.dump();
 }
 

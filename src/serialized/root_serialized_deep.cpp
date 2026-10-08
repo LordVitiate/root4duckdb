@@ -218,7 +218,7 @@ bool ResolveSerializedVersionedMember(const SerializedReadPlan& plan, int32_t el
         }
         if (target_is_collection)
         {
-            auto* planned_value_class = plan.projection_levels[1].element_class;
+            const auto* planned_value_class = plan.projection_levels[1].element_class;
             auto* target_value_class = target_proxy->GetValueClass();
             if ((planned_value_class && target_value_class != planned_value_class) ||
                 (!planned_value_class && target_value_class))
@@ -421,7 +421,7 @@ bool ConsumeSerializedSelectedMembers(TBufferFile& buffer, const SerializedReadP
         failure_reason = "ROOT collection proxy has no read iterator functions";
         return false;
     }
-    TVirtualCollectionProxy::TPushPop proxy_guard(proxy, outer_collection_scratch);
+    const TVirtualCollectionProxy::TPushPop proxy_guard(proxy, outer_collection_scratch);
     void* alternative = proxy->Allocate(static_cast<UInt_t>(outer_count), kTRUE);
     if (!alternative)
     {

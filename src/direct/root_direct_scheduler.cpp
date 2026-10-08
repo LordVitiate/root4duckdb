@@ -113,14 +113,14 @@ void RootDirectFileScheduler::RecordUnavailable(const RootDirectFileTask&, uint3
 void RootDirectFileScheduler::RecordFailure(const RootDirectFileTask& task, const std::string& message)
 {
     failed_files_.fetch_add(1);
-    std::lock_guard<std::mutex> lock(mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
     failures_.push_back(task.path + ": " + message);
 }
 
 void RootDirectFileScheduler::RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us)
 {
     completed_files_.fetch_add(1);
-    std::lock_guard<std::mutex> lock(mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
     if (elapsed_us > slowest_file_us_)
     {
         slowest_file_us_ = elapsed_us;
@@ -134,7 +134,7 @@ void RootDirectFileScheduler::ObserveSchema(const std::string& fingerprint)
     {
         return;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
     if (!schema_fingerprints_.insert(fingerprint).second)
     {
         schema_plan_reuses_.fetch_add(1);
@@ -161,25 +161,25 @@ bool RootDirectFileScheduler::AllFilesFinished() const
 
 uint64_t RootDirectFileScheduler::SchemaVariants() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
     return schema_fingerprints_.size();
 }
 
 std::string RootDirectFileScheduler::SlowestFile() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
     return slowest_file_;
 }
 
 uint64_t RootDirectFileScheduler::SlowestFileUs() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
     return slowest_file_us_;
 }
 
 std::string RootDirectFileScheduler::FailureSummary() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    const std::lock_guard<std::mutex> lock(mutex_);
     if (failures_.empty())
     {
         return {};

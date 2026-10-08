@@ -23,7 +23,7 @@ namespace
 void WriteSchemaRows(RootFileIndexMetadata& metadata, const std::string& schema_id, const std::string& column_id,
                      const std::string& logical_path, const ParsedPath& path, const std::vector<PathLevel>& levels)
 {
-    const std::string access_plan_id = Hex64(FNV1a64(logical_path, FNV1a64(schema_id)) ^ 0x9f6abc31ULL);
+    const std::string access_plan_id = Hex64(FNV1a64(logical_path, FNV1a64(schema_id)) ^ 0x9F6ABC31ULL);
     const auto leaf_type = PrimitiveBaseType(levels.back().type);
     RootSchemaMetadataRow schema;
     schema.index_version = ROOT_LAKE_INDEX_VERSION;

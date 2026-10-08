@@ -188,7 +188,7 @@ static int ComparePathPredicateValues(const RootPrimitiveValue& left, const Root
     }
 }
 
-void ParsePathPredicates(RootDatasetCatalog& catalog, DatasetBindData& bind, const std::string& raw_json)
+void ParsePathPredicates(const RootDatasetCatalog& catalog, DatasetBindData& bind, const std::string& raw_json)
 {
 
     if (raw_json.empty())

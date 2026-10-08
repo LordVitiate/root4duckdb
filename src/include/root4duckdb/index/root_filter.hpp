@@ -32,11 +32,11 @@ struct RootScalarActual
 
     static RootScalarActual Null(const LogicalType& type);
     static RootScalarActual Event(uint64_t value);
-    static RootScalarActual Signed(int64_t value, const LogicalType& type = LogicalType::BIGINT);
-    static RootScalarActual Unsigned(uint64_t value, const LogicalType& type = LogicalType::UBIGINT);
+    static RootScalarActual Signed(int64_t value, const LogicalType& logical_type = LogicalType::BIGINT);
+    static RootScalarActual Unsigned(uint64_t value, const LogicalType& logical_type = LogicalType::UBIGINT);
     static RootScalarActual Index(std::optional<int32_t> value);
     static RootScalarActual String(std::string value);
-    static RootScalarActual Numeric(const LogicalType& type, double value);
+    static RootScalarActual Numeric(const LogicalType& logical_type, double value);
     Value ToValue() const;
 };
 
@@ -57,6 +57,8 @@ class RootFilterEvaluator
 {
   public:
     RootFilterEvaluator();
+    RootFilterEvaluator(const RootFilterEvaluator&) = delete;
+    RootFilterEvaluator& operator=(const RootFilterEvaluator&) = delete;
     ~RootFilterEvaluator();
     RootFilterEvaluator(RootFilterEvaluator&&) noexcept;
     RootFilterEvaluator& operator=(RootFilterEvaluator&&) noexcept;

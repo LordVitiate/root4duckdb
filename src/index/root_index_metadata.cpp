@@ -87,35 +87,6 @@ class RootIndexMetadataWriter::Impl
         fs::create_directories(part_dir);
         CreateBuffers();
     }
-    void CreateBuffers()
-    {
-        Run("CREATE TEMP TABLE root_index_files ("
-            "index_version UINTEGER, dataset_id VARCHAR, snapshot_id VARCHAR, file_id VARCHAR, root_uri VARCHAR, "
-            "tree_name VARCHAR, schema_id VARCHAR, column_id VARCHAR, event_base UBIGINT, total_entries UBIGINT, "
-            "file_size UBIGINT, mtime_ns BIGINT, min_value DOUBLE, max_value DOUBLE, value_count UBIGINT, "
-            "null_count UBIGINT, nan_count UBIGINT, pos_inf_count UBIGINT, neg_inf_count UBIGINT, basket_count "
-            "UBIGINT)",
-            "create typed files buffer");
-        Run("CREATE TEMP TABLE root_index_schemas ("
-            "index_version UINTEGER, schema_id VARCHAR, column_id VARCHAR, logical_path VARCHAR, root_class VARCHAR, "
-            "root_type VARCHAR, duckdb_type VARCHAR, access_plan_id VARCHAR, index_signature VARCHAR, container_depth "
-            "UINTEGER)",
-            "create typed schemas buffer");
-        Run("CREATE TEMP TABLE root_index_access ("
-            "index_version UINTEGER, access_plan_id VARCHAR, level_no UINTEGER, field_name VARCHAR, root_type VARCHAR, "
-            "offset_in_parent BIGINT, cumulative_offset BIGINT, is_pointer BOOLEAN, is_container BOOLEAN, "
-            "is_primitive BOOLEAN, is_string BOOLEAN, is_fixed_array BOOLEAN, array_rank UINTEGER, "
-            "array_length UBIGINT, array_dimensions VARCHAR, element_size UINTEGER)",
-            "create typed access buffer");
-        Run("CREATE TEMP TABLE root_index_baskets ("
-            "index_version UINTEGER, snapshot_id VARCHAR, file_id VARCHAR, column_id VARCHAR, basket_id UINTEGER, "
-            "basket_branch_name VARCHAR, basket_branch_mode VARCHAR, entry_begin UBIGINT, entry_end UBIGINT, "
-            "event_base UBIGINT, flat_value_begin UBIGINT, value_count UBIGINT, physical_offset UBIGINT, "
-            "key_length UINTEGER, compressed_size UINTEGER, uncompressed_size UINTEGER, compression UINTEGER, "
-            "min_value DOUBLE, max_value DOUBLE, null_count UBIGINT, nan_count UBIGINT, pos_inf_count UBIGINT, "
-            "neg_inf_count UBIGINT, bloom_filter BLOB)",
-            "create typed baskets buffer");
-    }
     void Append(const RootFileIndexMetadata& metadata)
     {
         if (finished)
@@ -228,7 +199,37 @@ class RootIndexMetadataWriter::Impl
         Flush();
         finished = true;
     }
+
   private:
+    void CreateBuffers()
+    {
+        Run("CREATE TEMP TABLE root_index_files ("
+            "index_version UINTEGER, dataset_id VARCHAR, snapshot_id VARCHAR, file_id VARCHAR, root_uri VARCHAR, "
+            "tree_name VARCHAR, schema_id VARCHAR, column_id VARCHAR, event_base UBIGINT, total_entries UBIGINT, "
+            "file_size UBIGINT, mtime_ns BIGINT, min_value DOUBLE, max_value DOUBLE, value_count UBIGINT, "
+            "null_count UBIGINT, nan_count UBIGINT, pos_inf_count UBIGINT, neg_inf_count UBIGINT, basket_count "
+            "UBIGINT)",
+            "create typed files buffer");
+        Run("CREATE TEMP TABLE root_index_schemas ("
+            "index_version UINTEGER, schema_id VARCHAR, column_id VARCHAR, logical_path VARCHAR, root_class VARCHAR, "
+            "root_type VARCHAR, duckdb_type VARCHAR, access_plan_id VARCHAR, index_signature VARCHAR, container_depth "
+            "UINTEGER)",
+            "create typed schemas buffer");
+        Run("CREATE TEMP TABLE root_index_access ("
+            "index_version UINTEGER, access_plan_id VARCHAR, level_no UINTEGER, field_name VARCHAR, root_type VARCHAR, "
+            "offset_in_parent BIGINT, cumulative_offset BIGINT, is_pointer BOOLEAN, is_container BOOLEAN, "
+            "is_primitive BOOLEAN, is_string BOOLEAN, is_fixed_array BOOLEAN, array_rank UINTEGER, "
+            "array_length UBIGINT, array_dimensions VARCHAR, element_size UINTEGER)",
+            "create typed access buffer");
+        Run("CREATE TEMP TABLE root_index_baskets ("
+            "index_version UINTEGER, snapshot_id VARCHAR, file_id VARCHAR, column_id VARCHAR, basket_id UINTEGER, "
+            "basket_branch_name VARCHAR, basket_branch_mode VARCHAR, entry_begin UBIGINT, entry_end UBIGINT, "
+            "event_base UBIGINT, flat_value_begin UBIGINT, value_count UBIGINT, physical_offset UBIGINT, "
+            "key_length UINTEGER, compressed_size UINTEGER, uncompressed_size UINTEGER, compression UINTEGER, "
+            "min_value DOUBLE, max_value DOUBLE, null_count UBIGINT, nan_count UBIGINT, pos_inf_count UBIGINT, "
+            "neg_inf_count UBIGINT, bloom_filter BLOB)",
+            "create typed baskets buffer");
+    }
     void Run(const std::string& sql, const std::string& label)
     {
         auto result = connection.Query(sql);

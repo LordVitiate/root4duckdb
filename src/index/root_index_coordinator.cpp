@@ -158,7 +158,7 @@ void RootIndexCoordinator::BuildFiles(ClientContext& context, const RootIndexBui
             [&, worker]()
             {
                 const auto worker_part = staging / "parts" / ("worker-" + std::to_string(worker));
-                RootIndexFileBuilder file_builder(options, dataset_id, state.snapshot_id);
+                const RootIndexFileBuilder file_builder(options, dataset_id, state.snapshot_id);
                 std::vector<idx_t> staged_indices;
                 std::set<std::string> written_columns;
                 bool writer_failed = false;
@@ -296,7 +296,8 @@ void RootIndexCoordinator::PreserveFailedStaging(const BuildIndexBindData& bind,
     fs::remove_all(staging, error);
 }
 
-unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& context, TableFunctionInitInput& input)
+unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& context,
+                                                               TableFunctionInitInput& input) const
 {
     auto& bind = const_cast<BuildIndexBindData&>(input.bind_data->Cast<BuildIndexBindData>());
     auto state = make_uniq<BuildIndexGlobalState>();

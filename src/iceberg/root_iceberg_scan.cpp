@@ -180,7 +180,7 @@ std::string RootIcebergCommittedSnapshotsRelation(const std::string& catalog_roo
 
 void RegisterRootIcebergCatalog(ExtensionLoader& loader)
 {
-    TableFunction function("root_iceberg_catalog", {LogicalType::VARCHAR}, CatalogInspectScan, CatalogInspectBind,
+    const TableFunction function("root_iceberg_catalog", {LogicalType::VARCHAR}, CatalogInspectScan, CatalogInspectBind,
                            CatalogInspectInit);
     loader.RegisterFunction(function);
 }

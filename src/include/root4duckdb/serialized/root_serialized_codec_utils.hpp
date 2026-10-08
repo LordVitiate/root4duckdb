@@ -13,13 +13,13 @@ namespace duckdb::rootlake::serialized_codec
 /// ROOT marker indicating a framed byte count.
 constexpr uint32_t ROOT_BYTE_COUNT_MASK = 0x40000000U;
 /// Mask extracting the payload length from a framed byte count.
-constexpr uint32_t ROOT_BYTE_COUNT_VALUE_MASK = 0x3fffffffU;
+constexpr uint32_t ROOT_BYTE_COUNT_VALUE_MASK = 0x3FFFFFFFU;
 
 /// Bounds-checked cursor for untrusted serialized ROOT bytes.
 class CheckedByteCursor final
 {
   public:
-    CheckedByteCursor(const uint8_t* data, size_t size) noexcept;
+    CheckedByteCursor(const uint8_t* data_p, size_t size_p) noexcept;
 
     [[nodiscard]] size_t Offset() const noexcept;
     [[nodiscard]] size_t Remaining() const noexcept;
@@ -28,8 +28,8 @@ class CheckedByteCursor final
     bool ReadBE16(uint16_t& value) noexcept;
     bool ReadBE32(uint32_t& value) noexcept;
     bool ReadBE64(uint64_t& value) noexcept;
-    bool Take(size_t size, const uint8_t*& begin) noexcept;
-    bool Skip(size_t size) noexcept;
+    bool Take(size_t requested, const uint8_t*& begin) noexcept;
+    bool Skip(size_t requested) noexcept;
 
   private:
     const uint8_t* data = nullptr;

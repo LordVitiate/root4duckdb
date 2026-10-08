@@ -32,7 +32,7 @@ class SerializedBasketCache
     SerializedBasketCache(const SerializedBasketCache&) = delete;
     SerializedBasketCache& operator=(const SerializedBasketCache&) = delete;
 
-    void Bind(TBranch* branch);
+    void Bind(TBranch* branch_p);
     void Reset() noexcept;
 
     bool EntrySlice(uint64_t entry, uint64_t max_entry_bytes, const uint8_t*& begin, size_t& size,

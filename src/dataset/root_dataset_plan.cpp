@@ -23,8 +23,9 @@ bool DatasetBindData::SupportStatementCache() const
 class DatasetPlanningTimer
 {
   public:
-    explicit DatasetPlanningTimer(uint64_t& elapsed_us);
+    explicit DatasetPlanningTimer(uint64_t& elapsed_us_p);
     ~DatasetPlanningTimer();
+
   private:
     uint64_t& elapsed_us;
     std::chrono::steady_clock::time_point started;
@@ -41,7 +42,7 @@ DatasetPlanningTimer::~DatasetPlanningTimer()
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
 }
 
-void DatasetTaskPlanner::BuildFileTaskGroups(DatasetGlobalState& global)
+void DatasetTaskPlanner::BuildFileTaskGroups(DatasetGlobalState& global) const
 {
     global.task_groups.clear();
     idx_t begin = 0;
@@ -58,9 +59,9 @@ void DatasetTaskPlanner::BuildFileTaskGroups(DatasetGlobalState& global)
 }
 
 void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global,
-                              optional_ptr<TableFilterSet> filters)
+                              optional_ptr<TableFilterSet> filters) const
 {
-    DatasetPlanningTimer planning_timer(global.planning_time_us);
+    const DatasetPlanningTimer planning_timer(global.planning_time_us);
     if (filters)
     {
         global.filters = filters->Copy();
@@ -334,7 +335,7 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
 }
 
 unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFunctionBindInput& input,
-                                                 vector<LogicalType>& return_types, vector<string>& return_names)
+                                                 vector<LogicalType>& return_types, vector<string>& return_names) const
 {
     auto bind = make_uniq<DatasetBindData>();
     bind->catalog_path = input.inputs[0].ToString();
@@ -449,8 +450,8 @@ unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFu
         {
             throw IOException("Failed to open entry_selection_file: " + selection_path);
         }
-        std::string selection_json((std::istreambuf_iterator<char>(selection_stream)),
-                                   std::istreambuf_iterator<char>());
+        const std::string selection_json((std::istreambuf_iterator<char>(selection_stream)),
+                                         std::istreambuf_iterator<char>());
         ParseEntrySelection(*bind, selection_json);
     }
     {
@@ -486,7 +487,7 @@ unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFu
     return bind;
 }
 
-unique_ptr<NodeStatistics> DatasetScanStateFactory::Cardinality(const FunctionData* bind_data)
+unique_ptr<NodeStatistics> DatasetScanStateFactory::Cardinality(const FunctionData* bind_data) const
 {
     if (!bind_data)
     {
@@ -497,9 +498,9 @@ unique_ptr<NodeStatistics> DatasetScanStateFactory::Cardinality(const FunctionDa
 }
 
 void DatasetTaskPlanner::PlanMetadataCount(ClientContext& context, const DatasetBindData& bind,
-                                           DatasetGlobalState& global)
+                                           DatasetGlobalState& global) const
 {
-    DatasetPlanningTimer planning_timer(global.planning_time_us);
+    const DatasetPlanningTimer planning_timer(global.planning_time_us);
     const auto files_relation = CatalogRelationSQL(bind.sources.files, bind.sources.sql_tables);
     std::string predicate = " WHERE f.column_id IN " + IdListSQL(bind.schemas, true) + " AND f.schema_id IN " +
                             IdListSQL(bind.schemas, false);
@@ -521,7 +522,7 @@ void DatasetTaskPlanner::PlanMetadataCount(ClientContext& context, const Dataset
 }
 
 unique_ptr<GlobalTableFunctionState> DatasetScanStateFactory::CreateGlobal(ClientContext& context,
-                                                                           TableFunctionInitInput& input)
+                                                                           TableFunctionInitInput& input) const
 {
     auto& bind = input.bind_data->Cast<DatasetBindData>();
     auto global = make_uniq<DatasetGlobalState>();

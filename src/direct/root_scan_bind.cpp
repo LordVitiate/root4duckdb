@@ -5,7 +5,7 @@ namespace duckdb
 {
 
 void RootScanBinder::AddEntryIdColumn(RootScanBindData& bind_data, std::vector<std::string>& return_names,
-                                      std::vector<LogicalType>& return_types)
+                                      std::vector<LogicalType>& return_types) const
 {
     return_names.emplace_back("entry_id");
     return_types.emplace_back(LogicalType(LogicalTypeId::BIGINT));
@@ -17,7 +17,7 @@ void RootScanBinder::AddEntryIdColumn(RootScanBindData& bind_data, std::vector<s
 void RootScanBinder::BindDirectPrimitives(RootScanBindData& bind_data, const std::string& path_prefix,
                                           const std::vector<std::string>& matching_paths,
                                           std::vector<std::string>& return_names,
-                                          std::vector<LogicalType>& return_types)
+                                          std::vector<LogicalType>& return_types) const
 {
     RootDebug("BIND.PRIMITIVES_BEGIN",
               "prefix=" + path_prefix + " matching_paths=" + std::to_string(matching_paths.size()));
@@ -33,7 +33,8 @@ void RootScanBinder::BindDirectPrimitives(RootScanBindData& bind_data, const std
     for (const auto& full_path : matching_paths)
     {
         RootDebug("BIND.PRIMITIVE_PATH", "path=" + full_path);
-        std::string rest = full_path.size() < path_prefix.size() ? std::string() : full_path.substr(path_prefix.size());
+        const std::string rest =
+            full_path.size() < path_prefix.size() ? std::string() : full_path.substr(path_prefix.size());
         if (rest.find('/') != std::string::npos)
         {
             continue;
@@ -140,31 +141,9 @@ void RootScanBinder::BindDirectPrimitives(RootScanBindData& bind_data, const std
                                          " return_names=" + std::to_string(return_names.size()));
 }
 
-void RootScanBinder::BindBrowseMode(RootScanBindData& bind_data, const std::string& path_prefix,
-                                    const std::set<std::string>& direct_children,
-                                    std::vector<std::string>& return_names, std::vector<LogicalType>& return_types)
-{
-    std::vector<std::string> children;
-    return_names.emplace_back("path");
-    return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
-    for (const auto& child_full_path : direct_children)
-    {
-        std::string folder_name = child_full_path.substr(path_prefix.size());
-        if (!folder_name.empty() && folder_name.back() == '/')
-        {
-            folder_name.pop_back();
-        }
-        if (folder_name.empty())
-        {
-            continue;
-        }
-        children.push_back(std::move(folder_name));
-    }
-    bind_data.SelectBrowseMode(std::move(children));
-}
-
 void RootScanBinder::BindEmptyResult(RootScanBindData& bind_data, const std::string& path_prefix,
-                                     std::vector<std::string>& return_names, std::vector<LogicalType>& return_types)
+                                     std::vector<std::string>& return_names,
+                                     std::vector<LogicalType>& return_types) const
 {
     bind_data.SelectEmptyMode();
     bind_data.total_rows = 0;
@@ -176,12 +155,12 @@ void RootScanBinder::BindEmptyResult(RootScanBindData& bind_data, const std::str
         {
             clean_prefix.pop_back();
         }
-        size_t last_slash = clean_prefix.find_last_of('/');
-        std::string container_name =
+        const size_t last_slash = clean_prefix.find_last_of('/');
+        const std::string container_name =
             (last_slash == std::string::npos) ? clean_prefix : clean_prefix.substr(last_slash + 1);
         if (container_name.find("vec") == 0 || container_name.find("set") == 0)
         {
-            std::string idx_name = container_name + "_idx";
+            const std::string idx_name = container_name + "_idx";
             RootScanColumn idx_col;
             idx_col.name = idx_name;
             idx_col.is_virtual_index = true;
@@ -193,7 +172,7 @@ void RootScanBinder::BindEmptyResult(RootScanBindData& bind_data, const std::str
     }
 }
 
-bool RootScanBinder::LoadRequestedDictionary(ClientContext& context, TableFunctionBindInput& input)
+bool RootScanBinder::LoadRequestedDictionary(ClientContext& context, TableFunctionBindInput& input) const
 {
     auto it = input.named_parameters.find("dictionary");
     if (it == input.named_parameters.end())
@@ -211,7 +190,8 @@ bool RootScanBinder::LoadRequestedDictionary(ClientContext& context, TableFuncti
 }
 
 bool RootScanBinder::BindSemanticPath(RootScanBindData& bind_data, TFile* file, const std::string& path_prefix_raw,
-                                      std::vector<std::string>& return_names, std::vector<LogicalType>& return_types)
+                                      std::vector<std::string>& return_names,
+                                      std::vector<LogicalType>& return_types) const
 {
     RootDebug("SEMANTIC.BEGIN", "path=" + path_prefix_raw + " file_ptr=" + RootPointer(file));
     const auto parsed = rootlake::ParsePathPrefix(path_prefix_raw);
@@ -274,7 +254,7 @@ bool RootScanBinder::BindSemanticPath(RootScanBindData& bind_data, TFile* file, 
                                 "' exposes no readable immediate primitive/string columns");
 }
 
-std::unique_ptr<TFile> RootScanBinder::OpenRepresentativeFile(RootScanBindData& bind_data)
+std::unique_ptr<TFile> RootScanBinder::OpenRepresentativeFile(RootScanBindData& bind_data) const
 {
     std::vector<std::string> failures;
     for (idx_t source_id = 0; source_id < bind_data.root_paths.size(); ++source_id)
@@ -300,7 +280,7 @@ std::unique_ptr<TFile> RootScanBinder::OpenRepresentativeFile(RootScanBindData& 
 }
 
 void RootScanBinder::AddMultiFileIdentityColumns(RootScanBindData& bind_data, std::vector<std::string>& return_names,
-                                                 std::vector<LogicalType>& return_types)
+                                                 std::vector<LogicalType>& return_types) const
 {
     if (!bind_data.IsMultiFile() || bind_data.IsBrowseMode() || bind_data.source_id_column != DConstants::INVALID_INDEX)
     {
@@ -324,9 +304,9 @@ void RootScanBinder::AddMultiFileIdentityColumns(RootScanBindData& bind_data, st
 }
 
 unique_ptr<FunctionData> RootScanBinder::Bind(ClientContext& context, TableFunctionBindInput& input,
-                                              vector<LogicalType>& return_types, vector<string>& return_names)
+                                              vector<LogicalType>& return_types, vector<string>& return_names) const
 {
-    RootDebugOperationScope debug_operation("RootScanBind");
+    const RootDebugOperationScope debug_operation("RootScanBind");
     auto bind_data = make_uniq<RootScanBindData>();
     ConfigureOptions(*bind_data, context, input);
     const bool dictionary_loaded = LoadRequestedDictionary(context, input);
@@ -348,7 +328,7 @@ unique_ptr<FunctionData> RootScanBinder::Bind(ClientContext& context, TableFunct
 }
 
 void RootScanBinder::ConfigureOptions(RootScanBindData& bind_data, ClientContext& context,
-                                      TableFunctionBindInput& input)
+                                      TableFunctionBindInput& input) const
 {
     bind_data.input_specification = input.inputs[0].ToString();
     bind_data.root_paths = rootlake::RootInputResolver(context).Resolve(bind_data.input_specification);
@@ -386,7 +366,7 @@ void RootScanBinder::ConfigureOptions(RootScanBindData& bind_data, ClientContext
 }
 
 void RootScanBinder::BindRootBrowse(RootScanBindData& bind_data, std::vector<std::string>& return_names,
-                                    std::vector<LogicalType>& return_types)
+                                    std::vector<LogicalType>& return_types) const
 {
     auto file = OpenRepresentativeFile(bind_data);
     std::set<std::string> children;
@@ -429,7 +409,7 @@ void RootScanBinder::BindRootBrowse(RootScanBindData& bind_data, std::vector<std
 
 void RootScanBinder::BindRequestedPath(RootScanBindData& bind_data, TableFunctionBindInput& input,
                                        bool dictionary_loaded, std::vector<std::string>& return_names,
-                                       std::vector<LogicalType>& return_types)
+                                       std::vector<LogicalType>& return_types) const
 {
     const std::string path_prefix_raw = input.named_parameters["path_prefix"].ToString();
     RootDebug("BIND.PATH", "path_prefix=" + path_prefix_raw);
@@ -477,7 +457,7 @@ void RootScanBinder::BindRequestedPath(RootScanBindData& bind_data, TableFunctio
     AddMultiFileIdentityColumns(bind_data, return_names, return_types);
 }
 
-std::vector<RootPrimitiveBranch> RootScanBinder::CollectPrimitiveBranches(TTree& tree)
+std::vector<RootPrimitiveBranch> RootScanBinder::CollectPrimitiveBranches(TTree& tree) const
 {
     std::vector<RootPrimitiveBranch> result;
     auto* branches = tree.GetListOfBranches();
@@ -498,7 +478,7 @@ std::vector<RootPrimitiveBranch> RootScanBinder::CollectPrimitiveBranches(TTree&
     return result;
 }
 
-bool RootScanBinder::IsTreeName(TFile& file, const std::string& name)
+bool RootScanBinder::IsTreeName(TFile& file, const std::string& name) const
 {
     TIter next(file.GetListOfKeys());
     while (auto* key = dynamic_cast<TKey*>(next()))
@@ -513,7 +493,7 @@ bool RootScanBinder::IsTreeName(TFile& file, const std::string& name)
 
 void RootScanBinder::BindPrimitiveCompatibility(RootScanBindData& bind_data, TFile& file, TTree& tree,
                                                 const std::string& path_prefix, std::vector<std::string>& return_names,
-                                                std::vector<LogicalType>& return_types)
+                                                std::vector<LogicalType>& return_types) const
 {
     const auto branches = CollectPrimitiveBranches(tree);
     const std::string target_name =

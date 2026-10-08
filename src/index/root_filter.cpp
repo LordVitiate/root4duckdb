@@ -168,7 +168,7 @@ class RootFilterEvaluator::Impl
             {
                 return true;
             }
-            lock_guard<mutex> guard(dynamic.filter_data->lock);
+            const lock_guard<mutex> guard(dynamic.filter_data->lock);
             return !dynamic.filter_data->initialized || !dynamic.filter_data->filter ||
                    Evaluate(context, *dynamic.filter_data->filter, actual);
         }
@@ -206,6 +206,7 @@ class RootFilterEvaluator::Impl
             throw NotImplementedException("Unsupported pushed ROOT table filter for a scalar column");
         }
     }
+
   private:
     std::unordered_map<const ExpressionFilter*, unique_ptr<ExpressionExecutor>> expression_executors;
 };
@@ -332,7 +333,7 @@ RootUnsignedFilterRange ExtractRootUnsignedRange(const TableFilter& filter)
         {
             return result;
         }
-        lock_guard<mutex> guard(dynamic.filter_data->lock);
+        const lock_guard<mutex> guard(dynamic.filter_data->lock);
         if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
         {
             return result;

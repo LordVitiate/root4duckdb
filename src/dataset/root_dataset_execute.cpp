@@ -48,7 +48,7 @@ void DatasetScanExecutor::SyncSerializedCounters(DatasetLocalState& local, Datas
 }
 
 void DatasetScanExecutor::OpenTaskFile(const DatasetBindData& bind, DatasetGlobalState& global,
-                                       DatasetLocalState& local, const RootBasketTask& task)
+                                       DatasetLocalState& local, const RootBasketTask& task) const
 {
     if (local.open_uri == task.root_uri && local.open_schema == task.schema_id && local.file)
     {
@@ -154,7 +154,8 @@ void DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, ui
     }
 }
 
-bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local)
+bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global,
+                                    DatasetLocalState& local) const
 {
     while (true)
     {
@@ -214,7 +215,7 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
     }
 }
 
-bool DatasetScanExecutor::PassesPathPredicates(const DatasetBindData& bind, DatasetLocalState& local,
+bool DatasetScanExecutor::PassesPathPredicates(const DatasetBindData& bind, const DatasetLocalState& local,
                                                void* object) const
 {
 
@@ -236,7 +237,7 @@ bool DatasetScanExecutor::PassesPathPredicates(const DatasetBindData& bind, Data
 }
 
 bool DatasetScanExecutor::LoadNextEntry(const DatasetBindData& bind, DatasetLocalState& local,
-                                        DatasetGlobalState& global)
+                                        DatasetGlobalState& global) const
 {
 
     const bool typed_transport = RequiresTypedDatasetValue(bind.value_type);
@@ -436,7 +437,7 @@ void DatasetScanExecutor::EmitProjectedRow(const DatasetBindData& bind, const Da
     }
 }
 
-unique_ptr<LocalTableFunctionState> DatasetScanStateFactory::CreateLocal()
+unique_ptr<LocalTableFunctionState> DatasetScanStateFactory::CreateLocal() const
 {
     auto local = make_uniq<DatasetLocalState>();
     return local;
@@ -525,7 +526,7 @@ idx_t DatasetScanExecutor::ReserveOutputRows(DatasetGlobalState& global, idx_t r
     return 0;
 }
 
-void DatasetScanExecutor::Scan(ClientContext& context, TableFunctionInput& input, DataChunk& output)
+void DatasetScanExecutor::Scan(ClientContext& context, TableFunctionInput& input, DataChunk& output) const
 {
     auto& bind = input.bind_data->Cast<DatasetBindData>();
     auto& global = input.global_state->Cast<DatasetGlobalState>();
