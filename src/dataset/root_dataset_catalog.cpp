@@ -221,8 +221,9 @@ CatalogSources RootDatasetCatalog::ResolveSources(const std::string& catalog_pat
         resolved_sources.schemas = resolved_sources.catalog_prefix + "_schemas";
         resolved_sources.access = resolved_sources.catalog_prefix + "_access";
         resolved_sources.baskets = resolved_sources.catalog_prefix + "_baskets";
+        // SQL table publication uses _snapshots as its commit record.
+        // Only require a separate commit ledger when explicitly configured.
         resolved_sources.snapshots = resolved_sources.catalog_prefix + "_snapshots";
-        resolved_sources.commits = resolved_sources.catalog_prefix + "_commits";
         resolved_sources.sql_tables = true;
         return resolved_sources;
     }
