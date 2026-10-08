@@ -193,7 +193,8 @@ bool ResolveSerializedVersionedMember(const SerializedReadPlan& plan, int32_t el
             return false;
         }
     }
-    else if (plan.Is(SerializedProjectionKind::SELECTED_SUBTREE))
+    else if (plan.Is(SerializedProjectionKind::SELECTED_SUBTREE) ||
+             plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER))
     {
         // Preserve the on-file object/container shape when resolving versioned offsets.
         const bool planned_is_primitive = plan.projection_levels.size() > 1 && plan.projection_levels[1].is_primitive;
