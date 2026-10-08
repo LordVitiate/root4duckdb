@@ -46,23 +46,23 @@ void LoadRootInternal(ExtensionLoader& loader)
     // Multiple DuckDB databases can LOAD the same extension concurrently.
     // Register each database independently while serializing ROOT startup.
     const std::lock_guard<std::mutex> lock(RootExtensionLoadMutex());
-    rootlake::RootDebug("LOAD.ENTER", "before ROOT::EnableThreadSafety");
+    RootDebug("LOAD.ENTER", "before ROOT::EnableThreadSafety");
     static std::once_flag root_runtime_once;
     std::call_once(root_runtime_once, InitializeRootRuntime);
-    rootlake::RootDebug("LOAD.RUNTIME_READY", "before RegisterRootScan");
+    RootDebug("LOAD.RUNTIME_READY", "before RegisterRootScan");
     RegisterRootScan(loader);
-    rootlake::RootDebug("LOAD.SCAN_READY", "before RegisterRootDescribe");
+    RootDebug("LOAD.SCAN_READY", "before RegisterRootDescribe");
     RegisterRootDescribe(loader);
-    rootlake::RootDebug("LOAD.DESCRIBE_READY", "before runtime settings");
+    RootDebug("LOAD.DESCRIBE_READY", "before runtime settings");
     // Versioned Parquet/Iceberg-backed deep index API.
     rootlake::RegisterRootRuntimeSettings(loader);
-    rootlake::RootDebug("LOAD.SETTINGS_READY", "before index registration");
+    RootDebug("LOAD.SETTINGS_READY", "before index registration");
     rootlake::RegisterRootLakeIndex(loader);
-    rootlake::RootDebug("LOAD.INDEX_READY", "before dataset scan registration");
+    RootDebug("LOAD.INDEX_READY", "before dataset scan registration");
     rootlake::RegisterRootLakeScan(loader);
-    rootlake::RootDebug("LOAD.DATASET_READY", "before Iceberg registration");
+    RootDebug("LOAD.DATASET_READY", "before Iceberg registration");
     rootlake::RegisterRootIcebergCatalog(loader);
-    rootlake::RootDebug("LOAD.COMPLETE", "all functions registered");
+    RootDebug("LOAD.COMPLETE", "all functions registered");
 }
 
 #ifndef ROOT4DUCKDB_PAYLOAD_ONLY
@@ -112,16 +112,16 @@ extern "C"
                 return false;
             }
             // Match DuckDB C API DatabaseWrapper layout for the pinned ABI.
-            duckdb::rootlake::RootDebug("PAYLOAD.DB_HANDLE", "before DuckDB wrapper inspection");
+            duckdb::RootDebug("PAYLOAD.DB_HANDLE", "before DuckDB wrapper inspection");
             auto* wrapper = reinterpret_cast<duckdb::DatabaseWrapper*>(database_handle);
             if (!wrapper || !wrapper->database || !wrapper->database->instance)
             {
                 access->set_error(info, "ROOT4DuckDB payload received an invalid host DuckDB database");
                 return false;
             }
-            duckdb::rootlake::RootDebug("PAYLOAD.WRAPPER_READY", "before ExtensionLoader construction");
+            duckdb::RootDebug("PAYLOAD.WRAPPER_READY", "before ExtensionLoader construction");
             duckdb::ExtensionLoader loader(*wrapper->database->instance, "root");
-            duckdb::rootlake::RootDebug("PAYLOAD.LOADER_READY", "before function registration");
+            duckdb::RootDebug("PAYLOAD.LOADER_READY", "before function registration");
             duckdb::LoadRootInternal(loader);
             return true;
         }
