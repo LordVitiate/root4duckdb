@@ -107,6 +107,13 @@ void CollectImmediateMemberNames(TClass* klass, std::vector<std::string>& names,
     {
         return;
     }
+    // TObject bookkeeping is not physics data. Do not expose fUniqueID/fBits
+    // through automatic semantic discovery or SELECT *.
+    if (class_name == "TObject")
+    {
+        active_bases.erase(class_name);
+        return;
+    }
     auto* streamer = klass->GetStreamerInfo();
     auto* elements = streamer ? streamer->GetElements() : nullptr;
     if (!elements)
