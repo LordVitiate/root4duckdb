@@ -185,7 +185,8 @@ CatalogSources RootDatasetCatalog::ResolveSources(const std::string& catalog_pat
         resolved_sources.access = RootIcebergRelation(catalog_path, "access");
         resolved_sources.baskets = RootIcebergRelation(catalog_path, "baskets");
         resolved_sources.snapshots = RootIcebergCommittedSnapshotsRelation(catalog_path, ROOT_LAKE_INDEX_VERSION);
-        resolved_sources.commits = RootIcebergRelation(catalog_path, "commits");
+        resolved_sources.commits = "(SELECT root_snapshot_id AS snapshot_id, state, committed_at_ns FROM " +
+                                   RootIcebergRelation(catalog_path, "commits") + ")";
         resolved_sources.sql_tables = true;
         return resolved_sources;
     }
