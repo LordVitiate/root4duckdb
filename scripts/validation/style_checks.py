@@ -23,6 +23,7 @@ def _check_cpp(validator: ProjectValidator) -> None:
         for directory in ("src", "test", "examples")
         for source in (validator.root / directory).rglob("*")
         if source.suffix in (".cpp", ".hpp", ".h", ".C", ".c")
+        and not any(part.startswith(".tmp-") for part in source.relative_to(validator.root).parts)
     ]
     for source in sources:
         text = source.read_text()
