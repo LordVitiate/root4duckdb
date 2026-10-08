@@ -68,20 +68,6 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
     (void)out_count;
     const uint64_t entry = lstate.local_current_row;
     const auto entry_id = CheckedEntryId(entry);
-    std::map<std::string, std::vector<idx_t>> branch_columns;
-    for (idx_t out_idx = 0; out_idx < gstate.scan_column_ids.size(); ++out_idx)
-    {
-        const idx_t col_idx = gstate.scan_column_ids[out_idx];
-        if (col_idx == COLUMN_IDENTIFIER_ROW_ID || col_idx >= bind_data.columns.size())
-        {
-            continue;
-        }
-        const auto& col = bind_data.columns[col_idx];
-        if (!col.levels.empty() && !col.is_virtual_index && col.name != "entry_id")
-        {
-            branch_columns[col.branch_name].push_back(col_idx);
-        }
-    }
     lstate.cached_results.resize(bind_data.columns.size());
     std::set<idx_t> serialized_success;
     for (auto& serialized : lstate.serialized_columns)
@@ -145,7 +131,7 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
         return true;
     };
     bool has_data = false;
-    for (const auto& [branch_name, col_indices] : branch_columns)
+    for (const auto& [branch_name, col_indices] : lstate.projected_branch_columns)
     {
         auto reader_it = lstate.root_readers.find(branch_name);
         if (reader_it == lstate.root_readers.end())
