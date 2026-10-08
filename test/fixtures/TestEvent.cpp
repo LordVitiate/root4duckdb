@@ -2,6 +2,37 @@
 
 #include "TBuffer.h"
 
+#include <atomic>
+#include <cstdint>
+
+namespace
+{
+
+std::atomic<std::uint64_t> constructed_events{0};
+std::atomic<std::uint64_t> destroyed_events{0};
+
+} // namespace
+
+TestEvent::TestEvent()
+{
+    ++constructed_events;
+}
+
+TestEvent::~TestEvent()
+{
+    ++destroyed_events;
+}
+
+extern "C" std::uint64_t root4duckdb_fixture_constructed_events()
+{
+    return constructed_events.load();
+}
+
+extern "C" std::uint64_t root4duckdb_fixture_destroyed_events()
+{
+    return destroyed_events.load();
+}
+
 TestHit::TestHit(Double_t value) : u(static_cast<Float_t>(value))
 {
     uv[0] = static_cast<Float_t>(value);
