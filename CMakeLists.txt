@@ -184,6 +184,38 @@ install(
 )
 
 
+
+# Optional binary-portability experiment. Disabled for normal builds.
+#
+# GCC -static-libstdc++ removes *direct* libstdc++ symbol-version needs
+# from the embedded C++ payload. It does not change ROOT's own shared-library
+# dependencies or make cross-DSO C++ object exchange ABI-safe.
+#
+# Do NOT apply the flag to the host DuckDB, the C bootstrap, or ROOT.
+option(ROOT4DUCKDB_PAYLOAD_STATIC_LIBSTDCXX
+       "Experiment: link GNU libstdc++ statically into ROOT payload"
+       OFF)
+
+if(ROOT4DUCKDB_PAYLOAD_STATIC_LIBSTDCXX)
+    if(NOT ROOT4DUCKDB_RUNTIME_BOOTSTRAP OR
+       NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+       NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        message(FATAL_ERROR
+            "ROOT4DUCKDB_PAYLOAD_STATIC_LIBSTDCXX requires Linux, GCC, "
+            "and ROOT4DUCKDB_RUNTIME_BOOTSTRAP=ON")
+    endif()
+
+    # GCC driver option: keep libgcc_s dynamic so the system's exception
+    # unwinder remains shared. Static libstdc++ is an ABI experiment only.
+    target_link_options(root_payload_loadable_extension
+        PRIVATE
+        "-static-libstdc++"
+    )
+
+    message(STATUS
+        "[EXPERIMENT] Static libstdc++ enabled for embedded ROOT payload")
+endif()
+
 # ROOT4DUCKDB_PAYLOAD_ARCHIVE_RESCAN
 #
 # Resolve circular dependencies between DuckDB static archives
