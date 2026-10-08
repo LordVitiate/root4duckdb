@@ -15,7 +15,7 @@ bool PredicateMetadataMayMatch(const PathPredicateBinding& predicate, const Valu
 bool UsesDoubleBackedValueMetadata(const LogicalType& type);
 
 /// Parses and binds auxiliary semantic-path predicates.
-void ParsePathPredicates(RootDatasetCatalog& catalog, DatasetBindData& bind, const std::string& raw_json);
+void ParsePathPredicates(const RootDatasetCatalog& catalog, DatasetBindData& bind, const std::string& raw_json);
 
 /// Builds a conservative min/max SQL pruning clause.
 std::string ZonemapClause(const TableFilter& filter, const std::string& min_expr, const std::string& max_expr,
