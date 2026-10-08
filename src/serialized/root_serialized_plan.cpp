@@ -464,6 +464,8 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     plan.outer_element_class = outer_element_class;
     plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
     plan.projection_levels = levels;
+    plan.projection_levels.front().offset_in_parent = 0;
+    plan.projection_levels.front().cumulative_offset = 0;
     plan.streamer_version = static_cast<uint32_t>(std::max(0, static_cast<int>(outer_element_class->GetClassVersion())));
     plan.value_type = type;
     plan.value_bytes = value_width;
