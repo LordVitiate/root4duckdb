@@ -504,6 +504,8 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
             if (DecodeSerializedNestedFixedColumn(buffer, plan, entry_size, outer_count, max_values_per_entry,
                                                   values, flat_indices, failure_reason, collect_indices))
             {
+                RootDebug("SERIALIZED.NESTED_FIXED_OFFSET",
+                          "path=" + plan.logical_path + " values=" + std::to_string(values.size()));
                 return true;
             }
             const auto offset_reason = failure_reason;
