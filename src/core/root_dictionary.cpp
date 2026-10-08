@@ -39,7 +39,7 @@ bool Load(const std::string& path, bool detailed_debug)
         RootDebug("DICT.MUTEX_WAIT", "path=" + path);
     }
     const std::lock_guard<std::mutex> lock(DictionaryMutex());
-    if (LoadedDictionaryPaths().contains(path))
+    if (LoadedDictionaryPaths().find(path) != LoadedDictionaryPaths().end())
     {
         return true;
     }
