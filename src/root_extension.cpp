@@ -9,6 +9,8 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/capi/capi_internal.hpp"
 
+#include <mutex>
+
 namespace duckdb
 {
 
@@ -20,9 +22,35 @@ void RegisterRootLakeIndex(ExtensionLoader& loader);
 void RegisterRootLakeScan(ExtensionLoader& loader);
 } // namespace rootlake
 
-void LoadRootInternal(ExtensionLoader& loader)
+namespace
+{
+
+std::mutex& RootExtensionLoadMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+void InitializeRootRuntime()
 {
     ROOT::EnableThreadSafety();
+    // ROOT initialization changes process signal handling. Never repeat this
+    // process-global operation while another DuckDB connection is executing.
+    if (gSystem)
+    {
+        gSystem->ResetSignals();
+    }
+}
+
+} // namespace
+
+void LoadRootInternal(ExtensionLoader& loader)
+{
+    // Multiple DuckDB databases can LOAD the same extension concurrently.
+    // Register each database independently while serializing ROOT startup.
+    const std::lock_guard<std::mutex> lock(RootExtensionLoadMutex());
+    static std::once_flag root_runtime_once;
+    std::call_once(root_runtime_once, InitializeRootRuntime);
     RegisterRootScan(loader);
     RegisterRootDescribe(loader);
     // Versioned Parquet/Iceberg-backed deep index API.
@@ -30,11 +58,6 @@ void LoadRootInternal(ExtensionLoader& loader)
     rootlake::RegisterRootLakeIndex(loader);
     rootlake::RegisterRootLakeScan(loader);
     rootlake::RegisterRootIcebergCatalog(loader);
-    // Restore host signal handlers after ROOT initialization.
-    if (gSystem)
-    {
-        gSystem->ResetSignals();
-    }
 }
 
 #ifndef ROOT4DUCKDB_PAYLOAD_ONLY
