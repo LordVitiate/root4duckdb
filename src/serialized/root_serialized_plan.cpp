@@ -791,6 +791,79 @@ bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t 
     return ResolveSerializedFixedLayout(nested_plan, element_version, resolved_layout, failure_reason);
 }
 
+bool ResolveSerializedNestedMemberWiseStride(const SerializedReadPlan& plan, int32_t element_version,
+                                              uint64_t& bytes_per_element, std::string& failure_reason)
+{
+    bytes_per_element = 0;
+    if (!plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER) || !plan.nested_element_class ||
+        element_version < 0)
+    {
+        failure_reason = "nested member-wise stride requires a versioned element class";
+        return false;
+    }
+    auto* streamer = plan.nested_element_class->GetStreamerInfo(element_version);
+    auto* elements = streamer ? streamer->GetElements() : nullptr;
+    if (!elements)
+    {
+        failure_reason = "nested member-wise element has no matching on-file streamer";
+        return false;
+    }
+    bool target_seen = false;
+    uint64_t stride = 0;
+    for (int i = 0; i < elements->GetEntries(); ++i)
+    {
+        auto* element = dynamic_cast<TStreamerElement*>(elements->At(i));
+        if (!element)
+        {
+            failure_reason = "nested member-wise element contains invalid streamer metadata";
+            return false;
+        }
+        uint64_t width = 0;
+        if (element->IsBase())
+        {
+            std::string base_type = TrimType(element->GetTypeName() ? element->GetTypeName() : "");
+            if (base_type.empty() || base_type == "BASE")
+            {
+                base_type = TrimType(element->GetName() ? element->GetName() : "");
+            }
+            if (base_type != "TObject")
+            {
+                failure_reason = "nested member-wise element has unsupported base: " + base_type;
+                return false;
+            }
+            width = 10;
+        }
+        else
+        {
+            uint32_t primitive_width = 0;
+            std::string width_reason;
+            if (!FixedPrimitiveWidth(element, primitive_width, width_reason))
+            {
+                failure_reason = "nested member-wise stride is not fixed: " + width_reason;
+                return false;
+            }
+            width = primitive_width;
+            if (plan.nested_member_name == element->GetName())
+            {
+                target_seen = true;
+            }
+        }
+        if (stride > std::numeric_limits<uint64_t>::max() - width)
+        {
+            failure_reason = "nested member-wise element stride overflow";
+            return false;
+        }
+        stride += width;
+    }
+    if (!target_seen || !stride)
+    {
+        failure_reason = "nested fixed member missing from versioned member-wise element";
+        return false;
+    }
+    bytes_per_element = stride;
+    return true;
+}
+
 bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
                                   SerializedEntryLayout& resolved_layout, std::string& failure_reason)
 {
