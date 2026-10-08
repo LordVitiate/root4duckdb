@@ -44,15 +44,20 @@ void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column,
     {
         throw InternalException("serialized ROOT index shape differs from bound SQL schema");
     }
-    std::vector<int> indices(plan.index_depth);
-    for (idx_t value_index = 0; value_index < values.size(); ++value_index)
+    const auto value_count = values.size();
+    result.strings.resize(value_count);
+    result.numbers = values;
+    result.is_string_flag.resize(value_count, false);
+    result.entry_ids.resize(value_count, entry_id);
+    result.vector_indices.resize(value_count);
+    if (value_count > 0)
     {
-        for (idx_t depth = 0; depth < plan.index_depth; ++depth)
-        {
-            indices[depth] = flat_indices[value_index * plan.index_depth + depth];
-        }
-        const std::vector<int32_t> flat_index_row(indices.begin(), indices.end());
-        result.AddNumber(values[value_index], entry_id, flat_index_row, index_names);
+        result.vector_names = index_names;
+    }
+    for (idx_t value_index = 0; value_index < value_count; ++value_index)
+    {
+        const auto first = flat_indices.begin() + value_index * plan.index_depth;
+        result.vector_indices[value_index].assign(first, first + plan.index_depth);
     }
 }
 
