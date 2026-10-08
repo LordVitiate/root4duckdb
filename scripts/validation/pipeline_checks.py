@@ -67,7 +67,7 @@ def _check_feature_groups(validator: ProjectValidator) -> None:
         "direct scan": (
             validator.source_group("src/direct/*", "src/include/root4duckdb/direct/*.hpp", "src/root_scan.cpp"),
             (
-                "rootlake::RootDictionaryCleanupMode::RETAIN",
+                "rootlake::RootDictionaryCleanupMode::FULL",
                 "rootlake::PathResolver::TryResolve",
                 "rootlake::RootObjectReader",
                 "rootlake::RootPathReader",
@@ -116,6 +116,15 @@ def _check_feature_groups(validator: ProjectValidator) -> None:
     }
     for label, (source, tokens) in groups.items():
         validator.require_tokens(label, source, tokens)
+
+    # Direct scans own dictionary-created objects. Do not silently restore
+    # the former RETAIN default, which leaked one object per reader lifetime.
+    direct_bind = validator.read("src/direct/root_scan_bind.cpp")
+    validator.require_tokens("direct ROOT object ownership", direct_bind, (
+        "bind_data->root_access.dictionary_cleanup_mode = rootlake::RootDictionaryCleanupMode::FULL;",
+    ))
+    if "dictionary_loaded ? rootlake::RootDictionaryCleanupMode::RETAIN" in direct_bind:
+        validator.errors.append("direct scan must reclaim dictionary-created ROOT objects")
 
     file_checks = {
         "src/core/root_debug.cpp": ("ROOT4DUCKDB_DEBUG", "ROOT4DUCKDB_DEBUG_VERBOSE"),
