@@ -4,7 +4,7 @@ namespace duckdb::rootlake {
 
 unique_ptr<FunctionData> DatasetBindData::Copy() const {
     auto result = make_uniq<DatasetBindData>(*this);
-    return std::move(result);
+    return result;
 }
 
 bool DatasetBindData::Equals(const FunctionData&) const {
@@ -420,7 +420,7 @@ unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFu
     bind->entry_id_column = return_names.size();
     return_names.push_back("entry_id");
     return_types.push_back(LogicalType::UBIGINT);
-    return std::move(bind);
+    return bind;
 }
 
 unique_ptr<NodeStatistics> DatasetScanStateFactory::Cardinality(const FunctionData* bind_data) {
@@ -497,7 +497,7 @@ unique_ptr<GlobalTableFunctionState> DatasetScanStateFactory::CreateGlobal(Clien
         const auto memory_workers = std::max<uint64_t>(1, bind.memory_budget_bytes / bind.estimated_reader_bytes);
         global->worker_limit = std::min<idx_t>(global->worker_limit, memory_workers);
     }
-    return std::move(global);
+    return global;
 }
 
 } // namespace duckdb::rootlake

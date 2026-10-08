@@ -329,7 +329,7 @@ unique_ptr<FunctionData> RootScanBinder::Bind(ClientContext& context, TableFunct
     } else {
         BindRequestedPath(*bind_data, input, dictionary_loaded, return_names, return_types);
     }
-    return std::move(bind_data);
+    return bind_data;
 }
 
 void RootScanBinder::ConfigureOptions(RootScanBindData& bind_data, ClientContext& context,

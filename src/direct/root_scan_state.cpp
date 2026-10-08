@@ -235,7 +235,7 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
             global_state->file_scheduler->SetSourceRange(global_state->source_lower, global_state->source_upper);
         }
     }
-    return std::move(global_state);
+    return global_state;
 }
 
 void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobalState& gstate,
@@ -591,7 +591,7 @@ unique_ptr<LocalTableFunctionState> RootScanStateFactory::CreateLocal(TableFunct
         !bind_data.IsMultiFile()) {
         RootScanFileManager().Open(bind_data, gstate, *local_state, bind_data.root_path, false);
     }
-    return std::move(local_state);
+    return local_state;
 }
 
 void RootScanFileManager::Reset(RootScanGlobalState& gstate, RootScanLocalState& local_state, bool completed) {

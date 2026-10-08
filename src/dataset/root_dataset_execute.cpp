@@ -407,7 +407,7 @@ void DatasetScanExecutor::EmitProjectedRow(const DatasetBindData& bind, const Da
 
 unique_ptr<LocalTableFunctionState> DatasetScanStateFactory::CreateLocal() {
     auto local = make_uniq<DatasetLocalState>();
-    return std::move(local);
+    return local;
 }
 
 void DatasetScanExecutor::EmitProjectedTypedRow(const DatasetBindData& bind, const DatasetGlobalState& global,

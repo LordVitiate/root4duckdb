@@ -1,6 +1,16 @@
 #include "root4duckdb/direct/root_scan_internal.hpp"
 
 namespace duckdb {
+namespace {
+
+int64_t CheckedEntryId(uint64_t entry) {
+    if (entry > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw InternalException("ROOT entry id exceeds the supported signed 64-bit range");
+    }
+    return static_cast<int64_t>(entry);
+}
+
+} // namespace
 
 std::vector<std::string> RootScanExecutor::SplitIndexSignature(const std::string& signature) {
     std::vector<std::string> names;
@@ -20,6 +30,7 @@ void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column,
                                                    const std::vector<int32_t>& flat_indices,
                                                    rootlake::ReadResult& result) {
     result.Clear();
+    const auto entry_id = CheckedEntryId(entry);
     const auto index_names = SplitIndexSignature(column.index_signature);
     if (index_names.size() != plan.index_depth || flat_indices.size() != values.size() * plan.index_depth) {
         throw InternalException("serialized ROOT index shape differs from bound SQL schema");
@@ -30,7 +41,7 @@ void RootScanExecutor::MaterializeSerializedResult(const RootScanColumn& column,
             indices[depth] = flat_indices[value_index * plan.index_depth + depth];
         }
         std::vector<int32_t> flat_index_row(indices.begin(), indices.end());
-        result.AddNumber(values[value_index], static_cast<Long64_t>(entry), flat_index_row, index_names);
+        result.AddNumber(values[value_index], entry_id, flat_index_row, index_names);
     }
 }
 
@@ -39,6 +50,7 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
     (void)output;
     (void)out_count;
     const uint64_t entry = lstate.local_current_row;
+    const auto entry_id = CheckedEntryId(entry);
 
     std::map<std::string, std::vector<idx_t>> branch_columns;
     for (idx_t out_idx = 0; out_idx < gstate.scan_column_ids.size(); ++out_idx) {
@@ -149,7 +161,7 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
                     const auto& col = bind_data.columns[col_idx];
                     lstate.cached_results[col_idx].Clear();
                     rootlake::OffsetValueReader::CollectDirect(object, col.levels,
-                                                               std::numeric_limits<Long64_t>::max(), entry,
+                                                               std::numeric_limits<Long64_t>::max(), entry_id,
                                                                lstate.cached_results[col_idx]);
                 }
             }
@@ -175,7 +187,7 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
                     const auto& col = bind_data.columns[col_idx];
                     lstate.cached_results[col_idx].Clear();
                     rootlake::OffsetValueReader::CollectDirect(object, col.levels,
-                                                               std::numeric_limits<Long64_t>::max(), entry,
+                                                               std::numeric_limits<Long64_t>::max(), entry_id,
                                                                lstate.cached_results[col_idx]);
                 }
             }
@@ -223,7 +235,7 @@ CacheResult RootScanExecutor::ReadAndCacheEntry(const RootScanBindData& bind_dat
                             const auto& col = bind_data.columns[sample_col_idx];
                             lstate.cached_results[sample_col_idx].Clear();
                             rootlake::OffsetValueReader::CollectDirect(object, col.levels,
-                                                                       std::numeric_limits<Long64_t>::max(), entry,
+                                                                       std::numeric_limits<Long64_t>::max(), entry_id,
                                                                        lstate.cached_results[sample_col_idx]);
                             has_data = !lstate.cached_results[sample_col_idx].empty();
                         }

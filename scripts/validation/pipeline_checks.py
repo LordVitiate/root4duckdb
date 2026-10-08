@@ -143,8 +143,8 @@ def _check_feature_groups(validator: ProjectValidator) -> None:
         "src/index/root_index_metadata.cpp": ("CREATE TEMP TABLE", "FORMAT PARQUET", "DROP TABLE root_index_files"),
         "setup-source-tree.sh": (
             '"$GIT_BIN" -C "$path" fetch',
-            'DUCKDB_COMMIT="f31be57c1845a8895169fd58142040be26d433cf"',
-            'CI_TOOLS_COMMIT="1f04702aae6f4e7ab45f38689fd79e765221b19e"',
+            'DUCKDB_COMMIT="069cc9f9b5be802405797faecc284961b07c70ef"',
+            'CI_TOOLS_COMMIT="ef15a2a7453db5b4f85b7c668a545ae2f1193ff6"',
         ),
     }
     for relative, tokens in file_checks.items():

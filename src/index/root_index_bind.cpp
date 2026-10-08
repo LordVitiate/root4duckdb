@@ -4,7 +4,7 @@ namespace duckdb::rootlake {
 
 unique_ptr<FunctionData> BuildIndexBindData::Copy() const {
     auto result = make_uniq<BuildIndexBindData>(*this);
-    return std::move(result);
+    return result;
 }
 
 bool BuildIndexBindData::Equals(const FunctionData&) const {
@@ -231,7 +231,7 @@ unique_ptr<FunctionData> RootIndexBinder::Bind(TableFunctionBindInput& input, ve
                     LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::UINTEGER, LogicalType::UINTEGER,
                     LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::VARCHAR,  LogicalType::VARCHAR,
                     LogicalType::VARCHAR};
-    return std::move(result);
+    return result;
 }
 
 } // namespace duckdb::rootlake

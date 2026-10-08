@@ -74,7 +74,7 @@ unique_ptr<FunctionData> CatalogInspectBind(ClientContext&, TableFunctionBindInp
     }
     names = {"table_name", "iceberg_snapshot_id", "metadata_location", "manifest_list"};
     types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR};
-    return std::move(data);
+    return data;
 }
 
 unique_ptr<GlobalTableFunctionState> CatalogInspectInit(ClientContext&, TableFunctionInitInput&) {

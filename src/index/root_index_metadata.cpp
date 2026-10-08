@@ -203,7 +203,9 @@ class RootIndexMetadataWriter::Impl {
             throw;
         }
         buffered_bytes += metadata.EstimatedBytes();
-        buffered_files += metadata.files.empty() ? 0 : 1;
+        if (!metadata.files.empty()) {
+            ++buffered_files;
+        }
         if (buffered_bytes >= flush_bytes) {
             Flush();
         }

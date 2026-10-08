@@ -3,12 +3,12 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-JOBS=4
+JOBS=14
 CLEAN=0
 RUN_TESTS=0
 PACKAGE_RELEASE=0
 ROOT_PREFIX_ARG=""
-DUCKDB_VERSION="${DUCKDB_VERSION:-v1.4.5}"
+DUCKDB_VERSION="${DUCKDB_VERSION:-v1.5.6}"
 
 usage() {
     cat <<'USAGE'
@@ -19,7 +19,7 @@ Builds ROOT4DuckDB against the Iceberg installation created by
 publishable loadable extension embeds the static archives.
 
 Options:
-  -j, --jobs N       Parallel build jobs (default: 4)
+  -j, --jobs N       Parallel build jobs (default: 14)
   --root PREFIX      ROOT installation prefix
   --clean            Remove build/release before building
   --tests            Run SQL and native integration tests
@@ -76,9 +76,6 @@ done
     exit 2
 }
 
-if ((JOBS > 8)); then
-    echo "[WARN] --jobs=$JOBS can exceed lxplus memory limits; 4 is the safe default."
-fi
 
 ICEBERG_ENV="$PROJECT_DIR/.deps/iceberg-env.sh"
 if [[ ! -f "$ICEBERG_ENV" ]]; then
@@ -87,9 +84,61 @@ if [[ ! -f "$ICEBERG_ENV" ]]; then
     exit 1
 fi
 
+BUILD_ENV="$PROJECT_DIR/.deps/build-env.sh"
+
+# Resolve a deterministic compiler/ROOT/runtime stack on every invocation.
+# iceberg-env.sh sources this same file, so the login-shell environment
+# cannot silently choose another ROOT or libstdc++.
+"$PROJECT_DIR/scripts/detect-build-environment.sh" --write "$BUILD_ENV"
+
 # shellcheck disable=SC1090
 source "$ICEBERG_ENV"
 hash -r
+
+# Unless the user explicitly passed --root, use the ROOT selected together
+# with the compiler/runtime by detect-build-environment.sh.
+if [[ -z "$ROOT_PREFIX_ARG" && -n "${ROOT4DUCKDB_ROOT_PREFIX:-}" ]]; then
+    ROOT_PREFIX_ARG="$ROOT4DUCKDB_ROOT_PREFIX"
+fi
+
+assert_no_afs_lookup_paths() {
+    local variable
+    local value
+    local part
+    local bad=0
+    local -a parts
+
+    for variable in \
+        PATH \
+        LD_LIBRARY_PATH \
+        LIBRARY_PATH \
+        CPATH \
+        CPLUS_INCLUDE_PATH \
+        CMAKE_PREFIX_PATH \
+        PKG_CONFIG_PATH; do
+
+        value="${!variable-}"
+        [[ -n "$value" ]] || continue
+
+        IFS=':' read -r -a parts <<< "$value"
+        for part in "${parts[@]}"; do
+            [[ -n "$part" ]] || continue
+            if [[ "$part" == /afs/* ]]; then
+                echo "[ERROR] AFS path in $variable: $part" >&2
+                bad=1
+            fi
+        done
+    done
+
+    ((bad == 0)) || {
+        echo "[ERROR] AFS is forbidden in ROOT4DuckDB build/runtime lookup paths." >&2
+        exit 1
+    }
+
+    echo "[OK] AFS absent from build/runtime lookup paths"
+}
+
+assert_no_afs_lookup_paths
 
 "$PROJECT_DIR/scripts/check-iceberg.sh" \
     --prefix "$ROOT4DUCKDB_ICEBERG_PREFIX" \
@@ -225,7 +274,112 @@ check_root_abi() {
         exit 1
     fi
 
+    local compiler_runtime
+    local cling_library=""
+    local root_runtime=""
+    local compiler_glibcxx=""
+    local root_glibcxx=""
+    local root_probe=""
+
+    compiler_runtime="$(readlink -f "$libstdcpp")"
+
+    for candidate in \
+        "$ROOT_LIBDIR/libCling.so" \
+        "$ROOT_LIBDIR"/libCling.so.*; do
+        if [[ -e "$candidate" ]]; then
+            cling_library="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$cling_library" ]]; then
+        root_runtime="$(
+            ldd "$cling_library" 2>/dev/null |
+                awk '/libstdc\+\+\.so\.6/ && !found {
+                    if ($2 == "=>") {
+                        value = $3
+                    } else {
+                        value = $1
+                    }
+                    found = 1
+                }
+                END {
+                    if (found) {
+                        print value
+                    }
+                }'
+        )"
+
+        if [[ -n "$root_runtime" && -e "$root_runtime" ]]; then
+            root_runtime="$(readlink -f "$root_runtime")"
+
+            if [[ "$root_runtime" != "$compiler_runtime" ]]; then
+                echo "[ERROR] ROOT and compiler resolve different libstdc++ runtimes." >&2
+                echo "        ROOT:     $root_runtime" >&2
+                echo "        compiler: $compiler_runtime" >&2
+                exit 1
+            fi
+        fi
+    fi
+
+    compiler_glibcxx="$(
+        printf '#include <bits/c++config.h>\n' |
+            "$CXX" -dM -E -x c++ - |
+            awk '$2 == "__GLIBCXX__" { value = $3 }
+                 END {
+                     if (value != "") {
+                         print value
+                     }
+                 }'
+    )"
+
+    if command -v root >/dev/null 2>&1; then
+        # Do not let `set -e` turn a diagnostic ROOT invocation into a silent
+        # build-script exit. Capture its status explicitly and report it.
+        if root_probe="$(
+            root -l -b -q \
+                -e 'std::cout << "__ROOT4DUCKDB_GLIBCXX__=" << __GLIBCXX__ << std::endl; gSystem->Exit(0);' \
+                2>&1
+        )"; then
+            :
+        else
+            root_status=$?
+            echo "[ERROR] ROOT ABI probe failed with status $root_status" >&2
+            printf '%s\n' "$root_probe" >&2
+            exit 1
+        fi
+
+        root_glibcxx="$(
+            sed -nE \
+                's/.*__ROOT4DUCKDB_GLIBCXX__=([0-9]+).*/\1/p' \
+                <<<"$root_probe"
+        )"
+
+        if [[ -z "$root_glibcxx" ]]; then
+            echo "[ERROR] Could not determine ROOT/Cling __GLIBCXX__." >&2
+            printf '%s\n' "$root_probe" >&2
+            exit 1
+        fi
+
+        if [[ "$root_glibcxx" != "$compiler_glibcxx" ]]; then
+            echo "[ERROR] ROOT/Cling and compiler use different C++ headers." >&2
+            echo "        ROOT __GLIBCXX__:     $root_glibcxx" >&2
+            echo "        compiler __GLIBCXX__: $compiler_glibcxx" >&2
+            exit 1
+        fi
+
+        if grep -Eq \
+            'CheckABICompatibility|Possible C\+\+ standard library mismatch' \
+            <<<"$root_probe"; then
+            echo "[ERROR] ROOT/Cling reported a C++ standard-library mismatch." >&2
+            printf '%s\n' "$root_probe" >&2
+            exit 1
+        fi
+    fi
+
     echo "[OK] ROOT/libstdc++ ABI preflight passed"
+    echo "[OK] ROOT/compiler __GLIBCXX__=$compiler_glibcxx"
+    echo "[OK] ROOT/compiler runtime=$compiler_runtime"
 }
 
 source_root
@@ -257,9 +411,12 @@ int main() {
 }
 CPP
 
-ROOT_INCDIR="$(root-config --incdir)"
-ROOT_LIBDIR="$(root-config --libdir)"
-ROOT_VERSION="$(root-config --version)"
+ROOT_CONFIG_REAL="$(readlink -f "$(command -v root-config)")"
+ROOT_INCDIR="$("$ROOT_CONFIG_REAL" --incdir)"
+ROOT_LIBDIR="$("$ROOT_CONFIG_REAL" --libdir)"
+ROOT_VERSION="$("$ROOT_CONFIG_REAL" --version)"
+
+export ROOT4DUCKDB_ROOT_CONFIG="$ROOT_CONFIG_REAL"
 
 ICEBERG_LIBRARY_PATH="$ROOT4DUCKDB_ICEBERG_PREFIX/lib"
 ICEBERG_LIBRARY_PATH+=":$ROOT4DUCKDB_ICEBERG_PREFIX/lib64"
@@ -272,6 +429,8 @@ CXX_REAL="$(readlink -f "$CXX")"
 CMAKE_TOOLCHAIN_FLAGS="-DCMAKE_C_COMPILER=$CC_REAL"
 CMAKE_TOOLCHAIN_FLAGS+=" -DCMAKE_CXX_COMPILER=$CXX_REAL"
 CMAKE_DEPENDENCY_FLAGS="-DROOT4DUCKDB_ICEBERG_PREFIX=$ROOT4DUCKDB_ICEBERG_PREFIX"
+CMAKE_DEPENDENCY_FLAGS+=" -DROOT4DUCKDB_ROOT_CONFIG_EXECUTABLE=$ROOT_CONFIG_REAL"
+CMAKE_DEPENDENCY_FLAGS+=" -DROOT4DUCKDB_RUNTIME_BOOTSTRAP=ON"
 
 export EXT_RELEASE_FLAGS="${EXT_RELEASE_FLAGS:-} $CMAKE_TOOLCHAIN_FLAGS $CMAKE_DEPENDENCY_FLAGS"
 export EXT_DEBUG_FLAGS="${EXT_DEBUG_FLAGS:-} $CMAKE_TOOLCHAIN_FLAGS $CMAKE_DEPENDENCY_FLAGS"
@@ -290,6 +449,27 @@ else
 fi
 
 BUILD_DIR="$PROJECT_DIR/build/release"
+
+if ((CLEAN == 0)) && [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+    cached_root_config="$(
+        sed -n             's/^ROOT_CONFIG_EXECUTABLE:FILEPATH=//p'             "$BUILD_DIR/CMakeCache.txt"
+    )"
+
+    if [[ -n "$cached_root_config" ]]; then
+        cached_root_config_real="$cached_root_config"
+        if [[ -e "$cached_root_config" ]]; then
+            cached_root_config_real="$(readlink -f "$cached_root_config")"
+        fi
+
+        if [[ "$cached_root_config_real" != "$ROOT_CONFIG_REAL" ]]; then
+            echo "[INFO] ROOT changed since the previous CMake configure."
+            echo "       cached:   $cached_root_config_real"
+            echo "       selected: $ROOT_CONFIG_REAL"
+            echo "[INFO] Resetting build/release to prevent mixed ROOT runtimes."
+            cmake -E remove_directory "$BUILD_DIR"
+        fi
+    fi
+fi
 
 if ((CLEAN)); then
     echo "[2/6] Removing build/release"
@@ -336,6 +516,37 @@ if command -v ldd >/dev/null 2>&1; then
             printf '%s\n' "$missing" >&2
             exit 1
         }
+
+        expected_stdlib="$(
+            readlink -f "$("$CXX_REAL" -print-file-name=libstdc++.so.6)"
+        )"
+
+        actual_stdlib="$(
+            awk '/libstdc\+\+\.so\.6/ && !found {
+                if ($2 == "=>") {
+                    value = $3
+                } else {
+                    value = $1
+                }
+                found = 1
+            }
+            END {
+                if (found) {
+                    print value
+                }
+            }' <<<"$dependencies"
+        )"
+
+        if [[ -n "$actual_stdlib" && -e "$actual_stdlib" ]]; then
+            actual_stdlib="$(readlink -f "$actual_stdlib")"
+
+            if [[ "$actual_stdlib" != "$expected_stdlib" ]]; then
+                echo "[ERROR] Wrong libstdc++ runtime for $artifact" >&2
+                echo "        expected: $expected_stdlib" >&2
+                echo "        actual:   $actual_stdlib" >&2
+                exit 1
+            fi
+        fi
     done
 
     duckdb_dependencies="$(ldd "$DUCKDB_BIN")"

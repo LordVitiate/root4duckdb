@@ -90,7 +90,7 @@ static unique_ptr<FunctionData> DatasetStatsBind(ClientContext& context, TableFu
     return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
                     LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::DOUBLE,  LogicalType::DOUBLE,
                     LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::VARCHAR};
-    return std::move(bind);
+    return bind;
 }
 
 static unique_ptr<GlobalTableFunctionState> DatasetStatsInit(ClientContext&, TableFunctionInitInput&) {

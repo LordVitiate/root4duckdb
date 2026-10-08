@@ -326,13 +326,6 @@ static bool BloomMayContain(const string& bytes, double value) {
     return RootBloomFilter::MayContain(bytes, value);
 }
 
-static const Expression* StripExpressionCasts(const Expression* expression) {
-    while (expression && expression->expression_class == ExpressionClass::BOUND_CAST) {
-        expression = expression->Cast<BoundCastExpression>().child.get();
-    }
-    return expression;
-}
-
 static std::optional<Value> ConstantExpressionValue(const Expression& expression) {
     if (expression.expression_class == ExpressionClass::BOUND_CONSTANT) {
         return expression.Cast<BoundConstantExpression>().value;

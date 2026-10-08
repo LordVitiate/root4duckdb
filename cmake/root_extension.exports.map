@@ -1,6 +1,7 @@
 {
     global:
         root_duckdb_cpp_init;
+        root4duckdb_payload_init_c;
 
     local:
         *;

@@ -1,6 +1,6 @@
 {
     global:
-        root_duckdb_cpp_init;
+        root_init_c_api;
 
     local:
         *;

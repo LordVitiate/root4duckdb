@@ -180,6 +180,18 @@ function(root4duckdb_embed_static_iceberg target_name)
             "Unknown ROOT4DuckDB target: ${target_name}")
     endif()
 
+    set(_r4d_allow_host_duckdb_symbols FALSE)
+
+    if(ARGC GREATER 1)
+        if(NOT "${ARGV1}" STREQUAL "ALLOW_HOST_DUCKDB_SYMBOLS")
+            message(FATAL_ERROR
+                "Unknown root4duckdb_embed_static_iceberg option: "
+                "${ARGV1}")
+        endif()
+
+        set(_r4d_allow_host_duckdb_symbols TRUE)
+    endif()
+
     target_include_directories(
         ${target_name}
         PRIVATE
@@ -199,9 +211,19 @@ function(root4duckdb_embed_static_iceberg target_name)
             "LINKER:--as-needed"
             "LINKER:--exclude-libs,ALL"
             "LINKER:-Bsymbolic-functions"
-            "LINKER:-z,defs"
             "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/root_extension.exports.map"
         )
+
+        # A normal self-contained extension must resolve every symbol at link
+        # time.  The embedded bootstrap payload is intentionally different:
+        # its DuckDB API is supplied by the already-running host process.
+        if(NOT _r4d_allow_host_duckdb_symbols)
+            target_link_options(
+                ${target_name}
+                PRIVATE
+                "LINKER:-z,defs"
+            )
+        endif()
     endif()
 
     # Do not retain paths from the release build host.

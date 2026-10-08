@@ -19,12 +19,23 @@ std::string ReadRootString(void* pointer, const std::string& raw_type) {
     try {
         if (TrimType(raw_type) == "TString") {
             auto* value = static_cast<TString*>(pointer);
-            return std::string(value->Data(), value->Length());
+            const auto length = value->Length();
+            if (length < 0) {
+                throw IOException("ROOT TString reported a negative length");
+            }
+            return std::string(value->Data(), static_cast<std::string::size_type>(length));
         }
         return *reinterpret_cast<std::string*>(pointer);
     } catch (...) {
         return TrimType(raw_type) == "TString" ? "<tstring_error>" : "<string_error>";
     }
+}
+
+int32_t CheckedContainerIndex(size_t index) {
+    if (index > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        throw IOException("ROOT container index exceeds the supported 32-bit SQL index range");
+    }
+    return static_cast<int32_t>(index);
 }
 
 void AppendArrayIndexNames(const PathLevel& level, size_t current_depth, std::vector<std::string>& names) {
@@ -206,11 +217,14 @@ void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels,
         }
         const auto access = PrepareContainerAccess(level, proxy, size);
         for (size_t i = 0; i < size && !sink.Full(); ++i) {
-            auto* element = access.contiguous ? static_cast<void*>(access.base + i * access.stride) : proxy->At(i);
+            const auto container_index = CheckedContainerIndex(i);
+            auto* element = access.contiguous
+                                ? static_cast<void*>(access.base + i * access.stride)
+                                : proxy->At(static_cast<UInt_t>(container_index));
             if (!element) {
                 continue;
             }
-            indices.push_back(static_cast<int32_t>(i));
+            indices.push_back(container_index);
             if (IsPrimitiveType(inner)) {
                 sink.Number(element, inner, indices, index_names);
             } else if (IsStringType(inner)) {
@@ -245,11 +259,14 @@ void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels,
         }
         const auto access = PrepareContainerAccess(level, proxy, size);
         for (size_t i = 0; i < size && !sink.Full(); ++i) {
-            auto* element = access.contiguous ? static_cast<void*>(access.base + i * access.stride) : proxy->At(i);
+            const auto container_index = CheckedContainerIndex(i);
+            auto* element = access.contiguous
+                                ? static_cast<void*>(access.base + i * access.stride)
+                                : proxy->At(static_cast<UInt_t>(container_index));
             if (!element) {
                 continue;
             }
-            indices.push_back(static_cast<int32_t>(i));
+            indices.push_back(container_index);
             CollectValuesRecursive(element, levels, level_index + 1, indices, index_names, sink);
             indices.pop_back();
         }

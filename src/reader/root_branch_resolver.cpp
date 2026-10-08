@@ -189,16 +189,18 @@ PhysicalBranchResolution ResolvePhysicalBranch(TBranch* object_branch, const std
             return {exact, "exact_alias"};
         }
     }
-    for (idx_t prefix_size = fields.size(); prefix_size > 0; --prefix_size) {
-        const std::vector<std::string> prefix(fields.begin(), fields.begin() + prefix_size);
+    for (auto field_end = fields.end(); field_end != fields.begin(); --field_end) {
+        const bool full_path = field_end == fields.end();
+        const std::vector<std::string> prefix(fields.begin(), field_end);
         if (auto* ancestor = FindPhysicalBranch(object_branch, prefix)) {
-            return {ancestor, prefix_size == fields.size() ? "exact" : "ancestor"};
+            return {ancestor, full_path ? "exact" : "ancestor"};
         }
         if (has_alias) {
+            const auto prefix_size = field_end - fields.begin();
             const std::vector<std::string> streamer_prefix(streamer_fields.begin(),
                                                            streamer_fields.begin() + prefix_size);
             if (auto* ancestor = FindPhysicalBranch(object_branch, streamer_prefix)) {
-                return {ancestor, prefix_size == fields.size() ? "exact_alias" : "ancestor_alias"};
+                return {ancestor, full_path ? "exact_alias" : "ancestor_alias"};
             }
         }
     }

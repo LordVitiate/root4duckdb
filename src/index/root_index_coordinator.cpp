@@ -216,7 +216,9 @@ void RootIndexCoordinator::ValidateBuild(const BuildIndexBindData& bind, const f
     idx_t success_count = 0;
     for (const auto& status : state.statuses) {
         failed |= status.status != "OK";
-        success_count += status.status == "OK" ? 1 : 0;
+        if (status.status == "OK") {
+            ++success_count;
+        }
     }
     if (success_count == 0) {
         WriteFailureReport(failure_directory, state.snapshot_id, state.statuses);
@@ -284,7 +286,7 @@ unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& co
         PreserveFailedStaging(bind, staging_root, staging, state->snapshot_id);
         throw;
     }
-    return std::move(state);
+    return state;
 }
 
 } // namespace duckdb::rootlake

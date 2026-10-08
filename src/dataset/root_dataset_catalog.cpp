@@ -154,60 +154,62 @@ std::string CatalogRelationSQL(const std::string& source, bool sql_tables) {
 
 CatalogSources RootDatasetCatalog::ResolveSources(const std::string& catalog_path,
                                                   const named_parameter_map_t& parameters) const {
-    CatalogSources sources;
+    CatalogSources resolved_sources;
     if (IsRootIcebergCatalog(catalog_path)) {
-        sources.files = RootIcebergRelation(catalog_path, "files");
-        sources.schemas = RootIcebergRelation(catalog_path, "schemas");
-        sources.access = RootIcebergRelation(catalog_path, "access");
-        sources.baskets = RootIcebergRelation(catalog_path, "baskets");
-        sources.snapshots = RootIcebergCommittedSnapshotsRelation(catalog_path, ROOT_LAKE_INDEX_VERSION);
-        sources.commits = RootIcebergRelation(catalog_path, "commits");
-        sources.sql_tables = true;
-        return sources;
+        resolved_sources.files = RootIcebergRelation(catalog_path, "files");
+        resolved_sources.schemas = RootIcebergRelation(catalog_path, "schemas");
+        resolved_sources.access = RootIcebergRelation(catalog_path, "access");
+        resolved_sources.baskets = RootIcebergRelation(catalog_path, "baskets");
+        resolved_sources.snapshots = RootIcebergCommittedSnapshotsRelation(catalog_path, ROOT_LAKE_INDEX_VERSION);
+        resolved_sources.commits = RootIcebergRelation(catalog_path, "commits");
+        resolved_sources.sql_tables = true;
+        return resolved_sources;
     }
 
     auto named = [&](const char* name) -> std::string {
         const auto entry = parameters.find(name);
         return entry == parameters.end() ? std::string() : entry->second.ToString();
     };
-    sources.catalog_prefix = named("catalog_prefix");
-    sources.files = named("files_table");
-    sources.schemas = named("schemas_table");
-    sources.access = named("access_table");
-    sources.baskets = named("baskets_table");
-    sources.snapshots = named("snapshots_table");
-    sources.commits = named("commits_table");
-    sources.snapshot_id = named("snapshot_id");
+    resolved_sources.catalog_prefix = named("catalog_prefix");
+    resolved_sources.files = named("files_table");
+    resolved_sources.schemas = named("schemas_table");
+    resolved_sources.access = named("access_table");
+    resolved_sources.baskets = named("baskets_table");
+    resolved_sources.snapshots = named("snapshots_table");
+    resolved_sources.commits = named("commits_table");
+    resolved_sources.snapshot_id = named("snapshot_id");
 
-    if (sources.catalog_prefix.empty() && !catalog_path.empty() && IsSafeQualifiedName(catalog_path)) {
+    if (resolved_sources.catalog_prefix.empty() && !catalog_path.empty() && IsSafeQualifiedName(catalog_path)) {
         std::error_code error;
         if (!fs::exists(catalog_path, error)) {
-            sources.catalog_prefix = catalog_path;
+            resolved_sources.catalog_prefix = catalog_path;
         }
     }
-    if (!sources.catalog_prefix.empty()) {
-        if (!IsSafeQualifiedName(sources.catalog_prefix)) {
-            throw InvalidInputException("Unsafe ROOT metadata catalog prefix: " + sources.catalog_prefix);
+    if (!resolved_sources.catalog_prefix.empty()) {
+        if (!IsSafeQualifiedName(resolved_sources.catalog_prefix)) {
+            throw InvalidInputException("Unsafe ROOT metadata catalog prefix: " + resolved_sources.catalog_prefix);
         }
-        sources.files = sources.catalog_prefix + "_files";
-        sources.schemas = sources.catalog_prefix + "_schemas";
-        sources.access = sources.catalog_prefix + "_access";
-        sources.baskets = sources.catalog_prefix + "_baskets";
-        sources.snapshots = sources.catalog_prefix + "_snapshots";
-        sources.commits = sources.catalog_prefix + "_commits";
-        sources.sql_tables = true;
-        return sources;
+        resolved_sources.files = resolved_sources.catalog_prefix + "_files";
+        resolved_sources.schemas = resolved_sources.catalog_prefix + "_schemas";
+        resolved_sources.access = resolved_sources.catalog_prefix + "_access";
+        resolved_sources.baskets = resolved_sources.catalog_prefix + "_baskets";
+        resolved_sources.snapshots = resolved_sources.catalog_prefix + "_snapshots";
+        resolved_sources.commits = resolved_sources.catalog_prefix + "_commits";
+        resolved_sources.sql_tables = true;
+        return resolved_sources;
     }
 
-    const bool any_override = !sources.files.empty() || !sources.schemas.empty() || !sources.access.empty() ||
-                              !sources.baskets.empty() || !sources.snapshots.empty();
+    const bool any_override = !resolved_sources.files.empty() || !resolved_sources.schemas.empty() ||
+                              !resolved_sources.access.empty() || !resolved_sources.baskets.empty() ||
+                              !resolved_sources.snapshots.empty();
     if (any_override) {
-        if (sources.files.empty() || sources.schemas.empty() || sources.access.empty() || sources.baskets.empty()) {
+        if (resolved_sources.files.empty() || resolved_sources.schemas.empty() ||
+            resolved_sources.access.empty() || resolved_sources.baskets.empty()) {
             throw InvalidInputException(
                 "files_table, schemas_table, access_table and baskets_table must be supplied together");
         }
-        sources.sql_tables = true;
-        return sources;
+        resolved_sources.sql_tables = true;
+        return resolved_sources;
     }
 
     fs::path manifest = catalog_path;
@@ -229,7 +231,7 @@ CatalogSources RootDatasetCatalog::ResolveSources(const std::string& catalog_pat
                                     " is incompatible with reader version " + std::to_string(ROOT_LAKE_INDEX_VERSION) +
                                     "; rebuild the index");
     }
-    sources.snapshot_id = json.value("snapshot_id", "");
+    resolved_sources.snapshot_id = json.value("snapshot_id", "");
     auto table_path = [&](const char* name) {
         fs::path path(json["tables"][name].get<std::string>());
         if (path.is_relative()) {
@@ -237,11 +239,11 @@ CatalogSources RootDatasetCatalog::ResolveSources(const std::string& catalog_pat
         }
         return path.lexically_normal().string();
     };
-    sources.files = table_path("files");
-    sources.schemas = table_path("schemas");
-    sources.access = table_path("access_levels");
-    sources.baskets = table_path("baskets");
-    return sources;
+    resolved_sources.files = table_path("files");
+    resolved_sources.schemas = table_path("schemas");
+    resolved_sources.access = table_path("access_levels");
+    resolved_sources.baskets = table_path("baskets");
+    return resolved_sources;
 }
 
 RootDatasetCatalog::RootDatasetCatalog(ClientContext& context_p, const std::string& catalog_path,
