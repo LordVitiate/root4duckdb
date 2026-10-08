@@ -572,6 +572,28 @@ if ! grep -q 'Required ROOT input is unavailable:.*missing.root' \
     exit 1
 fi
 
+# Fail closed at bind time too: do not skip a missing first input while
+# selecting a representative file for schema discovery.
+printf '%s\n' "$WORK_DIR/data/missing.root" "$WORK_DIR/data/a.root" > "$WORK_DIR/data/first-missing.list"
+cat > "$WORK_DIR/direct-first-missing.sql" <<SQL
+SELECT sum(run)
+FROM read_root(
+    '@$WORK_DIR/data/first-missing.list',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent'
+);
+SQL
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+    < "$WORK_DIR/direct-first-missing.sql" > "$WORK_DIR/direct-first-missing.log" 2>&1; then
+    echo "representative-file bind silently skipped a required missing ROOT input" >&2
+    exit 1
+fi
+if ! grep -q 'Failed to open a required ROOT input.*' "$WORK_DIR/direct-first-missing.log"; then
+    echo "representative-file bind error did not identify the missing required file" >&2
+    cat "$WORK_DIR/direct-first-missing.log" >&2
+    exit 1
+fi
+
 # The normal scan must select the contiguous std::vector<T> path, and disabling
 # it must produce byte-for-byte identical SQL output through the proxy fallback.
 ROOT4DUCKDB_DEBUG=1 ROOT4DUCKDB_DEBUG_VERBOSE=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
