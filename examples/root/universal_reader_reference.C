@@ -10,9 +10,9 @@
 #include <TVirtualCollectionProxy.h>
 #include <TObjArray.h>
 #include <TList.h>
-#include <TSystem.h>
 #include <TKey.h>
 
+#include <dlfcn.h>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -1059,6 +1059,11 @@ class UniversalReader
 void universal_reader(const char* fname = "simple.root", const char* query_paths = "/Event/evt_id",
                       Long64_t max_values = 5)
 {
-    gSystem->Load("./phast.8.044/lib/libPhast.so");
+    const char* dictionary = "./phast.8.044/lib/libPhast.so";
+    if (!dlopen(dictionary, RTLD_NOW | RTLD_GLOBAL))
+    {
+        std::fprintf(stderr, "Cannot load ROOT dictionary %s: %s\n", dictionary, dlerror());
+        return;
+    }
     UniversalReader::run(fname, query_paths, max_values);
 }
