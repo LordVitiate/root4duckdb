@@ -153,6 +153,11 @@ bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t elemen
 bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
                                         SerializedEntryLayout& resolved_layout, std::string& failure_reason);
 
+// Validates the complete versioned member-wise element layout so that the
+// decoder can advance between nested vectors without materializing PaTPar.
+bool ResolveSerializedNestedMemberWiseStride(const SerializedReadPlan& plan, int32_t element_version,
+                                              uint64_t& bytes_per_element, std::string& failure_reason);
+
 /// Reads a nested member-wise vector directly by checked serialized byte offsets.
 bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedReadPlan& plan, size_t entry_size,
                                        uint64_t outer_count, uint64_t max_values_per_entry,
