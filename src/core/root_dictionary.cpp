@@ -28,6 +28,33 @@ std::set<std::string>& LoadedDictionaryPaths()
     return paths;
 }
 
+bool LoadRootGeometryDependency(std::string& error)
+{
+    Dl_info root_info{};
+    if (!dladdr(static_cast<const void*>(&gROOT), &root_info) || !root_info.dli_fname)
+    {
+        error = "cannot locate the loaded ROOT libCore.so";
+        return false;
+    }
+    const std::string root_library(root_info.dli_fname);
+    const auto separator = root_library.find_last_of('/');
+    if (separator == std::string::npos)
+    {
+        error = "cannot resolve the directory of the loaded ROOT libCore.so";
+        return false;
+    }
+    const std::string geometry_library = root_library.substr(0, separator + 1) + "libGeom.so";
+    dlerror();
+    if (!dlopen(geometry_library.c_str(), RTLD_NOW | RTLD_GLOBAL))
+    {
+        const char* message = dlerror();
+        error = "cannot load " + geometry_library + ": " +
+                (message ? std::string(message) : std::string("dynamic loader error"));
+        return false;
+    }
+    return true;
+}
+
 bool Load(const std::string& path, bool detailed_debug)
 {
     if (path.empty())
@@ -56,8 +83,24 @@ bool Load(const std::string& path, bool detailed_debug)
     if (!handle)
     {
         const char* message = dlerror();
-        throw IOException("Failed to load ROOT dictionary " + path + ": " +
-                          (message ? std::string(message) : std::string("dynamic loader error")));
+        const std::string failure = message ? message : "dynamic loader error";
+        if (failure.find("undefined symbol: gGeoManager") != std::string::npos)
+        {
+            std::string dependency_error;
+            if (!LoadRootGeometryDependency(dependency_error))
+            {
+                throw IOException("Failed to load ROOT dictionary " + path + ": " + failure +
+                                  "; " + dependency_error);
+            }
+            dlerror();
+            handle = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+        }
+        if (!handle)
+        {
+            message = dlerror();
+            throw IOException("Failed to load ROOT dictionary " + path + ": " +
+                              (message ? std::string(message) : failure));
+        }
     }
     LoadedDictionaryPaths().insert(path);
     if (detailed_debug)
