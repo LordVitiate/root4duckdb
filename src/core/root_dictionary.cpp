@@ -7,6 +7,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <dlfcn.h>
 #include <mutex>
 
 namespace duckdb::rootlake
@@ -33,16 +34,23 @@ bool Load(const std::string& path, bool detailed_debug)
     const std::lock_guard<std::mutex> lock(DictionaryMutex());
     if (detailed_debug)
     {
-        RootDebug("DICT.BEFORE_LOAD", "path=" + path + " gSystem_ptr=" + RootPointer(gSystem));
+        RootDebug("DICT.BEFORE_LOAD", "path=" + path);
     }
-    const Long64_t result = gSystem->Load(path.c_str());
+    // Loading a rootcling dictionary runs its module-registration initializer.
+    // Keep the handle alive for the process lifetime: ROOT stores class
+    // metadata and collection proxies that refer to code in this library.
+    // Never dlclose a dictionary while ROOT may still reference its classes.
+    dlerror();
+    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (!handle)
+    {
+        const char* message = dlerror();
+        throw IOException("Failed to load ROOT dictionary " + path + ": " +
+                          (message ? std::string(message) : std::string("dynamic loader error")));
+    }
     if (detailed_debug)
     {
-        RootDebug("DICT.AFTER_LOAD", "path=" + path + " result=" + std::to_string(result));
-    }
-    if (result < 0)
-    {
-        throw IOException("Failed to load ROOT dictionary: " + path);
+        RootDebug("DICT.AFTER_LOAD", "path=" + path + " result=ok");
     }
     return true;
 }
