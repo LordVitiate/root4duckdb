@@ -180,7 +180,7 @@ bool RunSharedDatabase(duckdb_database database, const TestQueries& queries, boo
     const int readers = concurrent_index ? WORKER_COUNT - 1 : WORKER_COUNT;
     std::cout << "[OK] Concurrent ROOT " << label << ": " << WORKER_COUNT << " connections, "
               << readers * scans_per_reader << " validated reads"
-              << (concurrent_index ? " + simultaneous index build" : "") << '\n';
+              << (concurrent_index ? " + concurrently dispatched index build" : "") << '\n';
     return true;
 }
 
