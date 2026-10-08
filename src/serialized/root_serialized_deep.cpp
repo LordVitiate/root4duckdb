@@ -497,31 +497,13 @@ bool CollectSerializedSelectedSubtree(const SerializedReadPlan& plan, void* oute
     flat_indices.clear();
     try
     {
-        ReadResult result;
         const auto limit = static_cast<int64_t>(
             std::min<uint64_t>(max_values_per_entry, static_cast<uint64_t>(std::numeric_limits<int64_t>::max())));
-        OffsetValueReader::CollectDirect(outer_collection_scratch, plan.projection_levels, limit, 0, result);
-        values = std::move(result.numbers);
-        if (collect_indices)
+        OffsetValueReader::CollectTypedFlat(outer_collection_scratch, plan.projection_levels, plan.index_depth, limit,
+                                            values, flat_indices);
+        if (!collect_indices)
         {
-            if (result.vector_indices.size() != values.size())
-            {
-                failure_reason = "serialized selected-subtree index count is inconsistent";
-                values.clear();
-                return false;
-            }
-            flat_indices.reserve(values.size() * plan.index_depth);
-            for (const auto& row : result.vector_indices)
-            {
-                if (row.size() != plan.index_depth)
-                {
-                    failure_reason = "serialized selected-subtree index depth is inconsistent";
-                    values.clear();
-                    flat_indices.clear();
-                    return false;
-                }
-                flat_indices.insert(flat_indices.end(), row.begin(), row.end());
-            }
+            flat_indices.clear();
         }
     }
     catch (const std::exception& ex)
