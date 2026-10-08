@@ -28,6 +28,8 @@ def _check_cpp(validator: ProjectValidator) -> None:
     for source in sources:
         text = source.read_text()
         relative = source.relative_to(validator.root)
+        if re.search(r"\bgSystem\b", text):
+            validator.errors.append(f"process-global ROOT gSystem usage: {relative}")
         for line_number, line in enumerate(text.splitlines(), 1):
             if len(line) > 120:
                 validator.errors.append(f"C++ line exceeds 120 columns: {relative}:{line_number}")
