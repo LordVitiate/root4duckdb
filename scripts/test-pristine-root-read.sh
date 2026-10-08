@@ -133,7 +133,7 @@ SQL
     [[ "$successes" == 5 ]] ||
         fail "Expected 5 true results for threads=$workers, got $successes"
 
-    if grep -Eq 'fatal error:|Fatal in <|undefined symbol:|GLIBCXX_|CheckABICompatibility|Possible C\\+\\+ standard library mismatch' "$log"; then
+    if grep -Eq 'fatal error:|Fatal in <|undefined symbol:|GLIBCXX_|CheckABICompatibility|Possible C\+\+ standard library mismatch' "$log"; then
         fail "ROOT/Cling/ABI diagnostic emitted with threads=$workers"
     fi
 
