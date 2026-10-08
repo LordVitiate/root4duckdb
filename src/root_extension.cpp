@@ -33,13 +33,9 @@ std::mutex& RootExtensionLoadMutex()
 
 void InitializeRootRuntime()
 {
+    // ROOT owns its runtime initialization. Do not reset process-wide signal
+    // handlers from a DuckDB extension: other host threads may rely on them.
     ROOT::EnableThreadSafety();
-    // ROOT initialization changes process signal handling. Never repeat this
-    // process-global operation while another DuckDB connection is executing.
-    if (gSystem)
-    {
-        gSystem->ResetSignals();
-    }
 }
 
 } // namespace
