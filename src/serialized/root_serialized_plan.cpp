@@ -372,6 +372,110 @@ bool ConfigureRootProjection(TClass* root_class, const ParsedPath& path, const s
     return plan.value_bytes != 0;
 }
 
+bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<PathLevel>& levels,
+                                    TClass* outer_element_class, SerializedReadPlan& plan)
+{
+    const char* enabled = std::getenv("ROOT4DUCKDB_NESTED_FIXED_OFFSET");
+    if (!enabled || std::string(enabled) != "1" || path.fields.size() != 3 || levels.size() != 3 ||
+        !outer_element_class || !levels[1].is_container || !IsContiguousVectorType(levels[1].type) ||
+        levels[1].is_pointer || !levels[1].klass || !levels[1].element_class ||
+        !levels[2].is_primitive || !levels[2].is_fixed_array || levels[2].is_pointer ||
+        levels[2].is_container || !levels[0].klass)
+    {
+        return false;
+    }
+    auto* outer_streamer = outer_element_class->GetStreamerInfo();
+    auto* outer_elements = outer_streamer ? outer_streamer->GetElements() : nullptr;
+    if (!outer_elements)
+    {
+        return false;
+    }
+    auto* nested_proxy = levels[1].klass->GetCollectionProxy();
+    if (!nested_proxy || nested_proxy->GetValueClass() != levels[1].element_class || nested_proxy->HasPointers())
+    {
+        return false;
+    }
+    int selected_index = -1;
+    for (int i = 0; i < outer_elements->GetEntries(); ++i)
+    {
+        auto* element = dynamic_cast<TStreamerElement*>(outer_elements->At(i));
+        if (!element)
+        {
+            return false;
+        }
+        if (!element->IsBase() && path.fields[1] == element->GetName())
+        {
+            if (element->IsaPointer() || element->GetArrayDim() != 0 || element->GetClassPointer() != levels[1].klass)
+            {
+                return false;
+            }
+            selected_index = i;
+            break;
+        }
+    }
+    if (selected_index < 0)
+    {
+        return false;
+    }
+    auto* nested_streamer = levels[1].element_class->GetStreamerInfo();
+    auto* nested_elements = nested_streamer ? nested_streamer->GetElements() : nullptr;
+    if (!nested_elements)
+    {
+        return false;
+    }
+    auto* target = static_cast<TStreamerElement*>(nullptr);
+    for (int i = 0; i < nested_elements->GetEntries(); ++i)
+    {
+        auto* element = dynamic_cast<TStreamerElement*>(nested_elements->At(i));
+        if (!element)
+        {
+            return false;
+        }
+        if (!element->IsBase() && path.fields[2] == element->GetName())
+        {
+            target = element;
+            break;
+        }
+    }
+    uint32_t target_width = 0;
+    std::string width_reason;
+    if (!target || !FixedPrimitiveWidth(target, target_width, width_reason))
+    {
+        return false;
+    }
+    std::vector<uint32_t> dimensions;
+    const auto array_length = FixedArrayLength(target, &dimensions);
+    const auto type = PrimitiveBaseType(StreamerPrimitiveType(target->GetType(), target->GetTypeName()));
+    const auto value_width = PrimitiveTypeSize(type);
+    if (!array_length || !value_width || array_length > std::numeric_limits<uint64_t>::max() / value_width ||
+        target_width != array_length * value_width || ClassifySerializedPrimitive(type) == SerializedPrimitiveKind::UNKNOWN)
+    {
+        return false;
+    }
+    plan.Select(SerializedProjectionKind::NESTED_FIXED_MEMBER);
+    plan.container_name = levels[0].name;
+    plan.element_class = outer_element_class->GetName();
+    plan.projected_member_name = path.fields[1];
+    plan.nested_member_name = path.fields[2];
+    plan.nested_container_class = levels[1].klass;
+    plan.nested_element_class = levels[1].element_class;
+    plan.outer_container_class = levels[0].klass;
+    plan.outer_element_class = outer_element_class;
+    plan.schema_fingerprint = SchemaFingerprint(path.root_class, levels);
+    plan.projection_levels = levels;
+    plan.streamer_version = static_cast<uint32_t>(std::max(0, static_cast<int>(outer_element_class->GetClassVersion())));
+    plan.value_type = type;
+    plan.value_bytes = value_width;
+    plan.fixed_array_length = array_length;
+    plan.array_dimensions = std::move(dimensions);
+    plan.index_depth = IndexDepth(levels);
+    for (int i = 0; i < selected_index; ++i)
+    {
+        plan.prefix_element_ids.push_back(i);
+    }
+    return true;
+}
+
 } // namespace
 
 SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath& path, TBranch* physical_branch)
@@ -519,6 +623,10 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     }
     if (path.fields.size() >= 3)
     {
+        if (ConfigureNestedFixedProjection(path, levels, element_class, plan))
+        {
+            return plan;
+        }
         std::string failure_reason;
         if (ConfigureSerializedDeepProjection(path, levels, element_class, plan, failure_reason))
         {
@@ -620,6 +728,30 @@ SerializedReadPlan BuildSerializedReadPlan(TClass* root_class, const ParsedPath&
     plan.array_dimensions = std::move(dimensions);
     plan.index_depth = 1 + (array_length > 1 ? std::max<idx_t>(1, plan.array_dimensions.size()) : 0);
     return plan;
+}
+
+bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
+                                        SerializedEntryLayout& resolved_layout, std::string& failure_reason)
+{
+    if (!plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER) || !plan.nested_element_class ||
+        plan.nested_member_name.empty())
+    {
+        failure_reason = "nested fixed projection has no persistent element metadata";
+        return false;
+    }
+    SerializedReadPlan nested_plan;
+    nested_plan.Select(SerializedProjectionKind::FIXED_MEMBER);
+    nested_plan.logical_path = plan.logical_path;
+    nested_plan.outer_element_class = plan.nested_element_class;
+    nested_plan.projected_member_name = plan.nested_member_name;
+    nested_plan.value_type = plan.value_type;
+    nested_plan.value_bytes = plan.value_bytes;
+    nested_plan.fixed_array_length = plan.fixed_array_length;
+    nested_plan.array_dimensions = plan.array_dimensions;
+    nested_plan.streamer_version = static_cast<uint32_t>(std::max(0, static_cast<int>(plan.nested_element_class->GetClassVersion())));
+    nested_plan.index_depth = 1 + (plan.fixed_array_length > 1 ?
+                                   std::max<idx_t>(1, plan.array_dimensions.size()) : 0);
+    return ResolveSerializedFixedLayout(nested_plan, element_version, resolved_layout, failure_reason);
 }
 
 bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
