@@ -224,6 +224,7 @@ struct RootScanLocalState : public LocalTableFunctionState
 {
     rootlake::RootFileHandle root_file;
     std::unordered_map<std::string, rootlake::RootObjectReader> root_readers;
+    std::map<std::string, std::vector<idx_t>> projected_branch_columns;
 
     uint64_t local_current_row = 0;
     uint64_t local_end_row = 0;
