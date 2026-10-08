@@ -309,8 +309,8 @@ unique_ptr<FunctionData> RootScanBinder::Bind(ClientContext& context, TableFunct
     auto bind_data = make_uniq<RootScanBindData>();
     ConfigureOptions(*bind_data, context, input);
     const bool dictionary_loaded = LoadRequestedDictionary(context, input);
-    bind_data->root_access.dictionary_cleanup_mode =
-        dictionary_loaded ? rootlake::RootDictionaryCleanupMode::RETAIN : rootlake::RootDictionaryCleanupMode::FULL;
+    // The reader owns objects created by TClass::New, including external dictionaries.
+    bind_data->root_access.dictionary_cleanup_mode = rootlake::RootDictionaryCleanupMode::FULL;
     if (input.named_parameters.find("path_prefix") == input.named_parameters.end())
     {
         BindRootBrowse(*bind_data, return_names, return_types);
