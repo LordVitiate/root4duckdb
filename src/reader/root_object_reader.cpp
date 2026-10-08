@@ -221,9 +221,17 @@ void* RootObjectContext::Read(uint64_t entry)
         address_slot = owned_object;
         branch->SetAutoDelete(kFALSE);
         branch->SetAddress(&address_slot);
+        if (address_slot != owned_object)
+        {
+            throw IOException("ROOT branch replaced the caller-owned object during binding: " + class_name);
+        }
         RootDebug("OBJECT.BOUND", "class=" + class_name);
     }
     const auto bytes = tree->GetEntry(static_cast<Long64_t>(entry));
+    if (address_slot != owned_object)
+    {
+        throw IOException("ROOT branch replaced the caller-owned object while reading: " + class_name);
+    }
     if (bytes < 0)
     {
         throw IOException("ROOT TTree::GetEntry failed for class " + class_name +
@@ -258,6 +266,7 @@ void RootObjectContext::Reset() noexcept
     auto* bound_branch = branch;
     auto* object_class = root_class;
     auto* object = owned_object;
+    const bool object_still_owned = object == address_slot;
     const auto mode = cleanup_mode;
     tree = nullptr;
     branch = nullptr;
@@ -279,7 +288,9 @@ void RootObjectContext::Reset() noexcept
     }
     try
     {
-        if (object && object_class)
+        // If ROOT unexpectedly replaced the pointer, do not delete an object
+        // that may already have been destroyed by the branch.
+        if (object && object_class && object_still_owned)
         {
             switch (mode)
             {
