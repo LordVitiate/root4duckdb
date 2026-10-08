@@ -1,5 +1,8 @@
 #include "root4duckdb/dataset/root_dataset_pruning.hpp"
 
+#include <cerrno>
+#include <cstring>
+
 namespace duckdb::rootlake
 {
 
@@ -42,6 +45,60 @@ DatasetPlanningTimer::~DatasetPlanningTimer()
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
 }
 
+void DatasetTaskPlanner::ValidateFreshIndex(ClientContext& context, const DatasetBindData& bind) const
+{
+    if (!bind.require_fresh_index)
+    {
+        return;
+    }
+
+    const auto files_relation = CatalogRelationSQL(bind.sources.files, bind.sources.sql_tables);
+    std::string sql = "SELECT DISTINCT f.root_uri, f.file_size, f.mtime_ns FROM " + files_relation +
+                      " f WHERE f.column_id IN " + IdListSQL(bind.schemas, true) + " AND f.schema_id IN " +
+                      IdListSQL(bind.schemas, false);
+    if (!bind.sources.snapshot_id.empty())
+    {
+        sql += " AND f.snapshot_id=" + SqlLiteral(bind.sources.snapshot_id);
+    }
+
+    Connection connection(*context.db);
+    auto indexed_files = connection.Query(sql);
+    EnsureQueryOK(*indexed_files, "validate ROOT index freshness");
+    for (idx_t row = 0; row < indexed_files->RowCount(); ++row)
+    {
+        const auto root_uri = indexed_files->GetValue(0, row).GetValue<std::string>();
+        const auto indexed_size = indexed_files->GetValue(1, row).GetValue<uint64_t>();
+        const auto indexed_mtime = indexed_files->GetValue(2, row).GetValue<int64_t>();
+        if (indexed_size == 0 || indexed_mtime == 0)
+        {
+            throw IOException("Cannot verify ROOT index freshness: file metadata is incomplete for " +
+                              root_uri + " (use require_fresh_index := false only to accept a stale index)");
+        }
+
+        struct stat current_stat{};
+        if (::stat(root_uri.c_str(), &current_stat) != 0)
+        {
+            const int saved_errno = errno;
+            throw IOException("Cannot verify ROOT index freshness for " + root_uri + ": " +
+                              std::strerror(saved_errno) +
+                              " (use require_fresh_index := false only to accept an unverified index)");
+        }
+        if (current_stat.st_size < 0 ||
+            static_cast<uint64_t>(current_stat.st_size) != indexed_size)
+        {
+            throw IOException("ROOT file size changed after indexing: " + root_uri);
+        }
+        const auto current_ns = static_cast<int64_t>(current_stat.st_mtim.tv_sec) * 1000000000LL +
+                                static_cast<int64_t>(current_stat.st_mtim.tv_nsec);
+        if (current_ns != indexed_mtime)
+        {
+            throw IOException("ROOT file mtime changed after indexing: " + root_uri +
+                              " (indexed_mtime_ns=" + std::to_string(indexed_mtime) +
+                              ", current_mtime_ns=" + std::to_string(current_ns) + ")");
+        }
+    }
+}
+
 void DatasetTaskPlanner::BuildFileTaskGroups(DatasetGlobalState& global) const
 {
     global.task_groups.clear();
@@ -62,6 +119,7 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
                               optional_ptr<TableFilterSet> filters) const
 {
     const DatasetPlanningTimer planning_timer(global.planning_time_us);
+    ValidateFreshIndex(context, bind);
     if (filters)
     {
         global.filters = filters->Copy();
@@ -192,7 +250,6 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
     {
         throw IOException("plan ROOT basket scan: " + result->GetError());
     }
-    std::unordered_map<std::string, bool> freshness_checked;
     std::unordered_map<std::string, bool> selected_files;
     const bool can_stop_after_row_limit = bind.row_limit != std::numeric_limits<uint64_t>::max() &&
                                           (!global.filters || global.filters->filters.empty()) &&
@@ -208,8 +265,6 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
             task.tree_name = chunk->GetValue(2, row).GetValue<std::string>();
             task.schema_id = chunk->GetValue(3, row).GetValue<std::string>();
             task.event_base = chunk->GetValue(4, row).GetValue<uint64_t>();
-            const auto indexed_size = chunk->GetValue(5, row).GetValue<uint64_t>();
-            const auto indexed_mtime = chunk->GetValue(6, row).GetValue<int64_t>();
             task.basket_id = chunk->GetValue(7, row).GetValue<uint32_t>();
             task.entry_begin = chunk->GetValue(8, row).GetValue<uint64_t>();
             task.entry_end = chunk->GetValue(9, row).GetValue<uint64_t>();
@@ -225,28 +280,6 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
                 if (!BloomMayContainFilter(*value_filter, bloom, bind.value_type))
                 {
                     continue;
-                }
-            }
-            if (bind.require_fresh_index && indexed_size && freshness_checked.emplace(task.root_uri, true).second)
-            {
-                std::error_code ec;
-                const auto current_size = fs::file_size(task.root_uri, ec);
-                if (!ec && current_size != indexed_size)
-                {
-                    throw IOException("ROOT file size changed after indexing: " + task.root_uri);
-                }
-                // Compare POSIX timestamps; filesystem clocks may use a different epoch.
-                struct stat current_stat{};
-                if (indexed_mtime && ::stat(task.root_uri.c_str(), &current_stat) == 0)
-                {
-                    const auto current_ns = static_cast<int64_t>(current_stat.st_mtim.tv_sec) * 1000000000LL +
-                                            static_cast<int64_t>(current_stat.st_mtim.tv_nsec);
-                    if (current_ns != indexed_mtime)
-                    {
-                        throw IOException("ROOT file mtime changed after indexing: " + task.root_uri +
-                                          " (indexed_mtime_ns=" + std::to_string(indexed_mtime) +
-                                          ", current_mtime_ns=" + std::to_string(current_ns) + ")");
-                    }
                 }
             }
             std::vector<RootBasketTask> candidate_tasks;
@@ -501,6 +534,7 @@ void DatasetTaskPlanner::PlanMetadataCount(ClientContext& context, const Dataset
                                            DatasetGlobalState& global) const
 {
     const DatasetPlanningTimer planning_timer(global.planning_time_us);
+    ValidateFreshIndex(context, bind);
     const auto files_relation = CatalogRelationSQL(bind.sources.files, bind.sources.sql_tables);
     std::string predicate = " WHERE f.column_id IN " + IdListSQL(bind.schemas, true) + " AND f.schema_id IN " +
                             IdListSQL(bind.schemas, false);
