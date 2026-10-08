@@ -47,6 +47,18 @@ source "$PROJECT_DIR/scripts/lib/fixtures.sh"
 CXX_BIN="${CXX:-c++}"
 build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX_BIN"
 "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
+
+# In-process concurrency regression: independent DuckDB databases load ROOT
+# and scan real dictionary-backed ROOT events from eight native threads.
+"$CXX_BIN" -std=c++20 -O2 -pthread \
+    -I"$PROJECT_DIR/duckdb/src/include" \
+    "$FIXTURE_DIR/concurrent_root_load.cpp" \
+    -L"$PROJECT_DIR/build/release/src" \
+    -Wl,-rpath,"$PROJECT_DIR/build/release/src" \
+    -lduckdb -o "$WORK_DIR/build/concurrent_root_load"
+"$WORK_DIR/build/concurrent_root_load" \
+    "$WORK_DIR/data/a.root" "$WORK_DIR/build/libTestEvent.so"
+
 build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" LegacyTestEvent make_legacy_fixture "$CXX_BIN"
 
 "$WORK_DIR/build/make_legacy_fixture" "$WORK_DIR/legacy/legacy.root"
