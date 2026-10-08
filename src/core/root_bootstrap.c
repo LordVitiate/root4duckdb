@@ -968,7 +968,8 @@ static int prepend_root_search_path(
     }
 
     existing_size = strlen(existing);
-    if (directory_size > SIZE_MAX - existing_size - 2U) {
+    if (existing_size > SIZE_MAX - 2U ||
+        directory_size > SIZE_MAX - existing_size - 2U) {
         set_message(
             error, error_size, "%s search path is too long", variable);
         return 0;
