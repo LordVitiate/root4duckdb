@@ -116,7 +116,7 @@ FROM read_root(
 );
 SQL
 )"
-if [[ "$(printf '%s\\n' "$ID_ONLY_RESULT" | grep -xc true)" != 2 ]]; then
+if [[ "$(printf '%s\n' "$ID_ONLY_RESULT" | grep -xc true)" != 2 ]]; then
     echo "scalar entry_id-only projection lost ROOT events: $ID_ONLY_RESULT" >&2
     exit 1
 fi
