@@ -72,6 +72,33 @@ FROM read_root(
 SQL
 MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-bind.sql" >/dev/null
 
+# TestBase inherits TObject: its bookkeeping fields must not leak into
+# physics-facing semantic discovery or into the automatic SELECT * schema.
+cat > "$WORK_DIR/tobject-discovery.sql" <<SQL
+LOAD parquet;
+SELECT count(*) = 0
+FROM root_describe(
+    '$WORK_DIR/data/a.root',
+    '/TestEvent',
+    dictionary := '$WORK_DIR/build/libTestEvent.so'
+)
+WHERE path IN ('/TestEvent/fUniqueID', '/TestEvent/fBits');
+DESCRIBE SELECT *
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent'
+);
+SQL
+MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+    < "$WORK_DIR/tobject-discovery.sql" > "$WORK_DIR/tobject-discovery.log" 2>&1
+if [[ "$(head -n 1 "$WORK_DIR/tobject-discovery.log")" != "true" ]] ||
+   grep -Eq '(^|,)(fUniqueID|fBits)(,|$)' "$WORK_DIR/tobject-discovery.log"; then
+    echo "TObject bookkeeping leaked into the semantic ROOT schema" >&2
+    cat "$WORK_DIR/tobject-discovery.log" >&2
+    exit 1
+fi
+
 cat > "$WORK_DIR/direct-read.sql" <<SQL
 LOAD parquet;
 SELECT count(*) >= 10
