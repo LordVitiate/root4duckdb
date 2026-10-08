@@ -200,6 +200,214 @@ bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t en
 }
 
 
+namespace
+{
+
+bool AppendNestedFixedValues(const uint8_t* bytes, size_t frame_end, uint64_t payload_offset,
+                             uint64_t outer, uint64_t inner, const SerializedReadPlan& plan,
+                             const SerializedEntryLayout& layout, SerializedPrimitiveKind primitive_kind,
+                             uint64_t max_values_per_entry, std::vector<RootPrimitiveValue>& values,
+                             std::vector<int32_t>& flat_indices, std::string& failure_reason, bool collect_indices)
+{
+    if (!layout.value_bytes || !plan.fixed_array_length ||
+        plan.fixed_array_length > max_values_per_entry - values.size() ||
+        plan.fixed_array_length > std::numeric_limits<uint64_t>::max() / layout.value_bytes ||
+        payload_offset > frame_end ||
+        plan.fixed_array_length * layout.value_bytes > frame_end - payload_offset ||
+        outer > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) ||
+        inner > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+    {
+        failure_reason = "nested fixed member exceeds framed object bounds or value limits";
+        return false;
+    }
+    for (uint64_t element = 0; element < plan.fixed_array_length; ++element)
+    {
+        RootPrimitiveValue value;
+        const auto* pointer = bytes + payload_offset + element * layout.value_bytes;
+        if (!serialized_codec::DecodePrimitive(pointer, primitive_kind, value))
+        {
+            failure_reason = "nested fixed member has unsupported primitive encoding";
+            return false;
+        }
+        values.push_back(value);
+        if (!collect_indices)
+        {
+            continue;
+        }
+        flat_indices.push_back(static_cast<int32_t>(outer));
+        flat_indices.push_back(static_cast<int32_t>(inner));
+        if (plan.fixed_array_length == 1)
+        {
+            continue;
+        }
+        const size_t rank = plan.array_dimensions.size();
+        if (!rank)
+        {
+            flat_indices.push_back(static_cast<int32_t>(element));
+            continue;
+        }
+        const size_t offset = flat_indices.size();
+        flat_indices.resize(offset + rank);
+        uint64_t remainder = element;
+        for (size_t index = rank; index > 0; --index)
+        {
+            const size_t dimension = index - 1;
+            const auto extent = plan.array_dimensions[dimension];
+            if (!extent)
+            {
+                failure_reason = "nested fixed member has a zero array dimension";
+                return false;
+            }
+            flat_indices[offset + dimension] = static_cast<int32_t>(remainder % extent);
+            remainder /= extent;
+        }
+    }
+    return true;
+}
+
+bool DecodeNestedObjectWise(TBufferFile& buffer, const SerializedReadPlan& plan, uint64_t frame_end,
+                            uint64_t outer, uint64_t max_values_per_entry,
+                            SerializedPrimitiveKind primitive_kind, std::vector<RootPrimitiveValue>& values,
+                            std::vector<int32_t>& flat_indices, std::string& failure_reason, bool collect_indices)
+{
+    const Int_t count_position = buffer.Length();
+    if (count_position < 0 || static_cast<uint64_t>(count_position) > frame_end ||
+        frame_end - static_cast<uint64_t>(count_position) < 4)
+    {
+        failure_reason = "object-wise nested STL count is outside its frame";
+        return false;
+    }
+    Int_t signed_count = -1;
+    buffer.ReadInt(signed_count);
+    if (signed_count < 0 || static_cast<uint64_t>(signed_count) > max_values_per_entry / plan.fixed_array_length ||
+        static_cast<uint64_t>(signed_count) * plan.fixed_array_length > max_values_per_entry - values.size())
+    {
+        failure_reason = "object-wise nested STL count exceeds configured value limits";
+        return false;
+    }
+    const uint64_t count = static_cast<uint32_t>(signed_count);
+    int32_t cached_version = -1;
+    SerializedEntryLayout object_layout;
+    for (uint64_t inner = 0; inner < count; ++inner)
+    {
+        const Int_t position = buffer.Length();
+        if (position < 0 || static_cast<uint64_t>(position) > frame_end ||
+            frame_end - static_cast<uint64_t>(position) < 6)
+        {
+            failure_reason = "object-wise nested element has no bounded class header";
+            return false;
+        }
+        UInt_t object_start = 0;
+        UInt_t object_byte_count = 0;
+        const Version_t object_version = buffer.ReadVersion(&object_start, &object_byte_count,
+                                                             plan.nested_element_class);
+        const Int_t value_start = buffer.Length();
+        const uint64_t object_end = static_cast<uint64_t>(object_start) + object_byte_count + 4;
+        if (!object_byte_count || object_version < 0 || value_start < 0 ||
+            object_end > frame_end || object_end < static_cast<uint64_t>(value_start))
+        {
+            failure_reason = "object-wise nested element has an invalid class byte count or version";
+            return false;
+        }
+        if (cached_version != object_version)
+        {
+            if (!ResolveSerializedNestedFixedLayout(plan, object_version, object_layout, failure_reason))
+            {
+                return false;
+            }
+            cached_version = object_version;
+        }
+        const uint64_t prefix = object_layout.bytes_before_value_per_element;
+        if (prefix > object_end - static_cast<uint64_t>(value_start))
+        {
+            failure_reason = "object-wise nested member prefix exceeds the object frame";
+            return false;
+        }
+        if (!AppendNestedFixedValues(reinterpret_cast<const uint8_t*>(buffer.Buffer()), object_end,
+                                     static_cast<uint64_t>(value_start) + prefix, outer, inner, plan,
+                                     object_layout, primitive_kind, max_values_per_entry,
+                                     values, flat_indices, failure_reason, collect_indices))
+        {
+            return false;
+        }
+        buffer.SetBufferOffset(static_cast<Int_t>(object_end));
+    }
+    if (static_cast<uint64_t>(buffer.Length()) != frame_end)
+    {
+        failure_reason = "object-wise nested STL elements do not consume the declared container frame";
+        return false;
+    }
+    return true;
+}
+
+bool DecodeNestedMemberWise(TBufferFile& buffer, const SerializedReadPlan& plan, uint64_t frame_end,
+                            uint64_t outer, uint64_t max_values_per_entry,
+                            SerializedPrimitiveKind primitive_kind, std::vector<RootPrimitiveValue>& values,
+                            std::vector<int32_t>& flat_indices, std::string& failure_reason, bool collect_indices)
+{
+    const Version_t element_version = buffer.ReadVersionForMemberWise(plan.nested_element_class);
+    SerializedEntryLayout layout;
+    if (!ResolveSerializedNestedFixedLayout(plan, element_version, layout, failure_reason))
+    {
+        return false;
+    }
+    const Int_t count_position = buffer.Length();
+    if (count_position < 0 || static_cast<uint64_t>(count_position) > frame_end ||
+        frame_end - static_cast<uint64_t>(count_position) < 4)
+    {
+        failure_reason = "member-wise nested STL count is outside its frame";
+        return false;
+    }
+    Int_t signed_count = -1;
+    buffer.ReadInt(signed_count);
+    if (signed_count < 0 || static_cast<uint64_t>(signed_count) > max_values_per_entry / plan.fixed_array_length ||
+        static_cast<uint64_t>(signed_count) * plan.fixed_array_length > max_values_per_entry - values.size())
+    {
+        failure_reason = "member-wise nested STL count exceeds configured value limits";
+        return false;
+    }
+    const uint64_t count = static_cast<uint32_t>(signed_count);
+    const uint64_t prefix_width = layout.bytes_before_value_per_element;
+    if ((prefix_width && count > std::numeric_limits<uint64_t>::max() / prefix_width) ||
+        !layout.value_bytes || count > std::numeric_limits<uint64_t>::max() / plan.fixed_array_length)
+    {
+        failure_reason = "member-wise nested column width overflow";
+        return false;
+    }
+    const uint64_t column_values = count * plan.fixed_array_length;
+    if (column_values > std::numeric_limits<uint64_t>::max() / layout.value_bytes)
+    {
+        failure_reason = "member-wise nested value width overflow";
+        return false;
+    }
+    const uint64_t prefix_bytes = count * prefix_width;
+    const uint64_t value_bytes = column_values * layout.value_bytes;
+    const Int_t cursor = buffer.Length();
+    if (cursor < 0 || static_cast<uint64_t>(cursor) > frame_end ||
+        prefix_bytes > frame_end - static_cast<uint64_t>(cursor) ||
+        value_bytes > frame_end - static_cast<uint64_t>(cursor) - prefix_bytes)
+    {
+        failure_reason = "member-wise nested values exceed their container frame";
+        return false;
+    }
+    const uint64_t payload = static_cast<uint64_t>(cursor) + prefix_bytes;
+    const auto* bytes = reinterpret_cast<const uint8_t*>(buffer.Buffer());
+    for (uint64_t inner = 0; inner < count; ++inner)
+    {
+        if (!AppendNestedFixedValues(bytes, frame_end,
+                                     payload + inner * plan.fixed_array_length * layout.value_bytes,
+                                     outer, inner, plan, layout, primitive_kind, max_values_per_entry,
+                                     values, flat_indices, failure_reason, collect_indices))
+        {
+            return false;
+        }
+    }
+    buffer.SetBufferOffset(static_cast<Int_t>(frame_end));
+    return true;
+}
+
+} // namespace
+
 bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedReadPlan& plan, size_t entry_size,
                                        uint64_t outer_count, uint64_t max_values_per_entry,
                                        std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
@@ -207,6 +415,7 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
 {
     values.clear();
     flat_indices.clear();
+    failure_reason.clear();
     if (!plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER) || !plan.nested_container_class ||
         !plan.nested_element_class || !plan.value_bytes || !plan.fixed_array_length ||
         outer_count > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
@@ -215,13 +424,12 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
         return false;
     }
     const auto primitive_kind = ClassifySerializedPrimitive(plan.value_type);
-    if (primitive_kind == SerializedPrimitiveKind::UNKNOWN)
+    if (primitive_kind == SerializedPrimitiveKind::UNKNOWN ||
+        serialized_codec::PrimitiveWidth(primitive_kind) != plan.value_bytes)
     {
         failure_reason = "nested offset projection uses an unsupported primitive";
         return false;
     }
-    int32_t cached_version = -1;
-    SerializedEntryLayout inner_layout;
     for (uint64_t outer = 0; outer < outer_count; ++outer)
     {
         const Int_t current_position = buffer.Length();
@@ -229,156 +437,59 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
             entry_size - static_cast<uint64_t>(current_position) < 6)
         {
             failure_reason = "nested STL header exceeds the serialized entry";
-            values.clear();
-            flat_indices.clear();
-            return false;
+            break;
         }
-        const auto* raw = reinterpret_cast<const uint8_t*>(buffer.Buffer()) + current_position;
-        const auto raw_byte_count = serialized_codec::ReadBE32(raw);
-        const auto raw_version = serialized_codec::ReadBE16(raw + 4);
         UInt_t start = 0;
         UInt_t byte_count = 0;
         const Version_t version = buffer.ReadVersion(&start, &byte_count, plan.nested_container_class);
         const Int_t decoded_position = buffer.Length();
-        const uint64_t nested_end = static_cast<uint64_t>(start) + byte_count + 4;
+        const uint64_t frame_end = static_cast<uint64_t>(start) + byte_count + 4;
+        const bool memberwise = (version & TBufferFile::kStreamedMemberWise) != 0;
+        const auto stl_version = static_cast<uint16_t>(version & ~TBufferFile::kStreamedMemberWise);
         if (outer == 0)
         {
             RootDebug("SERIALIZED.NESTED_FIXED_HEADER",
                       "path=" + plan.logical_path +
                           " cursor=" + std::to_string(current_position) +
-                          " raw_byte_count=" + std::to_string(raw_byte_count) +
-                          " raw_version=" + std::to_string(raw_version) +
                           " version=" + std::to_string(version) +
-                          " start=" + std::to_string(start) +
-                          " byte_count=" + std::to_string(byte_count) +
-                          " header_end=" + std::to_string(decoded_position) +
-                          " frame_end=" + std::to_string(nested_end) +
+                          " streamed_memberwise=" + std::to_string(memberwise) +
+                          " frame_end=" + std::to_string(frame_end) +
                           " entry_size=" + std::to_string(entry_size) +
                           " outer_count=" + std::to_string(outer_count));
         }
-        const bool memberwise = (version & TBufferFile::kStreamedMemberWise) != 0;
-        const auto stl_version = static_cast<uint16_t>(version & ~TBufferFile::kStreamedMemberWise);
-        if (!memberwise)
+        if (!byte_count || decoded_position < 0 || frame_end > entry_size ||
+            frame_end < static_cast<uint64_t>(decoded_position))
         {
-            failure_reason = "nested STL uses object-wise encoding (version=" + std::to_string(stl_version) + ")";
+            failure_reason = "nested STL has inconsistent framed byte count";
+            break;
         }
-        else if (stl_version < 8)
+        bool decoded = false;
+        if (memberwise && stl_version >= 8)
         {
-            failure_reason = "nested STL uses legacy member-wise encoding (version=" +
-                             std::to_string(stl_version) + ")";
+            decoded = DecodeNestedMemberWise(buffer, plan, frame_end, outer, max_values_per_entry,
+                                             primitive_kind, values, flat_indices, failure_reason, collect_indices);
         }
-        else if (!byte_count || decoded_position < 0 || nested_end > entry_size ||
-                 nested_end < static_cast<uint64_t>(decoded_position))
+        else if (!memberwise && stl_version == 9)
         {
-            failure_reason = "nested STL has inconsistent framed byte count (version=" +
-                             std::to_string(stl_version) + ", frame_end=" +
-                             std::to_string(nested_end) + ", entry_size=" +
-                             std::to_string(entry_size) + ")";
+            decoded = DecodeNestedObjectWise(buffer, plan, frame_end, outer, max_values_per_entry,
+                                             primitive_kind, values, flat_indices, failure_reason, collect_indices);
         }
-        if (!failure_reason.empty())
+        else
         {
-            values.clear();
-            flat_indices.clear();
-            return false;
+            failure_reason = "unsupported nested STL encoding version " + std::to_string(stl_version) +
+                             (memberwise ? " (member-wise)" : " (object-wise)");
         }
-        const Version_t element_version = buffer.ReadVersionForMemberWise(plan.nested_element_class);
-        if (cached_version != element_version)
+        if (!decoded)
         {
-            if (!ResolveSerializedNestedFixedLayout(plan, element_version, inner_layout, failure_reason))
-            {
-                values.clear();
-                flat_indices.clear();
-                return false;
-            }
-            cached_version = element_version;
+            break;
         }
-        Int_t signed_count = -1;
-        buffer.ReadInt(signed_count);
-        if (signed_count < 0)
-        {
-            failure_reason = "nested member-wise STL has a negative value count";
-            values.clear();
-            flat_indices.clear();
-            return false;
-        }
-        const uint64_t count = static_cast<uint32_t>(signed_count);
-        if (count > max_values_per_entry / plan.fixed_array_length ||
-            count * plan.fixed_array_length > max_values_per_entry - values.size() ||
-            (inner_layout.bytes_before_value_per_element > 0 &&
-             count > std::numeric_limits<uint64_t>::max() / inner_layout.bytes_before_value_per_element))
-        {
-            failure_reason = "nested fixed value count or prefix exceeds safety limits";
-            values.clear();
-            flat_indices.clear();
-            return false;
-        }
-        const uint64_t value_count = count * plan.fixed_array_length;
-        const uint64_t prefix_bytes = count * inner_layout.bytes_before_value_per_element;
-        if (value_count > std::numeric_limits<uint64_t>::max() / inner_layout.value_bytes)
-        {
-            failure_reason = "nested member value range overflows";
-            values.clear();
-            flat_indices.clear();
-            return false;
-        }
-        const uint64_t value_bytes = value_count * inner_layout.value_bytes;
-        const uint64_t cursor = static_cast<uint64_t>(buffer.Length());
-        if (cursor > nested_end || prefix_bytes > nested_end - cursor ||
-            value_bytes > nested_end - cursor - prefix_bytes)
-        {
-            failure_reason = "nested fixed member lies outside its ROOT STL frame";
-            values.clear();
-            flat_indices.clear();
-            return false;
-        }
-        const auto* payload = reinterpret_cast<const uint8_t*>(buffer.Buffer()) + cursor + prefix_bytes;
-        for (uint64_t inner = 0; inner < count; ++inner)
-        {
-            for (uint64_t index = 0; index < plan.fixed_array_length; ++index)
-            {
-                RootPrimitiveValue value;
-                if (!serialized_codec::DecodePrimitive(payload + (inner * plan.fixed_array_length + index) *
-                                                                  inner_layout.value_bytes, primitive_kind, value))
-                {
-                    failure_reason = "nested fixed member has unsupported primitive encoding";
-                    values.clear();
-                    flat_indices.clear();
-                    return false;
-                }
-                values.push_back(value);
-                if (collect_indices)
-                {
-                    flat_indices.push_back(static_cast<int32_t>(outer));
-                    flat_indices.push_back(static_cast<int32_t>(inner));
-                    if (plan.fixed_array_length > 1)
-                    {
-                        uint64_t remainder = index;
-                        const auto offset = flat_indices.size();
-                        const auto rank = std::max<size_t>(1, plan.array_dimensions.size());
-                        flat_indices.resize(offset + rank);
-                        if (plan.array_dimensions.empty())
-                        {
-                            flat_indices[offset] = static_cast<int32_t>(index);
-                        }
-                        else
-                        {
-                            for (size_t reverse = rank; reverse > 0; --reverse)
-                            {
-                                const size_t dim = reverse - 1;
-                                flat_indices[offset + dim] =
-                                    static_cast<int32_t>(remainder % plan.array_dimensions[dim]);
-                                remainder /= plan.array_dimensions[dim];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        buffer.SetBufferOffset(static_cast<Int_t>(nested_end));
     }
-    if (collect_indices && flat_indices.size() != values.size() * plan.index_depth)
+    if (failure_reason.empty() && collect_indices && flat_indices.size() != values.size() * plan.index_depth)
     {
         failure_reason = "nested offset projection produced inconsistent collection indices";
+    }
+    if (!failure_reason.empty())
+    {
         values.clear();
         flat_indices.clear();
         return false;
