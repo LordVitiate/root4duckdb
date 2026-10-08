@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <link.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <spawn.h>
 #include <stdbool.h>
 #include <stdarg.h>
@@ -47,6 +48,7 @@ typedef bool (*root4duckdb_payload_init_fn)(
 struct root_runtime {
     char prefix[PATH_MAX];
     char libdir[PATH_MAX];
+    char incdir[PATH_MAX];
     char version[128];
 };
 
@@ -497,6 +499,7 @@ static int runtime_from_root_config(
 
     char raw_prefix[PATH_MAX];
     char raw_libdir[PATH_MAX];
+    char raw_incdir[PATH_MAX];
 
     if (!run_tool(
             root_config,
@@ -513,6 +516,16 @@ static int runtime_from_root_config(
             "--libdir",
             raw_libdir,
             sizeof(raw_libdir),
+            error,
+            error_size)) {
+        return 0;
+    }
+
+    if (!run_tool(
+            root_config,
+            "--incdir",
+            raw_incdir,
+            sizeof(raw_incdir),
             error,
             error_size)) {
         return 0;
@@ -541,6 +554,15 @@ static int runtime_from_root_config(
             raw_libdir,
             runtime->libdir,
             sizeof(runtime->libdir),
+            error,
+            error_size)) {
+        return 0;
+    }
+
+    if (!canonical_path(
+            raw_incdir,
+            runtime->incdir,
+            sizeof(runtime->incdir),
             error,
             error_size)) {
         return 0;
@@ -610,6 +632,28 @@ static int validate_runtime(
     };
 
     size_t i;
+    char root_header[PATH_MAX];
+
+    if (snprintf(
+            root_header,
+            sizeof(root_header),
+            "%s/Rtypes.h",
+            runtime->incdir) >= (int)sizeof(root_header)) {
+        set_message(
+            error,
+            error_size,
+            "ROOT include directory is too long");
+        return 0;
+    }
+
+    if (access(root_header, R_OK) != 0) {
+        set_message(
+            error,
+            error_size,
+            "incomplete ROOT installation: cannot read %s",
+            root_header);
+        return 0;
+    }
 
     if (!ROOT4DUCKDB_BUILD_ROOT_VERSION[0]) {
         set_message(
@@ -871,6 +915,94 @@ static void *dlopen_checked(
 }
 
 
+
+/*
+ * ROOT's own dynamic-loader path and Cling's header search path are not
+ * initialized from the explicit dlopen() paths below. Bootstrap them using
+ * directories reported by the selected ROOT installation.
+ *
+ * Preserve caller-provided entries (e.g. analysis dictionaries), but put
+ * the validated ROOT installation first to avoid finding another ROOT.
+ *
+ * setenv()/getenv() modify process-global state; this routine is called only
+ * once while g_runtime_mutex is held, before loading libCore. The mutex
+ * guards our own initialization, not unrelated environment operations.
+ * Applications with concurrent environment mutation need external
+ * coordination; this limitation already applies to ROOTSYS below.
+ */
+static int prepend_root_search_path(
+    const char *variable,
+    const char *directory,
+    char *error,
+    size_t error_size) {
+
+    const char *existing;
+    size_t directory_size;
+    size_t existing_size;
+    size_t total_size;
+    char *combined;
+    int saved_errno;
+
+    if (!variable || !*variable || !directory || !*directory) {
+        set_message(error, error_size, "invalid ROOT search path");
+        return 0;
+    }
+
+    directory_size = strlen(directory);
+    existing = getenv(variable);
+
+    if (!existing || !*existing) {
+        if (setenv(variable, directory, 1) == 0) {
+            return 1;
+        }
+        set_message(
+            error, error_size, "cannot set %s: %s",
+            variable, strerror(errno));
+        return 0;
+    }
+
+    if (strncmp(existing, directory, directory_size) == 0 &&
+        (existing[directory_size] == ':' ||
+         existing[directory_size] == '\0')) {
+        return 1;
+    }
+
+    existing_size = strlen(existing);
+    if (directory_size > SIZE_MAX - existing_size - 2U) {
+        set_message(
+            error, error_size, "%s search path is too long", variable);
+        return 0;
+    }
+
+    total_size = directory_size + 1U + existing_size + 1U;
+    combined = malloc(total_size);
+    if (!combined) {
+        set_message(
+            error, error_size, "out of memory preparing %s", variable);
+        return 0;
+    }
+
+    memcpy(combined, directory, directory_size);
+    combined[directory_size] = ':';
+    memcpy(
+        combined + directory_size + 1U,
+        existing,
+        existing_size + 1U);
+
+    if (setenv(variable, combined, 1) != 0) {
+        saved_errno = errno;
+        free(combined);
+        set_message(
+            error, error_size, "cannot set %s: %s",
+            variable, strerror(saved_errno));
+        return 0;
+    }
+
+    free(combined);
+    return 1;
+}
+
+
 static int load_root_runtime(
     char *error,
     size_t error_size) {
@@ -901,6 +1033,19 @@ static int load_root_runtime(
 
     if (!verify_loaded_root(
             &runtime,
+            error,
+            error_size)) {
+        return 0;
+    }
+
+    if (!prepend_root_search_path(
+            "ROOT_LIBRARY_PATH",
+            runtime.libdir,
+            error,
+            error_size) ||
+        !prepend_root_search_path(
+            "ROOT_INCLUDE_PATH",
+            runtime.incdir,
             error,
             error_size)) {
         return 0;
