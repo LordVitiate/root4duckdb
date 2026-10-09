@@ -555,8 +555,8 @@ if command -v ldd >/dev/null 2>&1; then
     if command -v readelf >/dev/null 2>&1; then
         for artifact in "$DUCKDB_BIN" "$LOADABLE_EXT"; do
             if readelf -d "$artifact" |
-                grep -E '\\(NEEDED\\)' |
-                grep -Eq 'libiceberg(_data|_bundle|_sql_catalog)?\\.so|lib(Core|RIO|Tree|Hist|Cling)\\.so'; then
+                grep -E '\(NEEDED\)' |
+                grep -Eq 'libiceberg(_data|_bundle|_sql_catalog)?\.so|lib(Core|RIO|Tree|Hist|Cling)\.so'; then
                 echo "[ERROR] Unexpected direct ROOT/Iceberg dependency in $artifact" >&2
                 exit 1
             fi
