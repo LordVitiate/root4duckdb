@@ -253,6 +253,19 @@ def _check_production(validator: ProjectValidator) -> None:
         "Bundled DuckDB is not linked to",
     ))
 
+    validator.require_tokens("ROOT C++ ABI compatibility gate", build_script, (
+        'compiler_release=',
+        'compiler_cxx11_abi=',
+        'root_release=',
+        'root_cxx11_abi=',
+        '_GLIBCXX_USE_CXX11_ABI',
+        '_GLIBCXX_RELEASE',
+        '[ERROR] ROOT/Cling and compiler use incompatible libstdc++ ABI settings.',
+    ))
+    validator.reject_tokens("obsolete ROOT header date gate", build_script, (
+        '[ERROR] ROOT/Cling and compiler use different C++ headers.',
+    ))
+
     package = validator.read("scripts/package-release.sh")
     validator.require_tokens("C API release packaging", package, (
         "EXPECTED_CAPI_VERSION",
