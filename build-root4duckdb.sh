@@ -322,23 +322,32 @@ check_root_abi() {
         fi
     fi
 
-    compiler_glibcxx="$(
+    local compiler_macros
+    local compiler_release=""
+    local compiler_cxx11_abi=""
+    local root_release=""
+    local root_cxx11_abi=""
+
+    compiler_macros="$(
         printf '#include <bits/c++config.h>\n' |
-            "$CXX" -dM -E -x c++ - |
-            awk '$2 == "__GLIBCXX__" { value = $3 }
-                 END {
-                     if (value != "") {
-                         print value
-                     }
-                 }'
+            "$CXX" -dM -E -x c++ -
+    )"
+    compiler_glibcxx="$(
+        awk '$2 == "__GLIBCXX__" { print $3 }' <<<"$compiler_macros"
+    )"
+    compiler_release="$(
+        awk '$2 == "_GLIBCXX_RELEASE" { print $3 }' <<<"$compiler_macros"
+    )"
+    compiler_cxx11_abi="$(
+        awk '$2 == "_GLIBCXX_USE_CXX11_ABI" { print $3 }' <<<"$compiler_macros"
     )"
 
     if command -v root >/dev/null 2>&1; then
-        # Do not let `set -e` turn a diagnostic ROOT invocation into a silent
-        # build-script exit. Capture its status explicitly and report it.
+        # Evaluate the actual libstdc++ ABI settings used by ROOT/Cling.
+        # __GLIBCXX__ alone is a source datestamp, not an ABI identifier.
         if root_probe="$(
             root -l -b -q \
-                -e 'std::cout << "__ROOT4DUCKDB_GLIBCXX__=" << __GLIBCXX__ << std::endl; std::exit(0);' \
+                -e 'std::cout << "__ROOT4DUCKDB_GLIBCXX__=" << __GLIBCXX__ << std::endl; std::cout << "__ROOT4DUCKDB_GLIBCXX_RELEASE__=" << _GLIBCXX_RELEASE << std::endl; std::cout << "__ROOT4DUCKDB_CXX11_ABI__=" << _GLIBCXX_USE_CXX11_ABI << std::endl; std::exit(0);' \
                 2>&1
         )"; then
             :
@@ -354,18 +363,37 @@ check_root_abi() {
                 's/.*__ROOT4DUCKDB_GLIBCXX__=([0-9]+).*/\1/p' \
                 <<<"$root_probe"
         )"
+        root_release="$(
+            sed -nE \
+                's/.*__ROOT4DUCKDB_GLIBCXX_RELEASE__=([0-9]+).*/\1/p' \
+                <<<"$root_probe"
+        )"
+        root_cxx11_abi="$(
+            sed -nE \
+                's/.*__ROOT4DUCKDB_CXX11_ABI__=([01]).*/\1/p' \
+                <<<"$root_probe"
+        )"
 
-        if [[ -z "$root_glibcxx" ]]; then
-            echo "[ERROR] Could not determine ROOT/Cling __GLIBCXX__." >&2
+        if [[ -z "$root_glibcxx" || -z "$compiler_glibcxx" ||
+              -z "$root_release" || -z "$compiler_release" ||
+              -z "$root_cxx11_abi" || -z "$compiler_cxx11_abi" ]]; then
+            echo "[ERROR] Could not determine ROOT/compiler libstdc++ ABI settings." >&2
             printf '%s\n' "$root_probe" >&2
             exit 1
         fi
 
-        if [[ "$root_glibcxx" != "$compiler_glibcxx" ]]; then
-            echo "[ERROR] ROOT/Cling and compiler use different C++ headers." >&2
-            echo "        ROOT __GLIBCXX__:     $root_glibcxx" >&2
-            echo "        compiler __GLIBCXX__: $compiler_glibcxx" >&2
+        if [[ "$root_release" != "$compiler_release" ||
+              "$root_cxx11_abi" != "$compiler_cxx11_abi" ]]; then
+            echo "[ERROR] ROOT/Cling and compiler use incompatible libstdc++ ABI settings." >&2
+            echo "        ROOT:     release=$root_release CXX11_ABI=$root_cxx11_abi" >&2
+            echo "        compiler: release=$compiler_release CXX11_ABI=$compiler_cxx11_abi" >&2
             exit 1
+        fi
+
+        if [[ "$root_glibcxx" != "$compiler_glibcxx" ]]; then
+            echo "[WARN] ROOT/Cling and compiler have different libstdc++ header datestamps." >&2
+            echo "       ROOT __GLIBCXX__=$root_glibcxx; compiler __GLIBCXX__=$compiler_glibcxx" >&2
+            echo "       ABI release and CXX11_ABI match; required symbols and runtime were checked." >&2
         fi
 
         if grep -Eq \
@@ -378,7 +406,7 @@ check_root_abi() {
     fi
 
     echo "[OK] ROOT/libstdc++ ABI preflight passed"
-    echo "[OK] ROOT/compiler __GLIBCXX__=$compiler_glibcxx"
+    echo "[OK] ROOT/compiler C++ ABI release=$compiler_release CXX11_ABI=$compiler_cxx11_abi"
     echo "[OK] ROOT/compiler runtime=$compiler_runtime"
 }
 
