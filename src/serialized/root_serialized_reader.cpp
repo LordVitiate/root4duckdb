@@ -515,11 +515,8 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
                 return true;
             }
             const auto offset_reason = failure_reason;
-            if (counters.entries == 0)
-            {
-                RootDebug("SERIALIZED.NESTED_FIXED_FALLBACK",
-                          "path=" + plan.logical_path + " reason=" + offset_reason);
-            }
+            RootDebug("SERIALIZED.NESTED_FIXED_FALLBACK",
+                      "path=" + plan.logical_path + " reason=" + offset_reason);
             buffer.SetBufferOffset(nested_column_start);
             cached_action_sequence.reset();
             SerializedReadPlan selected_plan = plan;
