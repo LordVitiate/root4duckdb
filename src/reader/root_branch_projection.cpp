@@ -56,6 +56,12 @@ BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBra
         tree->AddBranchToCache(branch, true);
         result.branches.emplace_back(branch->GetName());
     }
+    // The requested branches are already known. End ROOT's learning phase so
+    // TTreeCache can begin prefetching without sampling the first entries.
+    if (cache_bytes)
+    {
+        tree->StopCacheLearningPhase();
+    }
     result.applied = true;
     return result;
 }
@@ -73,6 +79,10 @@ void EnableAllBranches(TTree* tree, uint64_t cache_bytes)
             std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max()))));
     }
     tree->AddBranchToCache("*", true);
+    if (cache_bytes)
+    {
+        tree->StopCacheLearningPhase();
+    }
 }
 
 } // namespace duckdb::rootlake
