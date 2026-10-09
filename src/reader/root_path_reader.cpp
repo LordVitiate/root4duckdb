@@ -1,5 +1,6 @@
 #include "root4duckdb/reader/root_path_reader.hpp"
 
+#include "root4duckdb/core/root_debug.hpp"
 #include "root4duckdb/core/root_headers.hpp"
 #include "root4duckdb/core/root_file_opener.hpp"
 #include "root4duckdb/reader/root_branch_projection.hpp"
