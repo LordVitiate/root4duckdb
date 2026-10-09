@@ -8,7 +8,7 @@ cd "$PROJECT_DIR"
 
 DUCKDB_BIN="${ROOT4DUCKDB_INDEPENDENT_DUCKDB:-$PROJECT_DIR/.deps/vanilla-duckdb-1.5.6/duckdb}"
 EXT="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
-WORK_DIR="${ROOT4DUCKDB_INDEPENDENT_TEST_DIR:-$PROJECT_DIR/test/.tmp-independent-duckdb}"
+WORK_DIR="${ROOT4DUCKDB_INDEPENDENT_TEST_DIR:-$(mktemp -d /tmp/root4duckdb-independent.XXXXXX)}"
 FIXTURE_DIR="$PROJECT_DIR/test/fixtures"
 
 fail() {
