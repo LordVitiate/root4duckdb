@@ -540,9 +540,6 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
             return false;
         }
         const size_t column_offset = static_cast<size_t>(root_offset);
-        RootDebug("SERIALIZED.NESTED_COLUMN",
-                  "path=" + plan.logical_path + " outer_count=" + std::to_string(outer_count) + " element_version=" +
-                      std::to_string(element_version) + " offset=" + std::to_string(column_offset));
         return DecodeSerializedNestedPrimitiveVectorColumn(bytes, entry_size, column_offset, outer_count, layout,
                                                            max_values_per_entry, values, flat_indices, failure_reason,
                                                            collect_indices);
@@ -625,9 +622,6 @@ bool SerializedBasketReader::DecodeFixedProjectionEntry(const uint8_t* bytes, si
             failure_reason = "ROOT fixed-projection header moved outside the basket entry";
             return false;
         }
-        RootDebug("SERIALIZED.FIXED_COLUMN", "path=" + plan.logical_path + " count=" + std::to_string(signed_count) +
-                                                 " element_version=" + std::to_string(element_version) +
-                                                 " offset=" + std::to_string(payload_cursor));
         return DecodeSerializedVectorPayload(bytes, entry_size, static_cast<size_t>(payload_cursor),
                                              static_cast<uint32_t>(signed_count), layout, max_values_per_entry, values,
                                              flat_indices, failure_reason, collect_indices);
