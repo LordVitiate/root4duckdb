@@ -214,6 +214,7 @@ if [[ "${ROOT4DUCKDB_DISABLE_PINNED_LCG:-0}" != "1" ]]; then
       printf 'export XDG_CACHE_HOME=%s\n' "$(quote "$cache_root")"
       printf 'export CCACHE_DIR=%s\n' "$(quote "$ccache_root")"
       printf 'export CCACHE_TEMPDIR=%s\n' "$(quote "$ccache_tmp")"
+      printf 'mkdir -p -- "$TMPDIR" "$XDG_CACHE_HOME" "$CCACHE_DIR" "$CCACHE_TEMPDIR"\n'
 
       printf 'export GIT_BIN=%s\n' "$(quote "$pinned_git")"
       printf 'export GIT_EXEC_PATH=%s\n' "$(quote "$pinned_git_exec")"
@@ -456,6 +457,7 @@ echo "[OK] Git HTTPS helper: $GIT_EXEC_PATH_FIXED" >&2
   printf 'export XDG_CACHE_HOME=%s\n' "$(quote "$CACHE_ROOT")"
   printf 'export CCACHE_DIR=%s\n' "$(quote "$CCACHE_ROOT")"
   printf 'export CCACHE_TEMPDIR=%s\n' "$(quote "$CCACHE_TMP")"
+  printf 'mkdir -p -- "$TMPDIR" "$XDG_CACHE_HOME" "$CCACHE_DIR" "$CCACHE_TEMPDIR"\n'
   if [[ -n "$TOOLCHAIN_LD" ]]; then
     printf 'export LD_LIBRARY_PATH=%s:${LD_LIBRARY_PATH:-}\n' "$(quote "$TOOLCHAIN_LD")"
   fi
