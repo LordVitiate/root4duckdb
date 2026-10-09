@@ -437,7 +437,7 @@ fi
 [FAIL] git-remote-https helper not found.
 On LXPLUS, source an LCG view that contains Git or export GIT_EXEC_PATH to its
 git-core directory, then rerun the command. Example:
-  source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc14-opt/setup.sh
+  source /cvmfs/sft.cern.ch/lcg/views/LCG_110a/x86_64-el9-gcc14-opt/setup.sh
 MSG
   exit 2
 }
