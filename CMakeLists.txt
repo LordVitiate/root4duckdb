@@ -56,7 +56,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(root_loadable_extension_smoke EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/test/loadable_extension_smoke.cpp
     )
-    target_link_libraries(root_loadable_extension_smoke PRIVATE duckdb_static)
+    # DuckDB's standalone static library requires the official no-op
+    # extension loader. The smoke host explicitly LOADs the release artifact.
+    target_link_libraries(root_loadable_extension_smoke PRIVATE
+        duckdb_static
+        dummy_static_extension_loader
+    )
     target_compile_features(root_loadable_extension_smoke PRIVATE cxx_std_17)
     set_target_properties(root_loadable_extension_smoke PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extension/root"
