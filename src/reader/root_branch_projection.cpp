@@ -78,11 +78,9 @@ void EnableAllBranches(TTree* tree, uint64_t cache_bytes)
         tree->SetCacheSize(static_cast<Long64_t>(
             std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max()))));
     }
+    // In object fallback the actual branch-use pattern is not known here.
+    // Keep ROOT's adaptive learning instead of eagerly prefetching the tree.
     tree->AddBranchToCache("*", true);
-    if (cache_bytes)
-    {
-        tree->StopCacheLearningPhase();
-    }
 }
 
 } // namespace duckdb::rootlake
