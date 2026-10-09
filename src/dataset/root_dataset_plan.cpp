@@ -272,6 +272,10 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
             task.value_count = chunk->GetValue(11, row).GetValue<uint64_t>();
             task.physical_offset = chunk->GetValue(12, row).GetValue<uint64_t>();
             task.compressed_size = chunk->GetValue(13, row).GetValue<uint32_t>();
+            if (task.compressed_size > std::numeric_limits<uint64_t>::max() - task.physical_offset)
+            {
+                throw IOException("Indexed ROOT basket extends beyond the addressable file range: " + task.root_uri);
+            }
             const auto bloom_value = chunk->GetValue(14, row);
             if (value_filter && !bloom_value.IsNull())
             {
@@ -313,6 +317,13 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
             {
                 if (!counted_basket)
                 {
+                    if (candidate.compressed_size >
+                            std::numeric_limits<uint64_t>::max() - global.planned_compressed_bytes ||
+                        candidate.value_count > std::numeric_limits<uint64_t>::max() - global.planned_values ||
+                        global.planned_baskets == std::numeric_limits<uint64_t>::max())
+                    {
+                        throw IOException("Indexed ROOT basket counters exceed their supported range");
+                    }
                     global.planned_compressed_bytes += candidate.compressed_size;
                     global.planned_values += candidate.value_count;
                     ++global.planned_baskets;
@@ -330,6 +341,11 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
                         previous.schema_id == candidate.schema_id && previous.entry_end == candidate.entry_begin &&
                         ordered && gap <= bind.coalesce_gap_bytes)
                     {
+                        if (candidate.value_count > std::numeric_limits<uint64_t>::max() - previous.value_count ||
+                            previous.basket_count == std::numeric_limits<uint32_t>::max())
+                        {
+                            throw IOException("Coalesced ROOT basket task exceeds its supported range");
+                        }
                         previous.entry_end = candidate.entry_end;
                         previous.value_count += candidate.value_count;
                         previous.compressed_size =
