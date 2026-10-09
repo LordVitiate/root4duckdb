@@ -230,6 +230,18 @@ def _check_production(validator: ProjectValidator) -> None:
     if "catalog_mode:='external'" not in validator.read("scripts/production/index_chunk.sh"):
         validator.errors.append("production worker does not use explicit external catalog staging")
 
+    package = validator.read("scripts/package-release.sh")
+    validator.require_tokens("C API release packaging", package, (
+        "EXPECTED_CAPI_VERSION",
+        '"C_STRUCT"',
+        '"root_init_c_api"',
+        "root.duckdb_extension",
+    ))
+    validator.reject_tokens("retired C++ release ABI", package, (
+        "root_duckdb_cpp_init",
+        "v1.4.5",
+    ))
+
     integration = validator.read("scripts/run-integration-test.sh")
     validator.require_tokens("integration coverage", integration, (
         "reader_mode := 'serialized'",
