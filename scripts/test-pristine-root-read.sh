@@ -9,7 +9,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DUCKDB="$PROJECT_DIR/.deps/vanilla-duckdb-1.5.6/duckdb"
 EXT="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
 FIXTURES="$PROJECT_DIR/test/fixtures"
-WORK_DIR="$PROJECT_DIR/test/.tmp-pristine-root-read"
+WORK_DIR="${ROOT4DUCKDB_PRISTINE_TEST_DIR:-$(mktemp -d /tmp/root4duckdb-pristine.XXXXXX)}"
 LOG_DIR="$WORK_DIR/logs"
 
 fail() {
