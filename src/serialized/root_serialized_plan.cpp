@@ -378,9 +378,6 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     const char* enabled = std::getenv("ROOT4DUCKDB_NESTED_FIXED_OFFSET");
     if (!enabled || std::string(enabled) != "1")
     {
-        RootDebug("SERIALIZED.NESTED_FIXED_DISABLED",
-                  "path=" + plan.logical_path + " ROOT4DUCKDB_NESTED_FIXED_OFFSET=" +
-                      (enabled ? std::string(enabled) : "<unset>"));
         return false;
     }
     const auto reject = [&](const std::string& reason)
@@ -500,9 +497,6 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     {
         plan.prefix_element_ids.push_back(i);
     }
-    RootDebug("SERIALIZED.NESTED_FIXED_PLAN", "path=" + plan.logical_path +
-              " nested_member=" + plan.projected_member_name +
-              " values_per_element=" + std::to_string(plan.fixed_array_length));
     return true;
 }
 
