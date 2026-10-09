@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_SERIALIZED_ROOT_SERIALIZED_READER_HPP
+#define ROOT4DUCKDB_SERIALIZED_ROOT_SERIALIZED_READER_HPP
 
 #include "root4duckdb/core/root_lake_common.hpp"
 #include "root4duckdb/reader/root_semantic_reader.hpp"
@@ -16,29 +17,37 @@ class TBranch;
 class TBasket;
 class TBufferFile;
 class TLeaf;
-namespace TStreamerInfoActions {
+namespace TStreamerInfoActions
+{
 class TActionSequence;
 }
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Requested basket decoding strategy.
-enum class RootReaderMode : uint8_t { AUTO = 0, SERIALIZED = 1, OBJECT = 2 };
+enum class RootReaderMode : uint8_t
+{
+    AUTO = 0,
+    SERIALIZED = 1,
+    OBJECT = 2
+};
 
 /// Supported serialized projection shapes.
-enum class SerializedProjectionKind : uint8_t {
+enum class SerializedProjectionKind : uint8_t
+{
     FIXED_MEMBER = 0,
     NESTED_PRIMITIVE_VECTOR = 1,
-    // A version-aware prefix+target action materializes only the first
-    // selected subtree below the outer vector.  The remaining semantic path
-    // is traversed recursively and is not limited to a hard-coded depth.
+    // Materialize the first selected subtree, then traverse the remaining semantic path.
     SELECTED_SUBTREE = 2,
     /// A self-contained primitive split branch read without a root object.
     LEAF_BRANCH = 3,
     /// Member-wise actions over an unsplit top-level branch or one standalone inline-object member branch.
     ROOT_SELECTED_SUBTREE = 4,
     /// One self-contained split STL member decoded into a private root scratch object.
-    COLLECTION_BRANCH = 5
+    COLLECTION_BRANCH = 5,
+    // Opt-in byte-offset decoder for nested vector<object>/vector<object>/fixed primitive.
+    NESTED_FIXED_MEMBER = 6
 };
 
 /// Parses and formats reader and projection modes.
@@ -49,23 +58,40 @@ bool IsSerializedNestedProjection(SerializedProjectionKind kind);
 const char* SerializedProjectionName(SerializedProjectionKind kind);
 /// @}
 
-struct SerializedPlanRejected {
+struct SerializedPlanRejected
+{
     std::string reason;
 };
-struct SerializedFixedProjection {};
-struct SerializedNestedPrimitiveProjection {};
-struct SerializedSelectedSubtreeProjection {};
-struct SerializedLeafBranchProjection {};
-struct SerializedRootSubtreeProjection {};
-struct SerializedCollectionBranchProjection {};
+struct SerializedFixedProjection
+{
+};
+struct SerializedNestedPrimitiveProjection
+{
+};
+struct SerializedSelectedSubtreeProjection
+{
+};
+struct SerializedLeafBranchProjection
+{
+};
+struct SerializedRootSubtreeProjection
+{
+};
+struct SerializedCollectionBranchProjection
+{
+};
+struct SerializedNestedFixedProjection
+{
+};
 
 using SerializedProjectionState =
     std::variant<SerializedPlanRejected, SerializedFixedProjection, SerializedNestedPrimitiveProjection,
-                 SerializedSelectedSubtreeProjection, SerializedLeafBranchProjection,
-                 SerializedRootSubtreeProjection, SerializedCollectionBranchProjection>;
+                 SerializedSelectedSubtreeProjection, SerializedLeafBranchProjection, SerializedRootSubtreeProjection,
+                 SerializedCollectionBranchProjection, SerializedNestedFixedProjection>;
 
 /// Conservative plan for decoding one physical basket projection.
-struct SerializedReadPlan {
+struct SerializedReadPlan
+{
     SerializedProjectionState projection;
     std::string logical_path;
     std::string root_class;
@@ -75,11 +101,12 @@ struct SerializedReadPlan {
     std::string value_type;
     std::string physical_branch_name;
     std::string schema_fingerprint;
-    // ROOT metadata is process-global after the dictionary has been loaded.
-    // These pointers let the local reader ask ROOT to consume a member-wise
-    // prefix whose serialized width is not statically knowable.
+    // Loaded dictionaries own these pointers; ROOT resolves variable-width prefixes.
     TClass* outer_container_class = nullptr;
     TClass* outer_element_class = nullptr;
+    TClass* nested_container_class = nullptr;
+    TClass* nested_element_class = nullptr;
+    std::string nested_member_name;
     TClass* scratch_class = nullptr;
     std::vector<int> prefix_element_ids;
     std::vector<int> root_action_ids;
@@ -122,6 +149,30 @@ bool ResolveSerializedNestedVersion(const SerializedReadPlan& plan, int32_t elem
 bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
                                   SerializedEntryLayout& resolved_layout, std::string& failure_reason);
 
+/// Calculates the versioned offset of a nested fixed member using the fixed-member validator.
+bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t element_version,
+                                        SerializedEntryLayout& resolved_layout, std::string& failure_reason);
+
+// Validates the complete versioned member-wise element layout so that the
+// decoder can advance between nested vectors without materializing PaTPar.
+bool ResolveSerializedNestedMemberWiseStride(const SerializedReadPlan& plan, int32_t element_version,
+                                              uint64_t& bytes_per_element, std::string& failure_reason);
+
+/// Version-specific fixed layout is owned by a single worker-local reader.
+struct SerializedNestedFixedLayoutCache
+{
+    int32_t element_version = -1;
+    SerializedEntryLayout layout;
+    uint64_t element_stride = 0;
+};
+
+/// Reads a nested member-wise vector directly by checked serialized byte offsets.
+bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedReadPlan& plan, size_t entry_size,
+                                       uint64_t outer_count, uint64_t max_values_per_entry,
+                                       SerializedNestedFixedLayoutCache& layout_cache,
+                                       std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
+                                       std::string& failure_reason, bool collect_indices);
+
 /// Lets ROOT consume selected member-wise prefix actions.
 bool ConsumeSerializedSelectedMembers(TBufferFile& buffer, const SerializedReadPlan& plan, int32_t element_version,
                                       uint64_t outer_count, void* outer_collection_scratch,
@@ -140,7 +191,8 @@ bool CollectSerializedSelectedSubtree(const SerializedReadPlan& plan, void* oute
                                       bool collect_indices);
 
 /// Per-reader physical decode counters.
-struct SerializedReadCounters {
+struct SerializedReadCounters
+{
     uint64_t entries = 0;
     uint64_t values = 0;
     uint64_t baskets = 0;
@@ -149,7 +201,8 @@ struct SerializedReadCounters {
 };
 
 /// Owns one serialized basket decode state.
-class SerializedBasketReader {
+class SerializedBasketReader
+{
   public:
     /// @name Ownership
     /// @{
@@ -163,9 +216,9 @@ class SerializedBasketReader {
 
     /// @name Decode lifecycle
     /// @{
-    void Bind(TBranch* branch, SerializedReadPlan plan, uint64_t max_entry_bytes = 64ULL * 1024ULL * 1024ULL,
-              uint64_t max_values_per_entry = 10ULL * 1024ULL * 1024ULL,
-              std::shared_ptr<SerializedBasketCache> shared_basket_cache = {});
+    void Bind(TBranch* branch_p, SerializedReadPlan plan_p, uint64_t max_entry_bytes_p = 64ULL * 1024ULL * 1024ULL,
+              uint64_t max_values_per_entry_p = 10ULL * 1024ULL * 1024ULL,
+              std::shared_ptr<SerializedBasketCache> shared_basket_cache_p = {});
     /// Detaches branch-local ROOT addresses without discarding metrics/plan state.
     void ReleaseBindings() noexcept;
     void Reset() noexcept;
@@ -190,21 +243,17 @@ class SerializedBasketReader {
     bool DecodeNestedProjectionEntry(const uint8_t* bytes, size_t entry_size, std::vector<double>& values,
                                      std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                      bool collect_indices);
-    bool DecodeNestedProjectionEntry(const uint8_t* bytes, size_t entry_size,
-                                     std::vector<RootPrimitiveValue>& values,
+    bool DecodeNestedProjectionEntry(const uint8_t* bytes, size_t entry_size, std::vector<RootPrimitiveValue>& values,
                                      std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                      bool collect_indices);
-    bool DecodeRootProjectionEntry(const uint8_t* bytes, size_t entry_size,
-                                   std::vector<RootPrimitiveValue>& values,
+    bool DecodeRootProjectionEntry(const uint8_t* bytes, size_t entry_size, std::vector<RootPrimitiveValue>& values,
                                    std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                    bool collect_indices);
-    bool DecodeFixedProjectionEntry(const uint8_t* bytes, size_t entry_size,
-                                    std::vector<RootPrimitiveValue>& values,
+    bool DecodeFixedProjectionEntry(const uint8_t* bytes, size_t entry_size, std::vector<RootPrimitiveValue>& values,
                                     std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                     bool collect_indices);
     bool DecodeLeafBranchEntry(uint64_t entry, std::vector<RootPrimitiveValue>& values,
-                               std::vector<int32_t>& flat_indices, std::string& failure_reason,
-                               bool collect_indices);
+                               std::vector<int32_t>& flat_indices, std::string& failure_reason, bool collect_indices);
     bool EnsureLeafScratch(uint64_t value_count, std::string& failure_reason);
     TBranch* branch = nullptr;
     TBasket* basket = nullptr;
@@ -227,6 +276,7 @@ class SerializedBasketReader {
     std::shared_ptr<SerializedBasketCache> shared_basket_cache;
     int32_t resolved_element_version = -1;
     std::vector<int> resolved_prefix_element_ids;
+    SerializedNestedFixedLayoutCache nested_fixed_layout_cache;
     std::unique_ptr<TStreamerInfoActions::TActionSequence> cached_action_sequence;
     uint32_t observed_memberwise_header = 0;
     SerializedReadCounters counters;
@@ -237,3 +287,5 @@ void WarnRootFallbackOnce(const std::string& logical_path, const std::string& sc
                           const std::string& reason);
 
 } // namespace duckdb::rootlake
+
+#endif

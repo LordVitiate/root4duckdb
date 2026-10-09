@@ -8,19 +8,23 @@
 
 namespace fs = std::filesystem;
 
-int main(int argc, char** argv) {
-    if (argc != 2) {
+int main(int argc, char** argv)
+{
+    if (argc != 2)
+    {
         return 2;
     }
     const fs::path output(argv[1]);
     TFile file(output.string().c_str(), "RECREATE");
-    if (file.IsZombie()) {
+    if (file.IsZombie())
+    {
         throw std::runtime_error("Cannot create legacy fixture ROOT file");
     }
     TTree tree("Events", "ROOT4DuckDB schema-evolution fixture");
     auto* event = new TestEvent();
     auto* branch = tree.Branch("TestEvent", "TestEvent", &event, 32000, 1);
-    if (!branch) {
+    if (!branch)
+    {
         delete event;
         return 1;
     }

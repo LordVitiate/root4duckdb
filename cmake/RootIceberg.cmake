@@ -1,6 +1,4 @@
-# Use shared Iceberg for the bundled DuckDB CLI and static Iceberg for the
-# independently loadable extension. This avoids duplicate dependency symbols
-# in DuckDB while keeping the release extension self-contained.
+# Shared Iceberg for the bundled CLI; static Iceberg for the standalone extension.
 
 set(ROOT4DUCKDB_ICEBERG_PREFIX "" CACHE PATH
     "Prefix produced by build-iceberg.sh")
@@ -180,6 +178,18 @@ function(root4duckdb_embed_static_iceberg target_name)
             "Unknown ROOT4DuckDB target: ${target_name}")
     endif()
 
+    set(_r4d_allow_host_duckdb_symbols FALSE)
+
+    if(ARGC GREATER 1)
+        if(NOT "${ARGV1}" STREQUAL "ALLOW_HOST_DUCKDB_SYMBOLS")
+            message(FATAL_ERROR
+                "Unknown root4duckdb_embed_static_iceberg option: "
+                "${ARGV1}")
+        endif()
+
+        set(_r4d_allow_host_duckdb_symbols TRUE)
+    endif()
+
     target_include_directories(
         ${target_name}
         PRIVATE
@@ -199,9 +209,17 @@ function(root4duckdb_embed_static_iceberg target_name)
             "LINKER:--as-needed"
             "LINKER:--exclude-libs,ALL"
             "LINKER:-Bsymbolic-functions"
-            "LINKER:-z,defs"
             "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/root_extension.exports.map"
         )
+
+        # Require resolved symbols except for payload symbols supplied by host DuckDB.
+        if(NOT _r4d_allow_host_duckdb_symbols)
+            target_link_options(
+                ${target_name}
+                PRIVATE
+                "LINKER:-z,defs"
+            )
+        endif()
     endif()
 
     # Do not retain paths from the release build host.

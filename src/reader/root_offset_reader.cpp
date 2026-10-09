@@ -9,83 +9,115 @@
 #include <optional>
 #include <utility>
 
-namespace duckdb::rootlake {
-namespace {
+namespace duckdb::rootlake
+{
+namespace
+{
 
-std::string ReadRootString(void* pointer, const std::string& raw_type) {
-    if (!pointer) {
+std::string ReadRootString(void* pointer, const std::string& raw_type)
+{
+    if (!pointer)
+    {
         return {};
     }
-    try {
-        if (TrimType(raw_type) == "TString") {
-            auto* value = static_cast<TString*>(pointer);
-            return std::string(value->Data(), value->Length());
+    if (TrimType(raw_type) == "TString")
+    {
+        const auto* value = static_cast<const TString*>(pointer);
+        const auto length = value->Length();
+        if (length < 0)
+        {
+            throw IOException("ROOT TString reported a negative length");
         }
-        return *reinterpret_cast<std::string*>(pointer);
-    } catch (...) {
-        return TrimType(raw_type) == "TString" ? "<tstring_error>" : "<string_error>";
+        return std::string(value->Data(), static_cast<std::string::size_type>(length));
     }
+    return *static_cast<const std::string*>(pointer);
 }
 
-void AppendArrayIndexNames(const PathLevel& level, size_t current_depth, std::vector<std::string>& names) {
+int32_t CheckedContainerIndex(size_t index)
+{
+    if (index > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+    {
+        throw IOException("ROOT container index exceeds the supported 32-bit SQL index range");
+    }
+    return static_cast<int32_t>(index);
+}
+
+void AppendArrayIndexNames(const PathLevel& level, size_t current_depth, std::vector<std::string>& names)
+{
     const size_t rank = level.array_dimensions.size() <= 1 ? 1 : level.array_dimensions.size();
     const size_t target_size = current_depth + rank;
-    if (level.array_dimensions.size() <= 1) {
-        if (names.size() < target_size) {
+    if (level.array_dimensions.size() <= 1)
+    {
+        if (names.size() < target_size)
+        {
             names.push_back(level.name + "_idx");
         }
         return;
     }
-    for (size_t dim = 0; dim < level.array_dimensions.size(); ++dim) {
-        if (names.size() < target_size) {
+    for (size_t dim = 0; dim < level.array_dimensions.size(); ++dim)
+    {
+        if (names.size() < target_size)
+        {
             names.push_back(level.name + "_dim" + std::to_string(dim) + "_idx");
         }
     }
 }
 
-void PushArrayCoordinates(uint64_t flat_index, const std::vector<uint32_t>& dimensions, std::vector<int32_t>& indices) {
-    if (dimensions.empty()) {
+void PushArrayCoordinates(uint64_t flat_index, const std::vector<uint32_t>& dimensions, std::vector<int32_t>& indices)
+{
+    if (dimensions.empty())
+    {
         indices.push_back(static_cast<int32_t>(flat_index));
         return;
     }
-    std::vector<int32_t> coordinates(dimensions.size(), 0);
-    for (size_t reverse = dimensions.size(); reverse > 0; --reverse) {
+    const auto base = indices.size();
+    indices.resize(base + dimensions.size());
+    for (size_t reverse = dimensions.size(); reverse > 0; --reverse)
+    {
         const size_t dim = reverse - 1;
-        coordinates[dim] = static_cast<int32_t>(flat_index % dimensions[dim]);
+        indices[base + dim] = static_cast<int32_t>(flat_index % dimensions[dim]);
         flat_index /= dimensions[dim];
     }
-    indices.insert(indices.end(), coordinates.begin(), coordinates.end());
 }
 
-struct ContainerAccess {
+struct ContainerAccess
+{
     char* base = nullptr;
     uint32_t stride = 0;
     bool contiguous = false;
 };
 
-ContainerAccess PrepareContainerAccess(const PathLevel& level, TVirtualCollectionProxy* proxy, size_t size) {
+ContainerAccess PrepareContainerAccess(const PathLevel& level, TVirtualCollectionProxy* proxy, size_t size)
+{
     ContainerAccess result;
-    if (!proxy || !size || !ContiguousVectorPathEnabled() || !IsContiguousVectorType(level.type)) {
+    if (!proxy || !size || !ContiguousVectorPathEnabled() || !IsContiguousVectorType(level.type))
+    {
         return result;
     }
     const auto inner = TrimType(ExtractInnerType(level.type));
-    if (inner.empty() || inner == "bool" || inner == "Bool_t" || IsPointerType(inner)) {
+    if (inner.empty() || inner == "bool" || inner == "Bool_t" || IsPointerType(inner))
+    {
         return result;
     }
     uint32_t stride = PrimitiveTypeSize(inner);
-    if (!stride && level.element_class) {
+    if (!stride && level.element_class)
+    {
         stride = static_cast<uint32_t>(level.element_class->Size());
     }
-    if (!stride) {
+    if (!stride)
+    {
         return result;
     }
     auto* first = static_cast<char*>(proxy->At(0));
-    if (!first) {
+    if (!first)
+    {
         return result;
     }
-    if (size > 1) {
-        auto* second = static_cast<char*>(proxy->At(1));
-        if (!second || second != first + stride) {
+    if (size > 1)
+    {
+        const auto* second = static_cast<const char*>(proxy->At(1));
+        if (!second || second != first + stride)
+        {
             return result;
         }
     }
@@ -93,175 +125,274 @@ ContainerAccess PrepareContainerAccess(const PathLevel& level, TVirtualCollectio
     result.stride = stride;
     result.contiguous = true;
     RootDebug("VECTOR.CONTIGUOUS",
-              "type=" + level.type + " size=" + std::to_string(size) +
-                  " stride=" + std::to_string(stride));
+              "type=" + level.type + " size=" + std::to_string(size) + " stride=" + std::to_string(stride));
     return result;
 }
 
-struct DirectSink {
-    int64_t max_values;
-    int64_t entry_id;
-    ReadResult& result;
-
-    bool Full() const {
+class DirectSink
+{
+  public:
+    DirectSink(int64_t max_values_p, int64_t entry_id_p, ReadResult& result_p)
+        : max_values(max_values_p), entry_id(entry_id_p), result(result_p)
+    {
+    }
+    bool Full() const
+    {
         return max_values >= 0 && result.size() >= static_cast<size_t>(max_values);
     }
-    bool RequiresContainerDictionary() const {
+    bool RequiresContainerDictionary() const
+    {
         return true;
     }
     void Number(void* pointer, const std::string& type, const std::vector<int32_t>& indices,
-                const std::vector<std::string>& names) {
+                const std::vector<std::string>& names)
+    {
         result.AddNumber(RootPrimitiveValue::FromPointer(pointer, type), entry_id, indices, names);
     }
     void String(void* pointer, const std::string& type, const std::vector<int32_t>& indices,
-                const std::vector<std::string>& names) {
+                const std::vector<std::string>& names)
+    {
         result.AddString(ReadRootString(pointer, type), entry_id, indices, names);
     }
+
+  private:
+    int64_t max_values;
+    int64_t entry_id;
+    ReadResult& result;
 };
 
-struct NumericOnlySink {
-    std::vector<double>& result;
-
-    bool Full() const {
+class NumericOnlySink
+{
+  public:
+    explicit NumericOnlySink(std::vector<double>& result_p) : result(result_p)
+    {
+    }
+    bool Full() const
+    {
         return false;
     }
-    bool RequiresContainerDictionary() const {
+    bool RequiresContainerDictionary() const
+    {
         return false;
     }
-    void Number(void* pointer, const std::string& type, const std::vector<int32_t>&, const std::vector<std::string>&) {
+    void Number(void* pointer, const std::string& type, const std::vector<int32_t>&, const std::vector<std::string>&)
+    {
         result.push_back(ReadPrimitiveAsDouble(pointer, type));
     }
-    void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&) {
+    void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&)
+    {
     }
+
+  private:
+    std::vector<double>& result;
 };
 
-struct FlatNumericSink {
-    idx_t index_depth;
-    std::vector<double>& values;
-    std::vector<int32_t>& indices;
-
-    bool Full() const {
+class FlatNumericSink
+{
+  public:
+    FlatNumericSink(idx_t index_depth_p, std::vector<double>& values_p, std::vector<int32_t>& indices_p)
+        : index_depth(index_depth_p), values(values_p), indices(indices_p)
+    {
+    }
+    bool Full() const
+    {
         return false;
     }
-    bool RequiresContainerDictionary() const {
+    bool RequiresContainerDictionary() const
+    {
         return false;
     }
     void Number(void* pointer, const std::string& type, const std::vector<int32_t>& current_indices,
-                const std::vector<std::string>&) {
-        if (current_indices.size() != index_depth) {
+                const std::vector<std::string>&)
+    {
+        if (current_indices.size() != index_depth)
+        {
             throw IOException("ROOT container depth mismatch while executing indexed access plan: expected " +
                               std::to_string(index_depth) + ", got " + std::to_string(current_indices.size()));
         }
         values.push_back(ReadPrimitiveAsDouble(pointer, type));
         indices.insert(indices.end(), current_indices.begin(), current_indices.end());
     }
-    void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&) {
+    void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&)
+    {
     }
+
+  private:
+    idx_t index_depth;
+    std::vector<double>& values;
+    std::vector<int32_t>& indices;
+};
+
+class FlatTypedSink
+{
+  public:
+    FlatTypedSink(idx_t index_depth_p, int64_t max_values_p, std::vector<RootPrimitiveValue>& values_p,
+                  std::vector<int32_t>& flat_indices_p)
+        : index_depth(index_depth_p), max_values(max_values_p), values(values_p), flat_indices(flat_indices_p)
+    {
+    }
+    bool Full() const
+    {
+        return max_values >= 0 && values.size() >= static_cast<size_t>(max_values);
+    }
+    bool RequiresContainerDictionary() const
+    {
+        return true;
+    }
+    void Number(void* pointer, const std::string& type, const std::vector<int32_t>& current_indices,
+                const std::vector<std::string>&)
+    {
+        if (current_indices.size() != index_depth)
+        {
+            throw IOException("ROOT container depth mismatch while executing indexed access plan: expected " +
+                              std::to_string(index_depth) + ", got " + std::to_string(current_indices.size()));
+        }
+        values.push_back(RootPrimitiveValue::FromPointer(pointer, type));
+        flat_indices.insert(flat_indices.end(), current_indices.begin(), current_indices.end());
+    }
+    void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&)
+    {
+    }
+
+  private:
+    idx_t index_depth;
+    int64_t max_values;
+    std::vector<RootPrimitiveValue>& values;
+    std::vector<int32_t>& flat_indices;
 };
 
 template <class SINK>
 void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels, size_t level_index,
-                            std::vector<int32_t>& indices, std::vector<std::string>& index_names, SINK& sink) {
-    if (!current || level_index >= levels.size() || sink.Full()) {
+                            std::vector<int32_t>& indices, std::vector<std::string>& index_names, SINK& sink)
+{
+    if (!current || level_index >= levels.size() || sink.Full())
+    {
         return;
     }
     const auto& level = levels[level_index];
     auto* field = static_cast<char*>(current) + level.offset_in_parent;
-    if (level.is_pointer) {
+    if (level.is_pointer)
+    {
         field = field ? *reinterpret_cast<char**>(field) : nullptr;
-        if (!field) {
+        if (!field)
+        {
             return;
         }
     }
     const bool last = level_index + 1 == levels.size();
-
-    if (level.is_fixed_array) {
+    if (level.is_fixed_array)
+    {
         AppendArrayIndexNames(level, indices.size(), index_names);
         const size_t pushed = std::max<size_t>(1, level.array_dimensions.size());
-        for (uint64_t i = 0; i < level.fixed_array_length && !sink.Full(); ++i) {
+        for (uint64_t i = 0; i < level.fixed_array_length && !sink.Full(); ++i)
+        {
             auto* element = field + i * level.element_size;
             PushArrayCoordinates(i, level.array_dimensions, indices);
-            if (last) {
-                if (level.is_primitive) {
+            if (last)
+            {
+                if (level.is_primitive)
+                {
                     sink.Number(element, level.type, indices, index_names);
                 }
-            } else {
+            }
+            else
+            {
                 CollectValuesRecursive(element, levels, level_index + 1, indices, index_names, sink);
             }
             indices.resize(indices.size() - pushed);
         }
         return;
     }
-
-    if (last && level.is_container) {
+    if (last && level.is_container)
+    {
         auto* proxy = level.klass ? level.klass->GetCollectionProxy() : nullptr;
-        if (!proxy) {
+        if (!proxy)
+        {
             return;
         }
-        TVirtualCollectionProxy::TPushPop guard(proxy, field);
+        const TVirtualCollectionProxy::TPushPop guard(proxy, field);
         const auto inner = ExtractInnerType(level.type);
         const auto size = proxy->Size();
-        if (index_names.size() < indices.size() + 1) {
+        if (index_names.size() < indices.size() + 1)
+        {
             index_names.push_back(level.name + "_idx");
         }
         const auto access = PrepareContainerAccess(level, proxy, size);
-        for (size_t i = 0; i < size && !sink.Full(); ++i) {
-            auto* element = access.contiguous ? static_cast<void*>(access.base + i * access.stride) : proxy->At(i);
-            if (!element) {
+        for (size_t i = 0; i < size && !sink.Full(); ++i)
+        {
+            const auto container_index = CheckedContainerIndex(i);
+            auto* element = access.contiguous ? static_cast<void*>(access.base + i * access.stride)
+                                              : proxy->At(static_cast<UInt_t>(container_index));
+            if (!element)
+            {
                 continue;
             }
-            indices.push_back(static_cast<int32_t>(i));
-            if (IsPrimitiveType(inner)) {
+            indices.push_back(container_index);
+            if (IsPrimitiveType(inner))
+            {
                 sink.Number(element, inner, indices, index_names);
-            } else if (IsStringType(inner)) {
+            }
+            else if (IsStringType(inner))
+            {
                 sink.String(element, inner, indices, index_names);
             }
             indices.pop_back();
         }
         return;
     }
-
-    if (last) {
-        if (level.is_primitive) {
+    if (last)
+    {
+        if (level.is_primitive)
+        {
             sink.Number(field, level.type, indices, index_names);
-        } else if (level.is_string) {
+        }
+        else if (level.is_string)
+        {
             sink.String(field, level.type, indices, index_names);
         }
         return;
     }
-
-    if (level.is_container) {
-        if (sink.RequiresContainerDictionary() && (!level.klass || !level.klass->HasDictionary())) {
+    if (level.is_container)
+    {
+        if (sink.RequiresContainerDictionary() && (!level.klass || !level.klass->HasDictionary()))
+        {
             return;
         }
         auto* proxy = level.klass ? level.klass->GetCollectionProxy() : nullptr;
-        if (!proxy) {
+        if (!proxy)
+        {
             return;
         }
-        TVirtualCollectionProxy::TPushPop guard(proxy, field);
+        const TVirtualCollectionProxy::TPushPop guard(proxy, field);
         const auto size = proxy->Size();
-        if (index_names.size() < indices.size() + 1) {
+        if (index_names.size() < indices.size() + 1)
+        {
             index_names.push_back(level.name + "_idx");
         }
         const auto access = PrepareContainerAccess(level, proxy, size);
-        for (size_t i = 0; i < size && !sink.Full(); ++i) {
-            auto* element = access.contiguous ? static_cast<void*>(access.base + i * access.stride) : proxy->At(i);
-            if (!element) {
+        for (size_t i = 0; i < size && !sink.Full(); ++i)
+        {
+            const auto container_index = CheckedContainerIndex(i);
+            auto* element = access.contiguous ? static_cast<void*>(access.base + i * access.stride)
+                                              : proxy->At(static_cast<UInt_t>(container_index));
+            if (!element)
+            {
                 continue;
             }
-            indices.push_back(static_cast<int32_t>(i));
+            indices.push_back(container_index);
             CollectValuesRecursive(element, levels, level_index + 1, indices, index_names, sink);
             indices.pop_back();
         }
         return;
     }
-
-    if (level.klass) {
+    if (level.klass)
+    {
         CollectValuesRecursive(field, levels, level_index + 1, indices, index_names, sink);
     }
 }
 
-template <class SINK> void RunTraversal(void* root_object, const std::vector<PathLevel>& levels, SINK& sink) {
+template <class SINK> void RunTraversal(void* root_object, const std::vector<PathLevel>& levels, SINK& sink)
+{
     std::vector<int32_t> indices;
     std::vector<std::string> index_names;
     CollectValuesRecursive(root_object, levels, 0, indices, index_names, sink);
@@ -269,20 +400,31 @@ template <class SINK> void RunTraversal(void* root_object, const std::vector<Pat
 
 } // namespace
 
-void OffsetValueReader::CollectValues(void* root_object, const std::vector<PathLevel>& levels,
-                                      std::vector<double>& out) {
+void OffsetValueReader::CollectValues(void* root_object, const std::vector<PathLevel>& levels, std::vector<double>& out)
+{
     NumericOnlySink sink{out};
     RunTraversal(root_object, levels, sink);
 }
 
 void OffsetValueReader::CollectFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
-                                    std::vector<double>& values, std::vector<int32_t>& flat_indices) {
+                                    std::vector<double>& values, std::vector<int32_t>& flat_indices)
+{
     FlatNumericSink sink{index_depth, values, flat_indices};
     RunTraversal(root_object, levels, sink);
 }
 
+void OffsetValueReader::CollectTypedFlat(void* root_object, const std::vector<PathLevel>& levels,
+                                         idx_t index_depth, int64_t max_values,
+                                         std::vector<RootPrimitiveValue>& values,
+                                         std::vector<int32_t>& flat_indices)
+{
+    FlatTypedSink sink{index_depth, max_values, values, flat_indices};
+    RunTraversal(root_object, levels, sink);
+}
+
 void OffsetValueReader::CollectDirect(void* root_object, const std::vector<PathLevel>& levels, int64_t max_values,
-                                      int64_t entry_id, ReadResult& out) {
+                                      int64_t entry_id, ReadResult& out)
+{
     DirectSink sink{max_values, entry_id, out};
     RunTraversal(root_object, levels, sink);
 }

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_DIRECT_ROOT_SCAN_INTERNAL_HPP
+#define ROOT4DUCKDB_DIRECT_ROOT_SCAN_INTERNAL_HPP
 
 #include "root4duckdb/core/root_headers.hpp"
 
@@ -46,7 +47,8 @@
 #include "root4duckdb/reader/root_path_reader.hpp"
 #include "root4duckdb/core/root_runtime_settings.hpp"
 
-namespace duckdb {
+namespace duckdb
+{
 
 class Expression;
 class LogicalGet;
@@ -55,28 +57,37 @@ class LogicalGet;
 rootlake::RootScalarActual PrimitiveScalarActual(const LogicalType& logical_type,
                                                  const rootlake::RootPrimitiveValue& value);
 
-
 /// Physical primitive branch used by compatibility scans.
-struct RootPrimitiveBranch {
+struct RootPrimitiveBranch
+{
     std::string name;
     std::string type_name;
     TBranch* branch = nullptr;
     TLeaf* leaf = nullptr;
 };
 
-struct RootSemanticScanMode {};
-struct RootPrimitiveTreeScanMode {};
-struct RootEmptyScanMode {};
+struct RootSemanticScanMode
+{
+};
+struct RootPrimitiveTreeScanMode
+{
+};
+struct RootEmptyScanMode
+{
+};
 
-struct RootBrowseScanMode {
+struct RootBrowseScanMode
+{
     std::vector<std::string> children;
 };
 
-struct RootDirectBranchScanMode {
+struct RootDirectBranchScanMode
+{
     RootPrimitiveBranch branch;
 };
 
-struct RootHistogramScanMode {
+struct RootHistogramScanMode
+{
     rootlake::RootHistogramBinding binding;
     std::unique_ptr<TH1> object;
 };
@@ -86,7 +97,8 @@ using RootScanMode = std::variant<RootSemanticScanMode, RootBrowseScanMode, Root
                                   RootPrimitiveTreeScanMode, RootHistogramScanMode, RootEmptyScanMode>;
 
 /// One logical output column in the direct scan plan.
-struct RootScanColumn {
+struct RootScanColumn
+{
     std::string name;
     std::string logical_path;
     std::string branch_name;
@@ -98,13 +110,11 @@ struct RootScanColumn {
 };
 
 /// Claims non-overlapping entry batches for single-file scans.
-class RootEntryScheduler {
-    uint64_t& next_row_;
-    uint64_t total_rows_;
-    std::mutex& mutex_;
-
+class RootEntryScheduler
+{
   public:
-    struct WorkBatch {
+    struct WorkBatch
+    {
         uint64_t start;
         uint64_t end;
         [[nodiscard]] bool HasWork() const;
@@ -115,12 +125,17 @@ class RootEntryScheduler {
     static constexpr uint64_t DEFAULT_BATCH_SIZE = 65536;
 
     WorkBatch ClaimWork(uint64_t preferred_batch_size = DEFAULT_BATCH_SIZE);
-    [[nodiscard]] static idx_t EstimateWorkUnits(uint64_t total_rows,
-                                                 uint64_t batch_size = DEFAULT_BATCH_SIZE);
+    [[nodiscard]] static idx_t EstimateWorkUnits(uint64_t total_rows, uint64_t batch_size = DEFAULT_BATCH_SIZE);
+
+  private:
+    uint64_t& next_row_;
+    uint64_t total_rows_;
+    std::mutex& mutex_;
 };
 
 /// Immutable bind-time plan for read_root.
-struct RootScanBindData : public TableFunctionData {
+struct RootScanBindData : public TableFunctionData
+{
     RootDebugLifetimeSentinel lifetime_sentinel{"RootScanBindData"};
     std::string root_path;
     std::string input_specification;
@@ -163,7 +178,8 @@ struct RootScanBindData : public TableFunctionData {
 };
 
 /// Shared scheduling and profiling state for read_root.
-struct RootScanGlobalState : public GlobalTableFunctionState {
+struct RootScanGlobalState : public GlobalTableFunctionState
+{
     uint64_t next_row = 0;
     uint64_t total_rows = 0;
     uint64_t scheduled_rows = 0;
@@ -192,7 +208,8 @@ struct RootScanGlobalState : public GlobalTableFunctionState {
 };
 
 /// One serialized primitive projection owned by a single DuckDB worker.
-struct RootSerializedColumnState {
+struct RootSerializedColumnState
+{
     idx_t column_id = DConstants::INVALID_INDEX;
     rootlake::RootPathReader path_reader;
     std::vector<rootlake::RootPrimitiveValue> values;
@@ -203,9 +220,11 @@ struct RootSerializedColumnState {
 };
 
 /// Thread-local ROOT handles and decoded row buffers.
-struct RootScanLocalState : public LocalTableFunctionState {
+struct RootScanLocalState : public LocalTableFunctionState
+{
     rootlake::RootFileHandle root_file;
     std::unordered_map<std::string, rootlake::RootObjectReader> root_readers;
+    std::map<std::string, std::vector<idx_t>> projected_branch_columns;
 
     uint64_t local_current_row = 0;
     uint64_t local_end_row = 0;
@@ -233,50 +252,55 @@ struct RootScanLocalState : public LocalTableFunctionState {
     ~RootScanLocalState();
 };
 
-enum class CacheResult { CACHED, CONTINUE_LOOP, BREAK_LOOP };
+enum class CacheResult
+{
+    CACHED,
+    CONTINUE_LOOP,
+    BREAK_LOOP
+};
 
 /// Builds direct scan schemas and semantic access plans.
-class RootScanBinder final {
+class RootScanBinder final
+{
   public:
     unique_ptr<FunctionData> Bind(ClientContext& context, TableFunctionBindInput& input,
-                                  vector<LogicalType>& return_types, vector<string>& return_names);
+                                  vector<LogicalType>& return_types, vector<string>& return_names) const;
 
   private:
-    void ConfigureOptions(RootScanBindData& bind_data, ClientContext& context, TableFunctionBindInput& input);
+    void ConfigureOptions(RootScanBindData& bind_data, ClientContext& context, TableFunctionBindInput& input) const;
     void BindRootBrowse(RootScanBindData& bind_data, std::vector<std::string>& return_names,
-                        std::vector<LogicalType>& return_types);
+                        std::vector<LogicalType>& return_types) const;
     void BindRequestedPath(RootScanBindData& bind_data, TableFunctionBindInput& input, bool dictionary_loaded,
-                           std::vector<std::string>& return_names, std::vector<LogicalType>& return_types);
+                           std::vector<std::string>& return_names, std::vector<LogicalType>& return_types) const;
     void BindPrimitiveCompatibility(RootScanBindData& bind_data, TFile& file, TTree& tree,
                                     const std::string& path_prefix, std::vector<std::string>& return_names,
-                                    std::vector<LogicalType>& return_types);
-    std::vector<RootPrimitiveBranch> CollectPrimitiveBranches(TTree& tree);
-    bool IsTreeName(TFile& file, const std::string& name);
+                                    std::vector<LogicalType>& return_types) const;
+    std::vector<RootPrimitiveBranch> CollectPrimitiveBranches(TTree& tree) const;
+    bool IsTreeName(TFile& file, const std::string& name) const;
     void AddEntryIdColumn(RootScanBindData& bind_data, std::vector<std::string>& return_names,
-                          std::vector<LogicalType>& return_types);
+                          std::vector<LogicalType>& return_types) const;
     void BindDirectPrimitives(RootScanBindData& bind_data, const std::string& path_prefix,
                               const std::vector<std::string>& matching_paths, std::vector<std::string>& return_names,
-                              std::vector<LogicalType>& return_types);
-    void BindBrowseMode(RootScanBindData& bind_data, const std::string& path_prefix,
-                        const std::set<std::string>& direct_children, std::vector<std::string>& return_names,
-                        std::vector<LogicalType>& return_types);
+                              std::vector<LogicalType>& return_types) const;
     void BindEmptyResult(RootScanBindData& bind_data, const std::string& path_prefix,
-                         std::vector<std::string>& return_names, std::vector<LogicalType>& return_types);
-    bool LoadRequestedDictionary(ClientContext& context, TableFunctionBindInput& input);
+                         std::vector<std::string>& return_names, std::vector<LogicalType>& return_types) const;
+    bool LoadRequestedDictionary(ClientContext& context, TableFunctionBindInput& input) const;
     bool BindSemanticPath(RootScanBindData& bind_data, TFile* file, const std::string& path_prefix_raw,
-                          std::vector<std::string>& return_names, std::vector<LogicalType>& return_types);
-    std::unique_ptr<TFile> OpenRepresentativeFile(RootScanBindData& bind_data);
+                          std::vector<std::string>& return_names, std::vector<LogicalType>& return_types) const;
+    std::unique_ptr<TFile> OpenRepresentativeFile(RootScanBindData& bind_data) const;
     void AddMultiFileIdentityColumns(RootScanBindData& bind_data, std::vector<std::string>& return_names,
-                                     std::vector<LogicalType>& return_types);
+                                     std::vector<LogicalType>& return_types) const;
 };
 
 /// Opens, reuses, and closes one ROOT input per local state.
-class RootScanFileManager final {
+class RootScanFileManager final
+{
   public:
-    void Open(const RootScanBindData& bind_data, RootScanGlobalState& global, RootScanLocalState& local,
-              const std::string& file_path, bool synchronize_open);
-    void Reset(RootScanGlobalState& global, RootScanLocalState& local, bool completed);
-    bool EnsureReady(const RootScanBindData& bind_data, RootScanGlobalState& global, RootScanLocalState& local);
+    void Open(const RootScanBindData& bind_data, RootScanGlobalState& gstate, RootScanLocalState& target,
+              const std::string& file_path, bool synchronize_open) const;
+    void Reset(RootScanGlobalState& gstate, RootScanLocalState& local_state, bool completed) const;
+    bool EnsureReady(const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+                     RootScanLocalState& local_state) const;
 };
 
 /// Collects conservative physical entry bounds from optimizer expressions.
@@ -284,58 +308,66 @@ void RootScanCollectPruningHints(ClientContext& context, LogicalGet& get, Functi
                                  vector<unique_ptr<Expression>>& filters);
 
 /// Constructs direct scan global and local states.
-class RootScanStateFactory final {
+class RootScanStateFactory final
+{
   public:
-    unique_ptr<GlobalTableFunctionState> CreateGlobal(ClientContext& context, TableFunctionInitInput& input);
+    unique_ptr<GlobalTableFunctionState> CreateGlobal(ClientContext& context, TableFunctionInitInput& input) const;
     unique_ptr<LocalTableFunctionState> CreateLocal(TableFunctionInitInput& input,
-                                                    GlobalTableFunctionState* global_state);
+                                                    GlobalTableFunctionState* global_state_p) const;
 };
 
 /// Executes the selected direct read mode.
-class RootScanExecutor final {
+class RootScanExecutor final
+{
   public:
-    void Execute(ClientContext& context, TableFunctionInput& input, DataChunk& output);
+    static bool ClaimEntryBatch(RootScanGlobalState& global, RootScanLocalState& local);
+
+    void Execute(ClientContext& context, TableFunctionInput& data_p, DataChunk& output) const;
 
   private:
-    void ProcessHistogramMode(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& global,
-                              RootScanLocalState& local, DataChunk& output);
-    void ProcessBrowseMode(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& global,
-                           RootScanLocalState& local, DataChunk& output);
-    bool WriteNumericValue(Vector& vector, idx_t row, const rootlake::RootPrimitiveValue& value);
-    std::optional<int32_t> ResolveCachedIndexValue(const RootScanBindData& bind_data, const RootScanLocalState& local,
-                                                   idx_t column_index, size_t element_index);
-    rootlake::RootScalarActual CachedScalar(const RootScanBindData& bind_data, const RootScanLocalState& local,
-                                            idx_t column_index, uint64_t entry, size_t element_index);
+    void ProcessHistogramMode(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+                              RootScanLocalState& lstate, DataChunk& output) const;
+    void ProcessBrowseMode(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+                           RootScanLocalState& lstate, DataChunk& output) const;
+    bool WriteNumericValue(Vector& vector, idx_t row, const rootlake::RootPrimitiveValue& value) const;
+    std::optional<int32_t> ResolveCachedIndexValue(const RootScanBindData& bind_data, const RootScanLocalState& lstate,
+                                                   idx_t col_idx, size_t elem_idx) const;
+    rootlake::RootScalarActual CachedScalar(const RootScanBindData& bind_data, const RootScanLocalState& lstate,
+                                            idx_t col_idx, uint64_t entry, size_t elem_idx) const;
     bool PassesCachedFilters(ClientContext& context, const RootScanBindData& bind_data,
-                             const RootScanGlobalState& global, RootScanLocalState& local, uint64_t entry,
-                             size_t element_index);
+                             const RootScanGlobalState& gstate, RootScanLocalState& lstate, uint64_t entry,
+                             size_t elem_idx) const;
     bool PassesPrimitiveTreeFilters(ClientContext& context, const RootScanBindData& bind_data,
-                                    const RootScanGlobalState& global, RootScanLocalState& local, uint64_t entry);
-    void ProcessPrimitiveTree(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& global,
-                              RootScanLocalState& local, DataChunk& output);
+                                    const RootScanGlobalState& gstate, RootScanLocalState& lstate,
+                                    uint64_t entry) const;
+    void ProcessPrimitiveTree(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+                              RootScanLocalState& lstate, DataChunk& output) const;
     bool PassesDirectBranchFilters(ClientContext& context, const RootScanBindData& bind_data,
-                                   const RootScanGlobalState& global, RootScanLocalState& local, uint64_t entry,
-                                   const rootlake::RootPrimitiveValue& value);
-    void ProcessDirectBranch(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& global,
-                             RootScanLocalState& local, DataChunk& output);
-    void ProcessCachedEntry(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& global,
-                            RootScanLocalState& local, DataChunk& output, idx_t& output_count);
-    std::vector<std::string> SplitIndexSignature(const std::string& signature);
+                                   const RootScanGlobalState& gstate, RootScanLocalState& lstate, uint64_t entry,
+                                   const rootlake::RootPrimitiveValue& value) const;
+    void ProcessDirectBranch(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+                             RootScanLocalState& lstate, DataChunk& output) const;
+    void ProcessCachedEntry(ClientContext& context, const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+                            RootScanLocalState& lstate, DataChunk& output, idx_t& out_count) const;
+    std::vector<std::string> SplitIndexSignature(const std::string& signature) const;
     void MaterializeSerializedResult(const RootScanColumn& column, uint64_t entry,
                                      const rootlake::SerializedReadPlan& plan,
                                      const std::vector<rootlake::RootPrimitiveValue>& values,
-                                     const std::vector<int32_t>& flat_indices, rootlake::ReadResult& result);
-    CacheResult ReadAndCacheEntry(const RootScanBindData& bind_data, RootScanGlobalState& global,
-                                  RootScanLocalState& local, DataChunk& output, idx_t& output_count);
+                                     const std::vector<int32_t>& flat_indices, rootlake::ReadResult& result) const;
+    CacheResult ReadAndCacheEntry(const RootScanBindData& bind_data, RootScanGlobalState& gstate,
+                                  RootScanLocalState& lstate, DataChunk& output, idx_t& out_count) const;
 
     RootScanFileManager file_manager;
 };
 
 /// Renders stable direct scan profiling fields.
-class RootScanExplain final {
+class RootScanExplain final
+{
   public:
-    InsertionOrderPreservingMap<string> Bound(TableFunctionToStringInput& input);
-    InsertionOrderPreservingMap<string> Running(TableFunctionDynamicToStringInput& input);
+    InsertionOrderPreservingMap<string> Bound(TableFunctionToStringInput& input) const;
+    InsertionOrderPreservingMap<string> Running(TableFunctionDynamicToStringInput& input) const;
 };
 
 } // namespace duckdb
+
+#endif

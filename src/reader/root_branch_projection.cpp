@@ -6,61 +6,87 @@
 #include <limits>
 #include <set>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
-BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes) {
+BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes,
+                                             uint64_t entry_begin, uint64_t entry_end)
+{
     BranchProjectionResult result;
-    if (!tree) {
+    if (!tree)
+    {
         result.reason = "missing TTree";
         return result;
     }
     std::vector<TBranch*> branches;
     std::set<TBranch*> seen;
-    for (auto* branch : input) {
-        if (!branch || !seen.insert(branch).second) {
+    for (auto* branch : input)
+    {
+        if (!branch || !seen.insert(branch).second)
+        {
             continue;
         }
-        if (branch->GetTree() != tree) {
+        if (branch->GetTree() != tree)
+        {
             result.reason = "physical branches belong to different TTrees";
             return result;
         }
         // A selected ancestor with persistent children is not a self-contained
         // byte stream. Keep the universal branch set in that case.
-        if (branch->GetListOfBranches() && branch->GetListOfBranches()->GetEntries() > 0) {
+        if (branch->GetListOfBranches() && branch->GetListOfBranches()->GetEntries() > 0)
+        {
             result.reason = "physical ancestor still has persistent child branches";
             return result;
         }
         branches.push_back(branch);
     }
-    if (branches.empty()) {
+    if (branches.empty())
+    {
         result.reason = "no self-contained physical branches";
         return result;
     }
-
     tree->SetBranchStatus("*", 0);
-    if (cache_bytes) {
-        tree->SetCacheSize(static_cast<Long64_t>(
-            std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max()))));
-    }
-    for (auto* branch : branches) {
+    const auto cache_size = static_cast<Long64_t>(
+        std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max())));
+    tree->SetCacheSize(cache_size);
+    for (auto* branch : branches)
+    {
         tree->SetBranchStatus(branch->GetName(), 1);
-        tree->AddBranchToCache(branch, true);
+        if (cache_bytes)
+        {
+            tree->AddBranchToCache(branch, true);
+        }
         result.branches.emplace_back(branch->GetName());
+    }
+    if (cache_bytes)
+    {
+        const auto total_entries = static_cast<uint64_t>(std::max<Long64_t>(0, tree->GetEntries()));
+        const auto begin = std::min(entry_begin, total_entries);
+        const auto end = std::min(entry_end, total_entries);
+        if (begin < end)
+        {
+            tree->SetCacheEntryRange(static_cast<Long64_t>(begin), static_cast<Long64_t>(end));
+        }
+        tree->StopCacheLearningPhase();
     }
     result.applied = true;
     return result;
 }
 
-void EnableAllBranches(TTree* tree, uint64_t cache_bytes) {
-    if (!tree) {
+void EnableAllBranches(TTree* tree, uint64_t cache_bytes)
+{
+    if (!tree)
+    {
         return;
     }
     tree->SetBranchStatus("*", 1);
-    if (cache_bytes) {
-        tree->SetCacheSize(static_cast<Long64_t>(
-            std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max()))));
+    const auto cache_size = static_cast<Long64_t>(
+        std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max())));
+    tree->SetCacheSize(0);
+    if (cache_size)
+    {
+        tree->SetCacheSize(cache_size);
     }
-    tree->AddBranchToCache("*", true);
 }
 
 } // namespace duckdb::rootlake

@@ -31,7 +31,7 @@ PY
 fi
 sql="$(mktemp)"; trap 'rm -f "$sql"' EXIT
 cat "$ATTACH_SQL" "$COMPACTION_SQL" > "$sql"
-MALLOC_CHECK_=3 "$DUCKDB_BIN" :memory: < "$sql"
+MALLOC_CHECK_=3 "$DUCKDB_BIN" -bail :memory: < "$sql"
 python3 - "$STATUS" <<'PY'
 import json,os,pathlib,sys,time
 p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True)

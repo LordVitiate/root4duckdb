@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_ICEBERG_ROOT_ICEBERG_CATALOG_HPP
+#define ROOT4DUCKDB_ICEBERG_ROOT_ICEBERG_CATALOG_HPP
 
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -8,10 +9,12 @@
 #include <unordered_map>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// One Iceberg table committed at the ROOT snapshot boundary.
-struct RootIcebergTableCommit {
+struct RootIcebergTableCommit
+{
     std::string table_name;
     int64_t iceberg_snapshot_id = 0;
     std::string metadata_location;
@@ -20,7 +23,8 @@ struct RootIcebergTableCommit {
 };
 
 /// Atomic publication result for all index metadata tables.
-struct RootIcebergCommitResult {
+struct RootIcebergCommitResult
+{
     std::string catalog_root;
     std::string root_snapshot_id;
     std::vector<RootIcebergTableCommit> tables;
@@ -48,3 +52,5 @@ std::string RootIcebergCommittedSnapshotsRelation(const std::string& catalog_roo
 void RegisterRootIcebergCatalog(ExtensionLoader& loader);
 
 } // namespace duckdb::rootlake
+
+#endif

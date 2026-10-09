@@ -1,7 +1,12 @@
 Checks: >
+  cert-*,
+  clang-analyzer-*,
   bugprone-*,
   performance-*,
   portability-*,
+  misc-const-correctness,
+  readability-braces-around-statements,
+  readability-make-member-function-const,
   readability-avoid-const-params-in-decls,
   readability-container-size-empty,
   readability-qualified-auto,

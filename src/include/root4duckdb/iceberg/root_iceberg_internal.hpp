@@ -1,6 +1,8 @@
-#pragma once
+#ifndef ROOT4DUCKDB_ICEBERG_ROOT_ICEBERG_INTERNAL_HPP
+#define ROOT4DUCKDB_ICEBERG_ROOT_ICEBERG_INTERNAL_HPP
 
 #include "root4duckdb/iceberg/root_iceberg_catalog.hpp"
+#include "root4duckdb/core/root_text.hpp"
 
 #include "duckdb/common/exception.hpp"
 
@@ -13,13 +15,16 @@
 #include <string>
 #include <utility>
 
-namespace duckdb::rootlake::iceberg_internal {
+namespace duckdb::rootlake::iceberg_internal
+{
 
 using SqlCatalog = iceberg::sql::SqlCatalog;
 
 /// Unwraps an Iceberg result as a DuckDB I/O failure.
-template <class T> T Take(iceberg::Result<T> result, const std::string& operation) {
-    if (!result) {
+template <class T> T Take(iceberg::Result<T> result, const std::string& operation)
+{
+    if (!result)
+    {
         throw IOException(operation + ": " + result.error().message);
     }
     return std::move(result).value();
@@ -28,8 +33,7 @@ template <class T> T Take(iceberg::Result<T> result, const std::string& operatio
 /// Converts an unsuccessful Iceberg status into a DuckDB I/O failure.
 void Ensure(iceberg::Status status, const std::string& operation);
 
-/// Quotes a value for Iceberg SQL catalog statements.
-std::string SqlLiteral(const std::string& value);
+using rootlake::SqlLiteral;
 /// Returns an absolute normalized filesystem path.
 std::string AbsolutePath(const std::string& path);
 /// Converts a local path into a file URI.
@@ -42,3 +46,5 @@ std::shared_ptr<iceberg::FileIO> MakeLocalFileIO();
 std::shared_ptr<SqlCatalog> OpenCatalog(const std::string& catalog_root);
 
 } // namespace duckdb::rootlake::iceberg_internal
+
+#endif

@@ -1,10 +1,12 @@
-#pragma once
+#ifndef ROOT4DUCKDB_TEST_LEGACYTESTEVENT_HPP
+#define ROOT4DUCKDB_TEST_LEGACYTESTEVENT_HPP
 
 #include "Rtypes.h"
 
 #include <vector>
 
-class TestHit {
+class TestHit
+{
   public:
     Int_t legacy_prefix = 0;
     Float_t u = 0.0F;
@@ -16,9 +18,12 @@ class TestHit {
     ClassDef(TestHit, 5);
 };
 
-class TestEvent {
+class TestEvent
+{
   public:
     std::vector<TestHit> vecHit;
 
     ClassDef(TestEvent, 6);
 };
+
+#endif

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_INDEX_ROOT_INDEX_PIPELINE_HPP
+#define ROOT4DUCKDB_INDEX_ROOT_INDEX_PIPELINE_HPP
 
 #include "root4duckdb/core/root_runtime_settings.hpp"
 #include "root4duckdb/iceberg/root_iceberg_catalog.hpp"
@@ -29,12 +30,14 @@
 
 #include <nlohmann/json.hpp>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 namespace fs = std::filesystem;
 
 /// Bind-time configuration for one index publication.
-struct BuildIndexBindData final : public TableFunctionData {
+struct BuildIndexBindData final : public TableFunctionData
+{
     unique_ptr<FunctionData> Copy() const override;
     bool Equals(const FunctionData& other) const override;
     bool SupportStatementCache() const override;
@@ -76,7 +79,8 @@ struct BuildIndexBindData final : public TableFunctionData {
 };
 
 /// Materialized index build result returned by the table function.
-struct BuildIndexGlobalState final : public GlobalTableFunctionState {
+struct BuildIndexGlobalState final : public GlobalTableFunctionState
+{
     std::vector<RootIndexBuildStatus> statuses;
     idx_t offset = 0;
     std::string snapshot_id;
@@ -93,30 +97,33 @@ struct BuildIndexGlobalState final : public GlobalTableFunctionState {
 };
 
 /// Validates SQL parameters and creates the immutable build request.
-class RootIndexBinder final {
+class RootIndexBinder final
+{
   public:
     unique_ptr<FunctionData> Bind(TableFunctionBindInput& input, vector<LogicalType>& return_types,
-                                  vector<string>& return_names);
+                                  vector<string>& return_names) const;
 };
 
 /// Publishes validated metadata through Parquet or Iceberg commit paths.
-class RootIndexPublisher final {
+class RootIndexPublisher final
+{
   public:
     void Publish(ClientContext& context, const BuildIndexBindData& bind, BuildIndexGlobalState& state,
-                 const std::string& dataset_id, const fs::path& staging);
+                 const std::string& dataset_id, const fs::path& staging) const;
 
   private:
     void PublishTables(DatabaseInstance& database, const fs::path& staging, const BuildIndexBindData& bind,
                        const BuildIndexGlobalState& state, const std::string& dataset_id,
-                       const std::string& snapshot_id);
+                       const std::string& snapshot_id) const;
     void CommitParquetSnapshot(const BuildIndexBindData& bind, const std::string& dataset_id,
-                               BuildIndexGlobalState& state, const fs::path& staging);
+                               BuildIndexGlobalState& state, const fs::path& staging) const;
 };
 
 /// Runs inspect, build, validate, and publish stages in order.
-class RootIndexCoordinator final {
+class RootIndexCoordinator final
+{
   public:
-    unique_ptr<GlobalTableFunctionState> Run(ClientContext& context, TableFunctionInitInput& input);
+    unique_ptr<GlobalTableFunctionState> Run(ClientContext& context, TableFunctionInitInput& input) const;
 
   private:
     RootIndexBuildOptions ConfigureRuntime(ClientContext& context, BuildIndexBindData& bind,
@@ -137,9 +144,12 @@ class RootIndexCoordinator final {
 };
 
 /// Emits one status row per indexed file.
-class RootIndexResultWriter final {
+class RootIndexResultWriter final
+{
   public:
     void Write(TableFunctionInput& input, DataChunk& output) const;
 };
 
 } // namespace duckdb::rootlake
+
+#endif

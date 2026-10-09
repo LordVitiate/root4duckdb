@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_CORE_CORE_HPP
+#define ROOT4DUCKDB_CORE_CORE_HPP
 
 /// Core extension services shared by all pipeline modules.
 #include "root4duckdb/core/root_debug.hpp"
@@ -8,3 +9,5 @@
 #include "root4duckdb/core/root_input_resolver.hpp"
 #include "root4duckdb/core/root_lake_common.hpp"
 #include "root4duckdb/core/root_runtime_settings.hpp"
+
+#endif

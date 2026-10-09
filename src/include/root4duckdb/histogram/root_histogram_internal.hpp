@@ -1,8 +1,10 @@
-#pragma once
+#ifndef ROOT4DUCKDB_HISTOGRAM_ROOT_HISTOGRAM_INTERNAL_HPP
+#define ROOT4DUCKDB_HISTOGRAM_ROOT_HISTOGRAM_INTERNAL_HPP
 
 #include "root4duckdb/histogram/root_histogram_reader.hpp"
 
-namespace duckdb::rootlake::histogram_detail {
+namespace duckdb::rootlake::histogram_detail
+{
 
 /// Builds the canonical histogram-bin schema.
 RootHistogramSchema BinSchema();
@@ -22,3 +24,5 @@ void MaterializeAxisRow(const RootHistogramBinding& binding, TH1& histogram, uin
 void MaterializeMetaRow(const RootHistogramBinding& binding, TH1& histogram, std::vector<RootScalarActual>& values);
 
 } // namespace duckdb::rootlake::histogram_detail
+
+#endif

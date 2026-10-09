@@ -1,11 +1,14 @@
-#pragma once
+#ifndef ROOT4DUCKDB_CORE_ROOT_DICTIONARY_HPP
+#define ROOT4DUCKDB_CORE_ROOT_DICTIONARY_HPP
 
 #include <string>
 
-namespace duckdb {
+namespace duckdb
+{
 class ClientContext;
 
-namespace rootlake {
+namespace rootlake
+{
 
 /// Loads a ROOT dictionary through DuckDB's file-system context.
 bool LoadRootDictionary(ClientContext& context, const std::string& path);
@@ -14,3 +17,5 @@ bool LoadRootDictionary(const std::string& path);
 
 } // namespace rootlake
 } // namespace duckdb
+
+#endif

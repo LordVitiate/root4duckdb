@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_DATASET_ROOT_DATASET_SCAN_INTERNAL_HPP
+#define ROOT4DUCKDB_DATASET_ROOT_DATASET_SCAN_INTERNAL_HPP
 
 #include "root4duckdb/core/root_headers.hpp"
 #include "root4duckdb/core/root_runtime_settings.hpp"
@@ -47,15 +48,27 @@
 
 #include <nlohmann/json.hpp>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 namespace fs = std::filesystem;
 
 /// Comparison supported by an auxiliary path predicate.
-enum class PathPredicateOp { EQ, NE, LT, LE, GT, GE, BETWEEN, IN };
+enum class PathPredicateOp
+{
+    EQ,
+    NE,
+    LT,
+    LE,
+    GT,
+    GE,
+    BETWEEN,
+    IN
+};
 
 /// Bound predicate evaluated against a decoded semantic path.
-struct PathPredicateBinding {
+struct PathPredicateBinding
+{
     std::string path;
     PathPredicateOp op = PathPredicateOp::EQ;
     std::vector<RootPrimitiveValue> values;
@@ -66,13 +79,15 @@ struct PathPredicateBinding {
 };
 
 /// Half-open ROOT entry interval.
-struct EntryInterval {
+struct EntryInterval
+{
     uint64_t begin = 0;
     uint64_t end = 0;
 };
 
 /// One physically pruned basket range scheduled for decoding.
-struct RootBasketTask {
+struct RootBasketTask
+{
     std::string file_id;
     std::string root_uri;
     std::string tree_name;
@@ -89,13 +104,15 @@ struct RootBasketTask {
 };
 
 /// Contiguous tasks sharing one open ROOT file.
-struct RootFileTaskGroup {
+struct RootFileTaskGroup
+{
     idx_t begin = 0;
     idx_t end = 0;
 };
 
 /// Immutable bind-time plan for read_root_dataset.
-struct DatasetBindData final : public TableFunctionData {
+struct DatasetBindData final : public TableFunctionData
+{
     unique_ptr<FunctionData> Copy() const override;
     bool Equals(const FunctionData& other) const override;
     bool SupportStatementCache() const override;
@@ -127,7 +144,8 @@ struct DatasetBindData final : public TableFunctionData {
 };
 
 /// Shared task plan, counters, and pushed filters.
-struct DatasetGlobalState final : public GlobalTableFunctionState {
+struct DatasetGlobalState final : public GlobalTableFunctionState
+{
     std::vector<RootBasketTask> tasks;
     std::vector<RootFileTaskGroup> task_groups;
     std::atomic<idx_t> next_group{0};
@@ -147,6 +165,9 @@ struct DatasetGlobalState final : public GlobalTableFunctionState {
     std::atomic<idx_t> completed_tasks{0};
     std::atomic<uint64_t> opened_files{0};
     std::atomic<uint64_t> reused_open_files{0};
+    std::atomic<uint64_t> prefetch_hint_calls{0};
+    std::atomic<uint64_t> prefetch_hint_rejections{0};
+    std::atomic<uint64_t> prefetch_hint_bytes{0};
     std::atomic<uint64_t> get_entry_calls{0};
     std::atomic<uint64_t> serialized_entry_calls{0};
     std::atomic<uint64_t> serialized_values{0};
@@ -177,7 +198,8 @@ struct DatasetGlobalState final : public GlobalTableFunctionState {
 };
 
 /// Thread-local dataset reader and flattened value buffers.
-struct DatasetLocalState final : public LocalTableFunctionState {
+struct DatasetLocalState final : public LocalTableFunctionState
+{
     std::unique_ptr<TFile> file;
     RootObjectReader object_reader;
     RootPathReader path_reader;
@@ -199,64 +221,73 @@ struct DatasetLocalState final : public LocalTableFunctionState {
     uint64_t value_entry_id = 0;
     std::string value_source_id;
     idx_t next_task_in_group = 0;
+    idx_t next_prefetch_task_in_group = 0;
     idx_t task_group_end = 0;
+    bool prefetch_hints_accepted = true;
     RootFilterEvaluator filter_evaluator;
 };
 
 /// Prunes metadata and groups selected baskets by file.
-class DatasetTaskPlanner final {
+class DatasetTaskPlanner final
+{
   public:
     void Plan(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global,
-              optional_ptr<TableFilterSet> filters);
-    void PlanMetadataCount(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global);
+              optional_ptr<TableFilterSet> filters) const;
+    void PlanMetadataCount(ClientContext& context, const DatasetBindData& bind, DatasetGlobalState& global) const;
 
   private:
-    void BuildFileTaskGroups(DatasetGlobalState& global);
+    void ValidateFreshIndex(ClientContext& context, const DatasetBindData& bind) const;
+    void BuildFileTaskGroups(DatasetGlobalState& global) const;
 };
 
 /// Resolves catalog schemas and the SQL output contract.
-class DatasetScanBinder final {
+class DatasetScanBinder final
+{
   public:
     unique_ptr<FunctionData> Bind(ClientContext& context, TableFunctionBindInput& input,
-                                  vector<LogicalType>& return_types, vector<string>& return_names);
+                                  vector<LogicalType>& return_types, vector<string>& return_names) const;
 };
 
 /// Constructs dataset scan execution states.
-class DatasetScanStateFactory final {
+class DatasetScanStateFactory final
+{
   public:
-    unique_ptr<NodeStatistics> Cardinality(const FunctionData* bind_data);
-    unique_ptr<GlobalTableFunctionState> CreateGlobal(ClientContext& context, TableFunctionInitInput& input);
-    unique_ptr<LocalTableFunctionState> CreateLocal();
+    unique_ptr<NodeStatistics> Cardinality(const FunctionData* bind_data) const;
+    unique_ptr<GlobalTableFunctionState> CreateGlobal(ClientContext& context, TableFunctionInitInput& input) const;
+    unique_ptr<LocalTableFunctionState> CreateLocal() const;
 };
 
 /// Decodes selected entries and emits exact filtered rows.
-class DatasetScanExecutor final {
+class DatasetScanExecutor final
+{
   public:
-    void Scan(ClientContext& context, TableFunctionInput& input, DataChunk& output);
+    void Scan(ClientContext& context, TableFunctionInput& input, DataChunk& output) const;
     double Progress(const GlobalTableFunctionState* state) const;
 
   private:
     void ValidateAccessPlan(const SchemaBinding& schema, const std::vector<PathLevel>& actual) const;
     void SyncSerializedCounters(DatasetLocalState& local, DatasetGlobalState& global) const;
     void OpenTaskFile(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local,
-                      const RootBasketTask& task);
-    void PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size) const;
-    bool ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local);
-    bool PassesPathPredicates(const DatasetBindData& bind, DatasetLocalState& local, void* object) const;
-    bool LoadNextEntry(const DatasetBindData& bind, DatasetLocalState& local, DatasetGlobalState& global);
+                      const RootBasketTask& task) const;
+    bool PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size, DatasetGlobalState& global) const;
+    bool ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local) const;
+    bool PassesPathPredicates(const DatasetBindData& bind, const DatasetLocalState& local, void* object) const;
+    bool LoadNextEntry(const DatasetBindData& bind, DatasetLocalState& local, DatasetGlobalState& global) const;
     void SetPrimitiveAsType(Vector& vector, idx_t row, const LogicalType& type, const RootPrimitiveValue& value) const;
     void SetDoubleAsType(Vector& vector, idx_t row, const LogicalType& type, double value) const;
     void EmitProjectedTypedRow(const DatasetBindData& bind, const DatasetGlobalState& global, DataChunk& output,
                                idx_t output_row, uint64_t event_fk, const std::string& source_id, uint64_t entry_id,
-                               const RootPrimitiveValue& value, const int32_t* indices, idx_t index_count) const;
+                               const RootPrimitiveValue& numeric_value, const int32_t* indices,
+                               idx_t index_count) const;
     void EmitProjectedRow(const DatasetBindData& bind, const DatasetGlobalState& global, DataChunk& output,
                           idx_t output_row, uint64_t event_fk, const std::string& source_id, uint64_t entry_id,
-                          double value, const int32_t* indices, idx_t index_count) const;
+                          double numeric_value, const int32_t* indices, idx_t index_count) const;
     idx_t ReserveOutputRows(DatasetGlobalState& global, idx_t requested) const;
 };
 
 /// Renders stable dataset planning and execution counters.
-class DatasetScanExplain final {
+class DatasetScanExplain final
+{
   public:
     InsertionOrderPreservingMap<string> Bound(TableFunctionToStringInput& input) const;
     InsertionOrderPreservingMap<string> Running(TableFunctionDynamicToStringInput& input) const;
@@ -272,3 +303,5 @@ bool PassesTypedFilters(ClientContext& context, DatasetLocalState& local, const 
                         const int32_t* indices, idx_t index_count);
 
 } // namespace duckdb::rootlake
+
+#endif

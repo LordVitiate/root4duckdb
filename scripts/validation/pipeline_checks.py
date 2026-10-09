@@ -53,6 +53,19 @@ def _check_path_reader(validator: ProjectValidator) -> None:
         "EqualDecodedValues",
         "OffsetValueReader::CollectFlat",
     ))
+    nested_codec = validator.read("src/serialized/root_serialized_nested_codec.cpp")
+    validator.reject_tokens("standalone nested codec", nested_codec, (
+        "root_serialized_reader.hpp",
+        "root_headers.hpp",
+        "TBufferFile",
+        "SerializedReadPlan",
+    ))
+    nested_fixed = validator.read("src/serialized/root_serialized_nested_fixed.cpp")
+    validator.require_tokens("ROOT-backed nested decoder", nested_fixed, (
+        "DecodeSerializedNestedFixedColumn",
+        "DecodeNestedMemberWise",
+    ))
+
     codec_utils = validator.read("src/include/root4duckdb/serialized/root_serialized_codec_utils.hpp")
     validator.require_tokens("serialized codec documentation", codec_utils, (
         "/// Reads an unsigned big-endian 16-bit integer.",
@@ -67,7 +80,7 @@ def _check_feature_groups(validator: ProjectValidator) -> None:
         "direct scan": (
             validator.source_group("src/direct/*", "src/include/root4duckdb/direct/*.hpp", "src/root_scan.cpp"),
             (
-                "rootlake::RootDictionaryCleanupMode::RETAIN",
+                "rootlake::RootDictionaryCleanupMode::FULL",
                 "rootlake::PathResolver::TryResolve",
                 "rootlake::RootObjectReader",
                 "rootlake::RootPathReader",
@@ -117,9 +130,19 @@ def _check_feature_groups(validator: ProjectValidator) -> None:
     for label, (source, tokens) in groups.items():
         validator.require_tokens(label, source, tokens)
 
+    # Direct scans own dictionary-created objects. Do not silently restore
+    # the former RETAIN default, which leaked one object per reader lifetime.
+    direct_bind = validator.read("src/direct/root_scan_bind.cpp")
+    validator.require_tokens("direct ROOT object ownership", direct_bind, (
+        "bind_data->root_access.dictionary_cleanup_mode = rootlake::RootDictionaryCleanupMode::FULL;",
+    ))
+    if "dictionary_loaded ? rootlake::RootDictionaryCleanupMode::RETAIN" in direct_bind:
+        validator.errors.append("direct scan must reclaim dictionary-created ROOT objects")
+
     file_checks = {
         "src/core/root_debug.cpp": ("ROOT4DUCKDB_DEBUG", "ROOT4DUCKDB_DEBUG_VERBOSE"),
-        "src/serialized/root_serialized_plan.cpp": ("BuildSerializedReadPlan", "WarnRootFallbackOnce"),
+        "src/serialized/root_serialized_plan.cpp": ("BuildSerializedReadPlan",),
+        "src/serialized/root_reader_mode.cpp": ("ParseRootReaderMode", "RootReaderModeName", "WarnRootFallbackOnce"),
         "src/serialized/root_serialized_reader.cpp": ("SerializedBasketReader::Decode", "SERIALIZED.BASKET"),
         "src/serialized/root_serialized_codec.cpp": ("DecodeSerializedVectorEntry", "EqualDecodedValues"),
         "src/serialized/root_serialized_nested_codec.cpp": ("DecodeSerializedNestedPrimitiveVectorColumn",),
@@ -143,8 +166,8 @@ def _check_feature_groups(validator: ProjectValidator) -> None:
         "src/index/root_index_metadata.cpp": ("CREATE TEMP TABLE", "FORMAT PARQUET", "DROP TABLE root_index_files"),
         "setup-source-tree.sh": (
             '"$GIT_BIN" -C "$path" fetch',
-            'DUCKDB_COMMIT="f31be57c1845a8895169fd58142040be26d433cf"',
-            'CI_TOOLS_COMMIT="1f04702aae6f4e7ab45f38689fd79e765221b19e"',
+            'DUCKDB_COMMIT="069cc9f9b5be802405797faecc284961b07c70ef"',
+            'CI_TOOLS_COMMIT="ef15a2a7453db5b4f85b7c668a545ae2f1193ff6"',
         ),
     }
     for relative, tokens in file_checks.items():
@@ -219,6 +242,75 @@ def _check_production(validator: ProjectValidator) -> None:
     ))
     if "catalog_mode:='external'" not in validator.read("scripts/production/index_chunk.sh"):
         validator.errors.append("production worker does not use explicit external catalog staging")
+
+    build_script = validator.read("build-root4duckdb.sh")
+    validator.require_tokens("bootstrap build smoke test", build_script, (
+        "Unexpected direct ROOT/Iceberg dependency",
+        "ROOT extension: 6/6 public functions registered",
+        '"$DUCKDB_BIN" -unsigned -bail -cmd',
+    ))
+    validator.reject_tokens("obsolete shared Iceberg host requirement", build_script, (
+        "Bundled DuckDB is not linked to",
+    ))
+
+    validator.require_tokens("ROOT C++ ABI compatibility gate", build_script, (
+        'compiler_release=',
+        'compiler_cxx11_abi=',
+        'root_release=',
+        'root_cxx11_abi=',
+        '_GLIBCXX_USE_CXX11_ABI',
+        '_GLIBCXX_RELEASE',
+        '[ERROR] ROOT/Cling and compiler use different C++11 string ABIs.',
+        '[WARN] ROOT/Cling and compiler use different libstdc++ header major versions.',
+        'CXX11_ABI matches; required symbols and runtime were checked.',
+    ))
+    validator.reject_tokens("obsolete ROOT header version ABI gate", build_script, (
+        '[ERROR] ROOT/Cling and compiler use different C++ headers.',
+        '[ERROR] ROOT/Cling and compiler use incompatible libstdc++ ABI settings.',
+    ))
+
+    package = validator.read("scripts/package-release.sh")
+    validator.require_tokens("C API release packaging", package, (
+        "EXPECTED_CAPI_VERSION",
+        '"C_STRUCT"',
+        '"root_init_c_api"',
+        "root.duckdb_extension",
+    ))
+    validator.reject_tokens("retired C++ release ABI", package, (
+        "root_duckdb_cpp_init",
+        "v1.4.5",
+    ))
+
+    smoke_host = validator.read("test/loadable_extension_smoke.cpp")
+    validator.require_tokens("standalone loadable C API smoke", smoke_host, (
+        '#include "duckdb.h"',
+        'duckdb_set_config(config, "allow_unsigned_extensions", "true")',
+        "duckdb_open_ext(",
+        "duckdb_query(",
+        "duckdb_value_int64(",
+    ))
+    validator.reject_tokens("removed C++ DuckDB config member", smoke_host, (
+        "config.options.allow_unsigned_extensions",
+    ))
+
+    cmake = validator.read("CMakeLists.txt")
+    validator.require_tokens("standalone smoke host linkage", cmake, (
+        "target_link_libraries(root_loadable_extension_smoke PRIVATE",
+        "duckdb_static",
+        "dummy_static_extension_loader",
+    ))
+
+    native_concurrency = validator.read("test/fixtures/concurrent_root_load.cpp")
+    validator.require_tokens("concurrent ROOT load isolation", native_concurrency, (
+        "ROOT4DUCKDB_TEST_EXTENSION_PATH",
+        "RootLoadSQL()",
+        "QuoteSQL(extension_path)",
+        'duckdb_set_config(config, "allow_unsigned_extensions", "true")',
+        "duckdb_open_ext(",
+    ))
+    validator.require_tokens("concurrent ROOT load invocation", validator.read("scripts/run-integration-test.sh"), (
+        'ROOT4DUCKDB_TEST_EXTENSION_PATH="${ROOT_EXTENSION:-}"',
+    ))
 
     integration = validator.read("scripts/run-integration-test.sh")
     validator.require_tokens("integration coverage", integration, (

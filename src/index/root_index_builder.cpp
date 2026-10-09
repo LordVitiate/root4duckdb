@@ -11,45 +11,20 @@
 #include <cmath>
 #include <limits>
 #include <memory>
-#include <sys/stat.h>
+#include "root4duckdb/core/root_file_metadata.hpp"
 #include <unordered_map>
 #include <utility>
 
-namespace duckdb::rootlake {
-namespace {
-
-uint64_t LocalFileSize(const std::string& path) {
-    if (path.find("://") != std::string::npos) {
-        return 0;
-    }
-    struct stat status {};
-    if (::stat(path.c_str(), &status) != 0 || status.st_size < 0) {
-        return 0;
-    }
-    return static_cast<uint64_t>(status.st_size);
-}
-
-int64_t LocalMtimeNS(const std::string& path) {
-    if (path.find("://") != std::string::npos) {
-        return 0;
-    }
-    struct stat status {};
-    if (::stat(path.c_str(), &status) != 0) {
-        return 0;
-    }
-#if defined(__APPLE__)
-    return static_cast<int64_t>(status.st_mtimespec.tv_sec) * 1000000000LL +
-           static_cast<int64_t>(status.st_mtimespec.tv_nsec);
-#else
-    return static_cast<int64_t>(status.st_mtim.tv_sec) * 1000000000LL + static_cast<int64_t>(status.st_mtim.tv_nsec);
-#endif
-}
+namespace duckdb::rootlake
+{
+namespace
+{
 
 void WriteSchemaRows(RootFileIndexMetadata& metadata, const std::string& schema_id, const std::string& column_id,
-                     const std::string& logical_path, const ParsedPath& path, const std::vector<PathLevel>& levels) {
-    const std::string access_plan_id = Hex64(FNV1a64(logical_path, FNV1a64(schema_id)) ^ 0x9f6abc31ULL);
+                     const std::string& logical_path, const ParsedPath& path, const std::vector<PathLevel>& levels)
+{
+    const std::string access_plan_id = Hex64(FNV1a64(logical_path, FNV1a64(schema_id)) ^ 0x9F6ABC31ULL);
     const auto leaf_type = PrimitiveBaseType(levels.back().type);
-
     RootSchemaMetadataRow schema;
     schema.index_version = ROOT_LAKE_INDEX_VERSION;
     schema.schema_id = schema_id;
@@ -62,8 +37,8 @@ void WriteSchemaRows(RootFileIndexMetadata& metadata, const std::string& schema_
     schema.index_signature = IndexSignature(levels);
     schema.container_depth = static_cast<uint32_t>(IndexDepth(levels));
     metadata.schemas.push_back(std::move(schema));
-
-    for (idx_t i = 0; i < levels.size(); ++i) {
+    for (idx_t i = 0; i < levels.size(); ++i)
+    {
         const auto& level = levels[i];
         RootAccessMetadataRow access;
         access.index_version = ROOT_LAKE_INDEX_VERSION;
@@ -86,40 +61,42 @@ void WriteSchemaRows(RootFileIndexMetadata& metadata, const std::string& schema_
     }
 }
 
-struct BasketAccumulator {
+struct BasketAccumulator
+{
     BasketAccumulator(uint32_t bloom_bytes, double bloom_fpr, uint32_t id)
-        : basket_id(id), bloom(bloom_bytes, bloom_fpr) {
+        : basket_id(id), bloom(bloom_bytes, bloom_fpr)
+    {
     }
-
-    void Add(const RootPrimitiveValue& value, bool statistics_enabled) {
+    void Add(const RootPrimitiveValue& value, bool statistics_enabled)
+    {
         ++value_count;
-
-        if (!statistics_enabled) {
+        if (!statistics_enabled)
+        {
             return;
         }
-
         const double number = value.AsDouble();
-
-        if (std::isnan(number)) {
+        if (std::isnan(number))
+        {
             ++nan_count;
             return;
         }
-
-        if (std::isinf(number)) {
-            if (number > 0) {
+        if (std::isinf(number))
+        {
+            if (number > 0)
+            {
                 ++pos_inf_count;
-            } else {
+            }
+            else
+            {
                 ++neg_inf_count;
             }
             return;
         }
-
         min_value = std::min(min_value, number);
         max_value = std::max(max_value, number);
         bloom.Add(number);
         ++finite_count;
     }
-
     uint32_t basket_id = 0;
     uint64_t entry_begin = 0;
     uint64_t entry_end = 0;
@@ -138,7 +115,8 @@ struct BasketAccumulator {
     RootBloomBuilder bloom;
 };
 
-struct IndexedPathPlan {
+struct IndexedPathPlan
+{
     std::string logical_path;
     RootPathReader reader;
     std::string schema_id;
@@ -148,69 +126,81 @@ struct IndexedPathPlan {
     bool statistics_double_safe = true;
 };
 
-void ApplyRootBasketMetadata(BasketAccumulator& basket, TBasket* root_basket) {
-    if (!root_basket) {
+void ApplyRootBasketMetadata(BasketAccumulator& basket, TBasket* root_basket)
+{
+    if (!root_basket)
+    {
         return;
     }
     basket.key_length = static_cast<uint32_t>(std::max(0, root_basket->GetKeylen()));
     basket.uncompressed_size = static_cast<uint32_t>(std::max(0, root_basket->GetObjlen()));
-    if (!basket.compressed_size) {
+    if (!basket.compressed_size)
+    {
         basket.compressed_size = static_cast<uint32_t>(std::max(0, root_basket->GetNbytes()));
     }
-    if (!basket.physical_offset) {
+    if (!basket.physical_offset)
+    {
         basket.physical_offset = static_cast<uint64_t>(std::max<Long64_t>(0, root_basket->GetSeekKey()));
     }
 }
 
-void ApplySerializedBasketMetadata(BasketAccumulator& basket, const SerializedBasketInfo& info) {
-    if (info.basket_number != static_cast<int32_t>(basket.basket_id)) {
+void ApplySerializedBasketMetadata(BasketAccumulator& basket, const SerializedBasketInfo& info)
+{
+    if (info.basket_number != static_cast<int32_t>(basket.basket_id))
+    {
         return;
     }
     basket.key_length = info.key_length;
     basket.uncompressed_size = info.uncompressed_size;
-    if (!basket.compressed_size) {
+    if (!basket.compressed_size)
+    {
         basket.compressed_size = info.compressed_size;
     }
-    if (!basket.physical_offset) {
+    if (!basket.physical_offset)
+    {
         basket.physical_offset = info.physical_offset;
     }
 }
 
 IndexedPathPlan PreparePath(const RootIndexBuildOptions& options, TTree* tree, TBranch* object_branch,
-                            TClass* root_class, uint64_t total_entries, const std::string& logical_path) {
+                            TClass* root_class, uint64_t total_entries, const std::string& logical_path)
+{
     IndexedPathPlan plan;
     plan.logical_path = logical_path;
     auto parsed = ParsePath(logical_path);
     auto levels = PathResolver::Resolve(root_class, parsed.fields);
-    if (!levels.back().is_primitive) {
+    if (!levels.back().is_primitive)
+    {
         throw NotImplementedException("Indexed ROOT paths require a primitive numeric leaf; "
                                       "unsupported leaf type for " +
                                       logical_path + ": " + levels.back().type);
     }
-
     plan.statistics_double_safe = IsLosslessDoubleBackedType(levels.back().type);
     plan.schema_id = SchemaFingerprint(parsed.root_class, levels);
     plan.column_id = ColumnId(plan.schema_id, logical_path);
     plan.reader.Resolve(tree, object_branch, root_class, std::move(parsed), std::move(levels));
     auto* physical_branch = plan.reader.PhysicalBranch();
-    if (!physical_branch) {
+    if (!physical_branch)
+    {
         throw InvalidInputException("No persistent branch can provide entry ranges for " + logical_path);
     }
-
     const int basket_count = physical_branch->GetWriteBasket() + 1;
     auto* basket_entries = physical_branch->GetBasketEntry();
     auto* basket_bytes = physical_branch->GetBasketBytes();
-    if (basket_count <= 0 || !basket_entries) {
+    if (basket_count <= 0 || !basket_entries)
+    {
         throw InvalidInputException("Physical branch has no persistent baskets: " +
                                     std::string(physical_branch->GetName()));
     }
     plan.baskets.reserve(static_cast<idx_t>(basket_count));
-    for (int basket_id = 0; basket_id < basket_count; ++basket_id) {
+    for (int basket_id = 0; basket_id < basket_count; ++basket_id)
+    {
         const uint64_t entry_begin = static_cast<uint64_t>(basket_entries[basket_id]);
         uint64_t entry_end =
             basket_id + 1 < basket_count ? static_cast<uint64_t>(basket_entries[basket_id + 1]) : total_entries;
         entry_end = std::min(entry_end, total_entries);
-        if (entry_begin >= entry_end) {
+        if (entry_begin >= entry_end)
+        {
             continue;
         }
         plan.baskets.emplace_back(options.bloom_bytes, options.bloom_false_positive_rate,
@@ -223,7 +213,8 @@ IndexedPathPlan PreparePath(const RootIndexBuildOptions& options, TTree* tree, T
         basket.compressed_size = basket_bytes ? static_cast<uint32_t>(std::max(0, basket_bytes[basket_id])) : 0;
         const bool serialized_metadata =
             options.root_access.reader_mode != RootReaderMode::OBJECT && plan.reader.SerializedPlan().Supported();
-        if (!serialized_metadata) {
+        if (!serialized_metadata)
+        {
             ApplyRootBasketMetadata(basket, physical_branch->GetBasket(basket_id));
             physical_branch->DropBaskets();
         }
@@ -233,22 +224,28 @@ IndexedPathPlan PreparePath(const RootIndexBuildOptions& options, TTree* tree, T
 
 } // namespace
 
-RootIndexFilePlan InspectRootIndexFile(const RootIndexBuildOptions& options, const std::string& path) {
+RootIndexFilePlan InspectRootIndexFile(const RootIndexBuildOptions& options, const std::string& path)
+{
     RootIndexFilePlan plan;
     plan.path = path;
-    try {
+    try
+    {
         auto opened = OpenRootFile(path);
-        if (!opened) {
+        if (!opened)
+        {
             throw IOException("Failed to open ROOT file: " + path + ": " + opened.error);
         }
         auto file = std::move(opened.file);
         const auto parsed = ParsePath(options.logical_paths.front());
         auto* tree = FindTree(file.get(), options.tree_name, parsed.root_class);
-        if (!tree) {
+        if (!tree)
+        {
             throw InvalidInputException("No TTree found");
         }
         plan.entries = static_cast<uint64_t>(tree->GetEntries());
-    } catch (const std::exception& exception) {
+    }
+    catch (const std::exception& exception)
+    {
         plan.error = exception.what();
     }
     return plan;
@@ -256,21 +253,24 @@ RootIndexFilePlan InspectRootIndexFile(const RootIndexBuildOptions& options, con
 
 RootIndexFileBuilder::RootIndexFileBuilder(const RootIndexBuildOptions& options_p, std::string dataset_id_p,
                                            std::string snapshot_id_p)
-    : options(options_p), dataset_id(std::move(dataset_id_p)), snapshot_id(std::move(snapshot_id_p)) {
+    : options(options_p), dataset_id(std::move(dataset_id_p)), snapshot_id(std::move(snapshot_id_p))
+{
 }
 
 RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, uint64_t event_base,
                                                  RootFileIndexMetadata& metadata,
-                                                 std::set<std::string>& written_columns) const {
+                                                 std::set<std::string>& written_columns) const
+{
     RootIndexBuildStatus status;
     status.file_path = root_path;
-    try {
+    try
+    {
         auto opened = OpenRootFile(root_path);
-        if (!opened) {
+        if (!opened)
+        {
             throw IOException("Failed to open ROOT file: " + root_path + ": " + opened.error);
         }
         auto file = std::move(opened.file);
-
         const auto root_path_spec = ParsePath(options.logical_paths.front());
         RootObjectReader object_reader;
         object_reader.Bind(file.get(), options.tree_name, root_path_spec.root_class,
@@ -278,118 +278,130 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
         auto* tree = object_reader.Tree();
         auto* object_branch = object_reader.ObjectBranch();
         auto* root_class = object_reader.RootClass();
-
         const uint64_t total_entries = static_cast<uint64_t>(tree->GetEntries());
         status.entries = total_entries;
         const uint64_t file_size = LocalFileSize(root_path);
         const int64_t mtime_ns = LocalMtimeNS(root_path);
         const auto file_id = FileId(root_path, file_size, mtime_ns);
         status.file_id = file_id;
-
         std::vector<IndexedPathPlan> paths;
         paths.reserve(options.logical_paths.size());
-        for (const auto& logical_path : options.logical_paths) {
-            paths.push_back(
-                PreparePath(options, tree, object_branch, root_class, total_entries, logical_path));
+        for (const auto& logical_path : options.logical_paths)
+        {
+            paths.push_back(PreparePath(options, tree, object_branch, root_class, total_entries, logical_path));
         }
-
         std::vector<TBranch*> projected_branches;
         bool projection_safe = true;
-        for (const auto& path : paths) {
+        for (const auto& path : paths)
+        {
             projected_branches.push_back(path.reader.PhysicalBranch());
             projection_safe = projection_safe && path.reader.PhysicalMode() == "ancestor";
         }
-        const auto projection = projection_safe
-                                    ? ApplyBranchProjection(tree, projected_branches,
-                                                            options.root_access.tree_cache_bytes)
-                                    : BranchProjectionResult{};
-        if (!projection.applied) {
+        const auto projection =
+            projection_safe ? ApplyBranchProjection(tree, projected_branches, options.root_access.tree_cache_bytes)
+                            : BranchProjectionResult{};
+        if (!projection.applied)
+        {
             EnableAllBranches(tree, options.root_access.tree_cache_bytes);
         }
-
         uint64_t serialized_path_count = 0;
         uint64_t fallback_path_count = 0;
         std::unordered_map<TBranch*, idx_t> paths_per_branch;
-        for (const auto& path : paths) {
+        for (const auto& path : paths)
+        {
             ++paths_per_branch[path.reader.PhysicalBranch()];
         }
-        for (auto& path : paths) {
+        for (auto& path : paths)
+        {
             std::string rejection;
-            if (paths_per_branch[path.reader.PhysicalBranch()] > 1) {
+            if (paths_per_branch[path.reader.PhysicalBranch()] > 1)
+            {
                 rejection = "multiple requested paths share one physical ancestor; universal one-pass read is cheaper";
             }
             auto reader_options = options.root_access;
-            const auto started =
-                path.reader.StartSerialized(std::move(reader_options), std::move(rejection));
-            if (started.SerializedActive()) {
+            const auto started = path.reader.StartSerialized(std::move(reader_options), std::move(rejection));
+            if (started.SerializedActive())
+            {
                 ++serialized_path_count;
             }
-            if (started.FallbackActivated()) {
+            if (started.FallbackActivated())
+            {
                 ++fallback_path_count;
             }
         }
-
         std::vector<RootPrimitiveValue> values;
         std::vector<int32_t> indices;
         RootEntryReader object_entry(object_reader);
-        for (uint64_t entry = 0; entry < total_entries; ++entry) {
+        for (uint64_t entry = 0; entry < total_entries; ++entry)
+        {
             bool need_object = options.root_access.reader_mode == RootReaderMode::OBJECT;
-            for (const auto& path : paths) {
-                if (!path.reader.SerializedActive() || path.reader.ValidationRemaining() > 0) {
+            for (const auto& path : paths)
+            {
+                if (!path.reader.SerializedActive() || path.reader.ValidationRemaining() > 0)
+                {
                     need_object = true;
                     break;
                 }
             }
             object_entry.Begin(entry);
-            if (need_object) {
+            if (need_object)
+            {
                 object_entry.Read();
             }
-
-            for (auto& path : paths) {
-                while (path.active_basket < path.baskets.size() &&
-                       entry >= path.baskets[path.active_basket].entry_end) {
+            for (auto& path : paths)
+            {
+                while (path.active_basket < path.baskets.size() && entry >= path.baskets[path.active_basket].entry_end)
+                {
                     ++path.active_basket;
                 }
-                if (path.active_basket >= path.baskets.size()) {
+                if (path.active_basket >= path.baskets.size())
+                {
                     continue;
                 }
                 auto& basket = path.baskets[path.active_basket];
-                if (entry < basket.entry_begin || entry >= basket.entry_end) {
+                if (entry < basket.entry_begin || entry >= basket.entry_end)
+                {
                     continue;
                 }
-
                 values.clear();
                 indices.clear();
-                if (path.reader.SerializedActive()) {
+                if (path.reader.SerializedActive())
+                {
                     const auto read = path.reader.TryReadSerialized(entry, object_entry, values, indices,
                                                                     path.reader.ValidationRemaining() > 0);
-                    if (read.FallbackActivated()) {
+                    if (read.FallbackActivated())
+                    {
                         ++fallback_path_count;
                     }
                     SerializedBasketInfo basket_info;
-                    if (path.reader.CurrentBasketInfo(basket_info)) {
+                    if (path.reader.CurrentBasketInfo(basket_info))
+                    {
                         ApplySerializedBasketMetadata(basket, basket_info);
                     }
                 }
-
-                if (!path.reader.SerializedActive()) {
+                if (!path.reader.SerializedActive())
+                {
                     values.clear();
                     void* object = object_entry.Read();
-                    if (!object) {
+                    if (!object)
+                    {
                         ++basket.null_count;
                         continue;
                     }
                     path.reader.CollectTypedValues(object, values);
                 }
-                for (const auto& value : values) {
+                for (const auto& value : values)
+                {
                     basket.Add(value, path.statistics_double_safe);
                 }
             }
         }
-
-        for (auto& path : paths) {
-            for (auto& basket : path.baskets) {
-                if (basket.key_length && basket.uncompressed_size) {
+        for (auto& path : paths)
+        {
+            for (auto& basket : path.baskets)
+            {
+                if (basket.key_length && basket.uncompressed_size)
+                {
                     continue;
                 }
                 auto* physical_branch = path.reader.PhysicalBranch();
@@ -397,15 +409,15 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
                 physical_branch->DropBaskets();
             }
         }
-
         std::vector<std::string> schema_ids;
-        for (auto& path : paths) {
+        for (auto& path : paths)
+        {
             schema_ids.push_back(path.schema_id);
-            if (written_columns.insert(path.column_id).second) {
+            if (written_columns.insert(path.column_id).second)
+            {
                 WriteSchemaRows(metadata, path.schema_id, path.column_id, path.logical_path, path.reader.Path(),
                                 path.reader.Levels());
             }
-
             uint64_t flat_value_begin = 0;
             uint64_t total_values = 0;
             uint64_t file_null_count = 0;
@@ -416,10 +428,11 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
             uint64_t file_finite_count = 0;
             double file_min = std::numeric_limits<double>::infinity();
             double file_max = -std::numeric_limits<double>::infinity();
-
-            for (auto& basket : path.baskets) {
+            for (auto& basket : path.baskets)
+            {
                 const bool has_minmax = basket.finite_count > 0;
-                if (has_minmax) {
+                if (has_minmax)
+                {
                     file_min = std::min(file_min, basket.min_value);
                     file_max = std::max(file_max, basket.max_value);
                     file_finite_count += basket.finite_count;
@@ -459,7 +472,6 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
                 file_neg_inf_count += basket.neg_inf_count;
                 ++actual_baskets;
             }
-
             RootFileMetadataRow file_row;
             file_row.index_version = ROOT_LAKE_INDEX_VERSION;
             file_row.dataset_id = dataset_id;
@@ -492,7 +504,9 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
                          " logical paths; serialized=" + std::to_string(serialized_path_count) +
                          ", object_fallback=" + std::to_string(fallback_path_count) +
                          ", object_reads=" + std::to_string(object_entry.LoadCount());
-    } catch (const std::exception& exception) {
+    }
+    catch (const std::exception& exception)
+    {
         status.status = "ERROR";
         status.message = exception.what();
     }

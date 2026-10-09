@@ -1,10 +1,12 @@
-#pragma once
+#ifndef ROOT4DUCKDB_CORE_ROOT_DEBUG_HPP
+#define ROOT4DUCKDB_CORE_ROOT_DEBUG_HPP
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace duckdb {
+namespace duckdb
+{
 
 /// Reports whether stage-level diagnostics are enabled.
 bool RootDebugEnabled();
@@ -19,9 +21,14 @@ std::string JoinDebugFields(const std::vector<std::string>& fields);
 std::string RootPointer(const void* pointer);
 
 /// Associates nested diagnostics with one operation identifier.
-class RootDebugOperationScope {
+class RootDebugOperationScope
+{
   public:
-    explicit RootDebugOperationScope(std::string label);
+    explicit RootDebugOperationScope(std::string label_p);
+    RootDebugOperationScope(const RootDebugOperationScope&) = delete;
+    RootDebugOperationScope& operator=(const RootDebugOperationScope&) = delete;
+    RootDebugOperationScope(RootDebugOperationScope&&) = delete;
+    RootDebugOperationScope& operator=(RootDebugOperationScope&&) = delete;
     ~RootDebugOperationScope();
 
     uint64_t Id() const;
@@ -32,9 +39,12 @@ class RootDebugOperationScope {
 };
 
 /// Records the destruction boundary of an owning state object.
-struct RootDebugLifetimeSentinel {
+struct RootDebugLifetimeSentinel
+{
     const char* label = "unknown";
     ~RootDebugLifetimeSentinel();
 };
 
 } // namespace duckdb
+
+#endif

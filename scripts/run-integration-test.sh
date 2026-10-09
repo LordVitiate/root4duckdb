@@ -3,19 +3,96 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_DIR="$PROJECT_DIR/test/fixtures"
-WORK_DIR="${ROOT4DUCKDB_TEST_DIR:-$PROJECT_DIR/test/.tmp-root-lakehouse}"
+WORK_DIR="${ROOT4DUCKDB_TEST_DIR:-$(mktemp -d /tmp/root4duckdb-it.XXXXXX)}"
 DUCKDB_BIN="${DUCKDB_BIN:-$PROJECT_DIR/build/release/duckdb}"
 
 if [[ ! -x "$DUCKDB_BIN" ]]; then
     DISCOVERED_DUCKDB="$(find "$PROJECT_DIR/build/release" -type f -name duckdb -perm -111 2>/dev/null | head -n 1 || true)"
     [[ -n "$DISCOVERED_DUCKDB" ]] && DUCKDB_BIN="$DISCOVERED_DUCKDB"
 fi
-for executable in root-config rootcling; do
-    if ! command -v "$executable" >/dev/null 2>&1; then
-        echo "missing required executable: $executable" >&2
+CMAKE_CACHE="$PROJECT_DIR/build/release/CMakeCache.txt"
+CACHED_ROOT_CONFIG=""
+if [[ -r "$CMAKE_CACHE" ]]; then
+    CACHED_ROOT_CONFIG="$(sed -n 's/^ROOT4DUCKDB_ROOT_CONFIG_EXECUTABLE:[^=]*=//p' "$CMAKE_CACHE" | head -n 1)"
+fi
+ROOT_CONFIG_BIN="${ROOT4DUCKDB_ROOT_CONFIG:-${CACHED_ROOT_CONFIG:-}}"
+if [[ -z "$ROOT_CONFIG_BIN" ]]; then
+    ROOT_CONFIG_BIN="$(command -v root-config || true)"
+fi
+if [[ -n "$CACHED_ROOT_CONFIG" && -n "${ROOT4DUCKDB_ROOT_CONFIG:-}" ]]; then
+    compiled_root="$("$CACHED_ROOT_CONFIG" --libdir)"
+    requested_root="$("$ROOT4DUCKDB_ROOT_CONFIG" --libdir)"
+    if [[ "$(readlink -f "$compiled_root/libCore.so")" != "$(readlink -f "$requested_root/libCore.so")" ]]; then
+        echo "integration test ROOT differs from the ROOT used by CMake" >&2
+        echo "CMake ROOT: $CACHED_ROOT_CONFIG" >&2
+        echo "Environment ROOT: $ROOT4DUCKDB_ROOT_CONFIG" >&2
         exit 2
     fi
+fi
+if [[ -z "$ROOT_CONFIG_BIN" || ! -x "$ROOT_CONFIG_BIN" ]]; then
+    echo "missing required ROOT configuration executable: $ROOT_CONFIG_BIN" >&2
+    exit 2
+fi
+ROOT_CONFIG_BIN="$(readlink -f "$ROOT_CONFIG_BIN")"
+ROOT_LIBDIR="$(readlink -f "$("$ROOT_CONFIG_BIN" --libdir)")"
+ROOT_BINDIR="$("$ROOT_CONFIG_BIN" --bindir)"
+ROOT_INCDIR="$("$ROOT_CONFIG_BIN" --incdir)"
+if [[ ! -x "$ROOT_BINDIR/rootcling" || ! -f "$ROOT_LIBDIR/libCore.so" ]]; then
+    echo "ROOT tools or libraries are missing from $ROOT_BINDIR / $ROOT_LIBDIR" >&2
+    exit 2
+fi
+
+root_library_directory_compatible() {
+    local candidate="$1" library
+    for library in libCore.so libRIO.so libTree.so libHist.so libCling.so libMathCore.so; do
+        if [[ -e "$candidate/$library" &&
+              "$(readlink -f "$candidate/$library")" != "$(readlink -f "$ROOT_LIBDIR/$library")" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+ROOT_RUNTIME_PATH="$ROOT_LIBDIR"
+IFS=: read -r -a existing_runtime_paths <<< "${LD_LIBRARY_PATH:-}"
+for runtime_path in "${existing_runtime_paths[@]}"; do
+    [[ -n "$runtime_path" && "$runtime_path" != "$ROOT_LIBDIR" ]] || continue
+    if root_library_directory_compatible "$runtime_path"; then
+        ROOT_RUNTIME_PATH+=":$runtime_path"
+    else
+        echo "[ROOT] ignoring conflicting library directory: $runtime_path" >&2
+    fi
 done
+export ROOTSYS="$("$ROOT_CONFIG_BIN" --prefix)"
+export ROOT4DUCKDB_ROOT_CONFIG="$ROOT_CONFIG_BIN"
+export PATH="$ROOT_BINDIR:$PATH"
+export LD_LIBRARY_PATH="$ROOT_RUNTIME_PATH"
+export ROOT_LIBRARY_PATH="$WORK_DIR/build:$ROOT_LIBDIR"
+export ROOT_INCLUDE_PATH="$ROOT_INCDIR:$FIXTURE_DIR"
+ROOT_DEPENDENCY_STATUS=0
+ROOT_DEPENDENCY_REPORT="$(ldd -v "$ROOT_LIBDIR/libCore.so" 2>&1)" || ROOT_DEPENDENCY_STATUS=$?
+if ((ROOT_DEPENDENCY_STATUS != 0)) || grep -Eq 'not found|no version information available' <<< "$ROOT_DEPENDENCY_REPORT"; then
+    echo "[ROOT] incompatible shared-library dependencies for $ROOT_LIBDIR/libCore.so" >&2
+    grep -E 'not found|no version information available' <<< "$ROOT_DEPENDENCY_REPORT" >&2 || true
+    echo "[ROOT] use a matching LCG view (LCG_110a for ROOT 6.40.04), not LCG_110" >&2
+    exit 2
+fi
+echo "[ROOT] version=$("$ROOT_CONFIG_BIN" --version) config=$ROOT_CONFIG_BIN" >&2
+echo "[ROOT] bin=$ROOT_BINDIR lib=$ROOT_LIBDIR" >&2
+
+validate_fixture_runtime() {
+    local executable="$1" library actual expected
+    for library in libCore.so libRIO.so libTree.so; do
+        actual="$(ldd "$executable" | awk -v library="$library" '$1 == library {print $3; exit}')"
+        expected="$(readlink -f "$ROOT_LIBDIR/$library")"
+        if [[ -z "$actual" || ! -e "$actual" || "$(readlink -f "$actual")" != "$expected" ]]; then
+            echo "ROOT runtime mismatch for $executable: $library" >&2
+            echo "Expected: $expected" >&2
+            echo "Resolved: ${actual:-missing}" >&2
+            return 2
+        fi
+    done
+}
 if [[ ! -x "$DUCKDB_BIN" ]]; then
     echo "DuckDB shell not found: $DUCKDB_BIN" >&2
     exit 2
@@ -39,66 +116,54 @@ print(match.group(0))
 ' "$label"
 }
 
-rm -rf "$WORK_DIR"
+if [[ -e "$WORK_DIR" && ! -d "$WORK_DIR" ]] ||
+   [[ -d "$WORK_DIR" && -n "$(find "$WORK_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "integration test directory must be empty: $WORK_DIR" >&2
+    exit 2
+fi
 mkdir -p "$WORK_DIR/data" "$WORK_DIR/build" "$WORK_DIR/legacy"
 
-ROOT_CFLAGS="$(root-config --cflags)"
-ROOT_LIBS="$(root-config --libs)"
+ROOT_REGISTERED="$("$DUCKDB_BIN" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")"
+DUCKDB_ARGS=(-bail)
+if [[ "$ROOT_REGISTERED" == "false" ]]; then
+    ROOT_EXTENSION="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
+    if [[ ! -f "$ROOT_EXTENSION" ]]; then
+        echo "ROOT extension is not built: $ROOT_EXTENSION" >&2
+        exit 2
+    fi
+    DUCKDB_ARGS=(-unsigned -bail -cmd "LOAD '$ROOT_EXTENSION';")
+elif [[ "$ROOT_REGISTERED" != "true" ]]; then
+    echo "unable to determine ROOT registration in $DUCKDB_BIN: $ROOT_REGISTERED" >&2
+    exit 2
+fi
+if [[ "$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")" != "true" ]]; then
+    echo "read_root was not registered in DuckDB CLI" >&2
+    exit 2
+fi
+
+# shellcheck source=lib/fixtures.sh
+source "$PROJECT_DIR/scripts/lib/fixtures.sh"
 CXX_BIN="${CXX:-c++}"
-
-rootcling \
-    -f "$WORK_DIR/build/TestEventDict.cpp" \
-    -c \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/TestEvent.hpp" \
-    "$FIXTURE_DIR/TestEventLinkDef.h"
-
-# shellcheck disable=SC2086
-"$CXX_BIN" -std=c++17 -O2 -fPIC -shared \
-    $ROOT_CFLAGS \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/TestEvent.cpp" \
-    "$WORK_DIR/build/TestEventDict.cpp" \
-    -o "$WORK_DIR/build/libTestEvent.so" \
-    $ROOT_LIBS
-
-# shellcheck disable=SC2086
-"$CXX_BIN" -std=c++17 -O2 \
-    $ROOT_CFLAGS \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/make_fixture.cpp" \
-    -L"$WORK_DIR/build" -lTestEvent \
-    -Wl,-rpath,"$WORK_DIR/build" \
-    -o "$WORK_DIR/build/make_fixture" \
-    $ROOT_LIBS
-
+build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX_BIN" "$ROOT_CONFIG_BIN"
+validate_fixture_runtime "$WORK_DIR/build/make_fixture"
+echo "[ROOT] fixture dictionary=$WORK_DIR/build/libTestEvent_rdict.pcm" >&2
 "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
 
-rootcling \
-    -f "$WORK_DIR/build/LegacyTestEventDict.cpp" \
-    -c \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/LegacyTestEvent.hpp" \
-    "$FIXTURE_DIR/LegacyTestEventLinkDef.h"
+# In-process concurrency regression: independent DuckDB databases load ROOT
+# and scan real dictionary-backed ROOT events from eight native threads.
+"$CXX_BIN" -std=c++20 -O2 -pthread \
+    -I"$PROJECT_DIR/duckdb/src/include" \
+    "$FIXTURE_DIR/concurrent_root_load.cpp" \
+    -L"$PROJECT_DIR/build/release/src" \
+    -Wl,-rpath,"$PROJECT_DIR/build/release/src" \
+    -lduckdb -ldl -o "$WORK_DIR/build/concurrent_root_load"
+ROOT4DUCKDB_TEST_EXTENSION_PATH="${ROOT_EXTENSION:-}" \
+    timeout -k 5s 180s "$WORK_DIR/build/concurrent_root_load" \
+    "$WORK_DIR/data/a.root" "$WORK_DIR/build/libTestEvent.so" \
+    "$WORK_DIR/build/concurrent-index"
 
-# shellcheck disable=SC2086
-"$CXX_BIN" -std=c++17 -O2 -fPIC -shared \
-    $ROOT_CFLAGS \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/LegacyTestEvent.cpp" \
-    "$WORK_DIR/build/LegacyTestEventDict.cpp" \
-    -o "$WORK_DIR/build/libLegacyTestEvent.so" \
-    $ROOT_LIBS
-
-# shellcheck disable=SC2086
-"$CXX_BIN" -std=c++17 -O2 \
-    $ROOT_CFLAGS \
-    -I"$FIXTURE_DIR" \
-    "$FIXTURE_DIR/make_legacy_fixture.cpp" \
-    -L"$WORK_DIR/build" -lLegacyTestEvent \
-    -Wl,-rpath,"$WORK_DIR/build" \
-    -o "$WORK_DIR/build/make_legacy_fixture" \
-    $ROOT_LIBS
+build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" LegacyTestEvent make_legacy_fixture "$CXX_BIN" "$ROOT_CONFIG_BIN"
+validate_fixture_runtime "$WORK_DIR/build/make_legacy_fixture"
 
 "$WORK_DIR/build/make_legacy_fixture" "$WORK_DIR/legacy/legacy.root"
 printf '%s\n' "$WORK_DIR/data/a.root" "$WORK_DIR/data/b.root" > "$WORK_DIR/data/two-files.list"
@@ -121,7 +186,90 @@ FROM read_root(
     path_prefix := '/TestEvent/vecHit/uv'
 );
 SQL
-MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-bind.sql" >/dev/null
+MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/direct-bind.sql" >/dev/null
+
+# TestBase inherits TObject: its bookkeeping fields must not leak into
+# physics-facing semantic discovery or into the automatic SELECT * schema.
+cat > "$WORK_DIR/tobject-discovery.sql" <<SQL
+LOAD parquet;
+SELECT count(*) = 0
+FROM root_describe(
+    '$WORK_DIR/data/a.root',
+    '/TestEvent',
+    dictionary := '$WORK_DIR/build/libTestEvent.so'
+)
+WHERE path IN ('/TestEvent/fUniqueID', '/TestEvent/fBits');
+DESCRIBE SELECT *
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent'
+);
+SQL
+if ! MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/tobject-discovery.sql" > "$WORK_DIR/tobject-discovery.log" 2>&1; then
+    echo "TObject semantic discovery failed" >&2
+    cat "$WORK_DIR/tobject-discovery.log" >&2
+    exit 1
+fi
+if [[ "$(head -n 1 "$WORK_DIR/tobject-discovery.log")" != "true" ]] ||
+   grep -Eq '(^|,)(fUniqueID|fBits)(,|$)' "$WORK_DIR/tobject-discovery.log" ||
+   ! grep -q '^run,' "$WORK_DIR/tobject-discovery.log"; then
+    echo "TObject semantic discovery schema is incorrect" >&2
+    cat "$WORK_DIR/tobject-discovery.log" >&2
+    exit 1
+fi
+
+# A scalar relation projected only as entry_id still contains every event.
+# An empty physical projection is not the end of the ROOT tree.
+if ! ID_ONLY_RESULT="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: 2>"$WORK_DIR/entry-id-only.log" <<SQL
+SELECT count(*) = 3 AND sum(entry_id) = 3
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent'
+);
+SELECT count(*) = 5 AND sum(entry_id) = 4
+FROM read_root(
+    '$WORK_DIR/data/[ab].root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent'
+);
+SQL
+)"; then
+    echo "entry_id-only ROOT scan failed" >&2
+    cat "$WORK_DIR/entry-id-only.log" >&2
+    exit 1
+fi
+if [[ "$(printf '%s\n' "$ID_ONLY_RESULT" | grep -xc true)" != 2 ]]; then
+    echo "scalar entry_id-only projection lost ROOT events: $ID_ONLY_RESULT" >&2
+    exit 1
+fi
+
+# Exercise repeated object reads using automatic caller-owned cleanup
+# for objects created through a loaded ROOT dictionary.
+cat > "$WORK_DIR/object-mode-repeat.sql" <<SQL
+SELECT count(*) = 3 AND sum(run) = 303
+FROM read_root(
+    '$WORK_DIR/data/a.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'object',
+    path_prefix := '/TestEvent'
+);
+SQL
+for iteration in 1 2 3 4 5 6 7 8 9 10; do
+    if ! "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/object-mode-repeat.sql" \
+        > "$WORK_DIR/object-mode-repeat.log" 2>&1; then
+        echo "Repeated ROOT object-mode scan failed on iteration $iteration" >&2
+        cat "$WORK_DIR/object-mode-repeat.log" >&2
+        exit 1
+    fi
+    if ! grep -qx true "$WORK_DIR/object-mode-repeat.log"; then
+        echo "Repeated ROOT object-mode scan returned unexpected data on iteration $iteration" >&2
+        cat "$WORK_DIR/object-mode-repeat.log" >&2
+        exit 1
+    fi
+done
 
 cat > "$WORK_DIR/direct-read.sql" <<SQL
 LOAD parquet;
@@ -300,6 +448,35 @@ FROM read_root(
     reader_mode := 'serialized',
     raw_validation_entries := 2
 );
+WITH
+uncached AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized',
+        tree_cache_bytes := 0,
+        raw_validation_entries := 0
+    )
+    WHERE entry_id < 2
+),
+cached AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized',
+        tree_cache_bytes := 67108864,
+        raw_validation_entries := 0
+    )
+    WHERE entry_id < 2
+)
+SELECT (SELECT count(*) FROM uncached) > 0
+       AND NOT EXISTS (SELECT * FROM uncached EXCEPT ALL SELECT * FROM cached)
+       AND NOT EXISTS (SELECT * FROM cached EXCEPT ALL SELECT * FROM uncached)
+       AS serialized_cache_range_equivalence_ok;
 SELECT count(*) = 6
        AND abs(sum(uv) - 13.5) < 0.00001
        AND min(vecHit_idx) = 0 AND max(vecHit_idx) = 1
@@ -572,7 +749,7 @@ FROM read_root(
 );
 SQL
 
-DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
+DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
 DIRECT_EXPECTED="$(grep -Ec '^SELECT([[:space:]]|$)' "$WORK_DIR/direct-read.sql")"
 DIRECT_PASSED="$(printf '%s\n' "$DIRECT_RESULT" | grep -c '^true$' || true)"
 if [[ "$DIRECT_PASSED" -ne "$DIRECT_EXPECTED" ]] || \
@@ -590,7 +767,7 @@ FROM read_root(
     path_prefix := '/TestEvent/run'
 );
 SQL
-if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/direct-leaf-selector.sql" > "$WORK_DIR/direct-leaf-selector.log" 2>&1; then
     echo "primitive leaf unexpectedly remained a read_root relation selector" >&2
     exit 1
@@ -610,27 +787,44 @@ FROM read_root(
     path_prefix := '/TestEvent'
 );
 SQL
-if ! MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/direct-missing-input.sql" > "$WORK_DIR/direct-missing-input.log" 2>&1; then
-    echo "multi-file direct scan failed instead of skipping an unavailable input" >&2
+    echo "multi-file direct scan silently accepted an unavailable required input" >&2
     cat "$WORK_DIR/direct-missing-input.log" >&2
     exit 1
 fi
-if ! grep -q "\[ROOT4DUCKDB\]\[WARN\]\[ROOT_FILE_UNAVAILABLE\].*missing.root" \
+if ! grep -q 'Required ROOT input is unavailable:.*missing.root' \
     "$WORK_DIR/direct-missing-input.log"; then
-    echo "multi-file missing-input warning was not emitted" >&2
+    echo "multi-file missing-input failure was not propagated" >&2
     cat "$WORK_DIR/direct-missing-input.log" >&2
     exit 1
 fi
-if ! grep -q '^303$' "$WORK_DIR/direct-missing-input.log"; then
-    echo "multi-file missing-input scan did not preserve the readable-file result" >&2
-    cat "$WORK_DIR/direct-missing-input.log" >&2
+
+# Fail closed at bind time too: do not skip a missing first input while
+# selecting a representative file for schema discovery.
+printf '%s\n' "$WORK_DIR/data/missing.root" "$WORK_DIR/data/a.root" > "$WORK_DIR/data/first-missing.list"
+cat > "$WORK_DIR/direct-first-missing.sql" <<SQL
+SELECT sum(run)
+FROM read_root(
+    '@$WORK_DIR/data/first-missing.list',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent'
+);
+SQL
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/direct-first-missing.sql" > "$WORK_DIR/direct-first-missing.log" 2>&1; then
+    echo "representative-file bind silently skipped a required missing ROOT input" >&2
+    exit 1
+fi
+if ! grep -q 'Failed to open a required ROOT input.*' "$WORK_DIR/direct-first-missing.log"; then
+    echo "representative-file bind error did not identify the missing required file" >&2
+    cat "$WORK_DIR/direct-first-missing.log" >&2
     exit 1
 fi
 
 # The normal scan must select the contiguous std::vector<T> path, and disabling
 # it must produce byte-for-byte identical SQL output through the proxy fallback.
-ROOT4DUCKDB_DEBUG=1 ROOT4DUCKDB_DEBUG_VERBOSE=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+ROOT4DUCKDB_DEBUG=1 ROOT4DUCKDB_DEBUG_VERBOSE=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     > "$WORK_DIR/contiguous.csv" 2> "$WORK_DIR/contiguous.log" <<SQL
 SELECT entry_id, vecHit_idx, u
 FROM read_root(
@@ -646,7 +840,7 @@ if ! grep -q '\[VECTOR.CONTIGUOUS\].*vector<TestHit>' "$WORK_DIR/contiguous.log"
     cat "$WORK_DIR/contiguous.log" >&2
     exit 1
 fi
-ROOT4DUCKDB_DISABLE_CONTIGUOUS_VECTOR=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+ROOT4DUCKDB_DISABLE_CONTIGUOUS_VECTOR=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     > "$WORK_DIR/proxy-fallback.csv" <<SQL
 SELECT entry_id, vecHit_idx, u
 FROM read_root(
@@ -679,13 +873,13 @@ FROM build_status
 WHERE status = 'OK';
 SQL
 
-BUILD_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/build-index.sql")"
+BUILD_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/build-index.sql")"
 if [[ "$BUILD_RESULT" != "3" ]]; then
     echo "unexpected index build result: $BUILD_RESULT" >&2
     exit 1
 fi
 
-BLOOM_FORMAT_RESULT="$("$DUCKDB_BIN" -csv -noheader :memory: <<SQL
+BLOOM_FORMAT_RESULT="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
 LOAD parquet;
 SELECT count(*) > 0
        AND bool_and(substr(hex(bloom_filter), 1, 8) = '52344246')
@@ -707,7 +901,7 @@ import json,sys
 print("\n".join(sorted(row["source_id"] for row in json.load(open(sys.argv[1]))["files"])))
 PY2
 )"
-ACTUAL_SOURCE_IDS="$("$DUCKDB_BIN" -csv -noheader :memory: <<SQL
+ACTUAL_SOURCE_IDS="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
 LOAD parquet;
 SELECT DISTINCT source_id
 FROM read_root_dataset(
@@ -765,7 +959,7 @@ FROM read_parquet('$WORK_DIR/index_scalar/warehouse/root_index/baskets/data/*.pa
 WHERE filename LIKE '%' || current_root_snapshot() || '-%';
 SQL
 
-SCALAR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/build-scalar-index.sql")"
+SCALAR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/build-scalar-index.sql")"
 if [[ "$SCALAR_RESULT" != $'1\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected scalar index result: $SCALAR_RESULT" >&2
     exit 1
@@ -833,7 +1027,7 @@ SELECT
       WHERE value = 0.1) AS float_literal_bloom;
 SQL
 
-QUERY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/query.sql")"
+QUERY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/query.sql")"
 if [[ "$QUERY_RESULT" != "5,71.5,9,6,0,5,9,1,6,1" ]]; then
     echo "unexpected scan result: $QUERY_RESULT" >&2
     exit 1
@@ -883,7 +1077,7 @@ WHERE field_name = 'vertex'
   AND filename LIKE '%' || current_root_snapshot() || '-%';
 SQL
 
-FIXED_ARRAY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/fixed-array.sql")"
+FIXED_ARRAY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/fixed-array.sql")"
 if [[ "$FIXED_ARRAY_RESULT" != $'1\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected fixed-array result: $FIXED_ARRAY_RESULT" >&2
     exit 1
@@ -932,7 +1126,7 @@ WHERE field_name = 'matrix'
   AND filename LIKE '%' || current_root_snapshot() || '-%';
 SQL
 
-MULTIDIM_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/multidim-array.sql")"
+MULTIDIM_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/multidim-array.sql")"
 if [[ "$MULTIDIM_RESULT" != $'1\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected multidimensional-array result: $MULTIDIM_RESULT" >&2
     exit 1
@@ -959,7 +1153,7 @@ FROM read_root_dataset(
 );
 SQL
 
-INHERITED_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/inherited.sql")"
+INHERITED_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/inherited.sql")"
 if [[ "$INHERITED_RESULT" != $'1\ntrue' ]]; then
     echo "unexpected inherited-field result: $INHERITED_RESULT" >&2
     exit 1
@@ -1059,7 +1253,7 @@ FROM read_root_dataset(
 );
 SQL
 
-ANCESTOR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/ancestor.sql")"
+ANCESTOR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/ancestor.sql")"
 if [[ "$ANCESTOR_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\n1\ntrue' ]]; then
     echo "unexpected ancestor-fallback result: $ANCESTOR_RESULT" >&2
     exit 1
@@ -1098,7 +1292,7 @@ SELECT (SELECT count(DISTINCT schema_id)
         WHERE filename LIKE '%' || current_root_snapshot() || '-%') >= 2;
 SQL
 
-MIXED_LAYOUT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/mixed-layout.sql")"
+MIXED_LAYOUT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/mixed-layout.sql")"
 if [[ "$MIXED_LAYOUT_RESULT" != $'5\ntrue\ntrue' ]]; then
     echo "unexpected mixed-layout result: $MIXED_LAYOUT_RESULT" >&2
     exit 1
@@ -1123,7 +1317,7 @@ SELECT row_count = 11
        AND compressed_bytes > 0
 FROM root_dataset_stats('$WORK_DIR/index', '/TestEvent/vecHit/u');
 SQL
-LINEAGE_STATS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/lineage-stats.sql")"
+LINEAGE_STATS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/lineage-stats.sql")"
 if [[ "$LINEAGE_STATS_RESULT" != $'true\ntrue' ]]; then
     echo "unexpected lineage/stats result: $LINEAGE_STATS_RESULT" >&2
     exit 1
@@ -1163,7 +1357,7 @@ FROM read_root_dataset(
     entry_selection := '{"$SOURCE_ID_A":{"ranges":[[0,1]],"entries":[2]}}'
 );
 SQL
-ENTRY_SELECTION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/entry-selection.sql")"
+ENTRY_SELECTION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/entry-selection.sql")"
 ENTRY_SELECTION_METRIC="$(profile_metric 'Explicit Entry Selections' <<<"$ENTRY_SELECTION_RESULT" || true)"
 if [[ "$(printf '%s\n' "$ENTRY_SELECTION_RESULT" | head -n 1)" != "true" ]] || \
    [[ "$ENTRY_SELECTION_METRIC" != "1" ]]; then
@@ -1191,7 +1385,7 @@ FROM root_dataset_stats('$WORK_DIR/index', '/TestEvent/vecHit/u');
 SELECT row_count = 11 FROM root_dataset_count('$WORK_DIR/index', '/TestEvent/vecHit/u');
 SELECT non_null_count = 11 FROM root_dataset_non_null_count('$WORK_DIR/index', '/TestEvent/vecHit/u');
 SQL
-LIMITS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/limits-and-aggregates.sql")"
+LIMITS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/limits-and-aggregates.sql")"
 if [[ "$LIMITS_RESULT" != $'true\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected row-limit/aggregate result: $LIMITS_RESULT" >&2
     exit 1
@@ -1209,7 +1403,7 @@ FROM read_root_dataset(
 WHERE event_fk = 2;
 SQL
 
-EVENT_PRUNING_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/event-pruning.sql")"
+EVENT_PRUNING_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/event-pruning.sql")"
 if ! grep -q 'Skipped ROOT Entries' <<<"$EVENT_PRUNING_RESULT"; then
     echo "event-entry pruning metric is absent" >&2
     exit 1
@@ -1233,7 +1427,7 @@ FROM read_root_dataset(
 )
 WHERE value IS NULL;
 SQL
-NULL_PRUNING_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/null-pruning.sql")"
+NULL_PRUNING_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/null-pruning.sql")"
 if [[ "$(printf '%s\n' "$NULL_PRUNING_RESULT" | head -n 1)" != "true" ]]; then
     echo "unexpected IS NULL result: $NULL_PRUNING_RESULT" >&2
     exit 1
@@ -1250,7 +1444,7 @@ FROM read_root_dataset(
 )
 WHERE value IN (12345.0, 23456.0);
 SQL
-IN_BLOOM_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/in-bloom.sql")"
+IN_BLOOM_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/in-bloom.sql")"
 IN_SELECTED_FILES="$(profile_metric 'Selected ROOT Files' <<<"$IN_BLOOM_RESULT" || true)"
 IN_DECODED_VALUES="$(profile_metric 'Decoded Values' <<<"$IN_BLOOM_RESULT" || true)"
 if [[ "$IN_SELECTED_FILES" != "0" || "$IN_DECODED_VALUES" != "0" ]]; then
@@ -1268,7 +1462,7 @@ FROM read_root_dataset(
     dictionary := '$WORK_DIR/build/libTestEvent.so'
 );
 SQL
-METADATA_COUNT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/metadata-count.sql")"
+METADATA_COUNT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/metadata-count.sql")"
 METADATA_ONLY_ROWS="$(profile_metric 'Metadata-only Rows' <<<"$METADATA_COUNT_RESULT" || true)"
 METADATA_DECODED_VALUES="$(profile_metric 'Decoded Values' <<<"$METADATA_COUNT_RESULT" || true)"
 METADATA_TASKS="$(profile_metric 'Coalesced Read Tasks' <<<"$METADATA_COUNT_RESULT" || true)"
@@ -1333,7 +1527,7 @@ FROM read_root_dataset(
 );
 SQL
 
-PUBLICATION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/catalog-publication.sql")"
+PUBLICATION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/catalog-publication.sql")"
 PUBLICATION_HEAD="$(printf '%s\n' "$PUBLICATION_RESULT" | head -n 5)"
 if [[ "$PUBLICATION_HEAD" != $'true\ntrue\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected catalog-publication result: $PUBLICATION_RESULT" >&2
@@ -1343,6 +1537,98 @@ PATH_PREDICATE_INDEXES="$(profile_metric 'Path Predicate Indexes' <<<"$PUBLICATI
 PREDICATE_INTERSECTIONS="$(profile_metric 'Predicate Intersections' <<<"$PUBLICATION_RESULT" || true)"
 if [[ "$PATH_PREDICATE_INDEXES" != "2" || "$PREDICATE_INTERSECTIONS" != "1" ]]; then
     echo "multi-path predicate intersection metrics are absent: $PUBLICATION_RESULT" >&2
+    exit 1
+fi
+
+# An explicitly requested commit ledger must be present and queryable.
+# Ordinary SQL catalogs use their _snapshots table as the commit log.
+cat > "$WORK_DIR/missing-commit-ledger.sql" <<SQL
+CREATE TABLE main.broken_root_snapshots (
+    snapshot_id VARCHAR,
+    state VARCHAR,
+    index_version INTEGER,
+    created_at_ns BIGINT
+);
+INSERT INTO main.broken_root_snapshots
+VALUES ('unverified', 'COMMITTED', 12, 1);
+SELECT count(*)
+FROM read_root_dataset(
+    'main.broken_root',
+    '/TestEvent/run',
+    commits_table := 'main.broken_root_commits'
+);
+SQL
+if "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/missing-commit-ledger.sql" > "$WORK_DIR/missing-commit-ledger.log" 2>&1; then
+    echo "ROOT catalog accepted a snapshot without its required commit ledger" >&2
+    exit 1
+fi
+if ! grep -q 'broken_root_commits' "$WORK_DIR/missing-commit-ledger.log"; then
+    echo "ROOT catalog did not report the missing commit ledger" >&2
+    cat "$WORK_DIR/missing-commit-ledger.log" >&2
+    exit 1
+fi
+
+# Freshness must be checked before pruning (including Bloom pruning) and
+# before the metadata-only COUNT(*) fast path. Modify only a generated fixture
+# after all ordinary index tests have completed.
+touch -m -d '2030-01-01 00:00:00 UTC' "$WORK_DIR/data/a.root"
+
+cat > "$WORK_DIR/stale-index-count.sql" <<SQL
+LOAD parquet;
+SELECT count(*)
+FROM read_root_dataset(
+    '$WORK_DIR/index',
+    '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+SQL
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/stale-index-count.sql" > "$WORK_DIR/stale-index-count.log" 2>&1; then
+    echo "COUNT(*) accepted stale ROOT index metadata" >&2
+    exit 1
+fi
+if ! grep -q 'ROOT file mtime changed after indexing' "$WORK_DIR/stale-index-count.log"; then
+    echo "stale COUNT(*) failed for an unexpected reason" >&2
+    cat "$WORK_DIR/stale-index-count.log" >&2
+    exit 1
+fi
+
+cat > "$WORK_DIR/stale-index-pruning.sql" <<SQL
+LOAD parquet;
+SELECT count(*)
+FROM read_root_dataset(
+    '$WORK_DIR/index',
+    '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so'
+)
+WHERE value IN (-999999.0);
+SQL
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/stale-index-pruning.sql" > "$WORK_DIR/stale-index-pruning.log" 2>&1; then
+    echo "pruned dataset scan accepted stale ROOT index metadata" >&2
+    exit 1
+fi
+if ! grep -q 'ROOT file mtime changed after indexing' "$WORK_DIR/stale-index-pruning.log"; then
+    echo "stale pruning scan failed for an unexpected reason" >&2
+    cat "$WORK_DIR/stale-index-pruning.log" >&2
+    exit 1
+fi
+
+# Explicit opt-out remains available for intentional use of stored metadata.
+STALE_OVERRIDE_RESULT="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+SELECT count(*) = 11
+FROM read_root_dataset(
+    '$WORK_DIR/index',
+    '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    require_fresh_index := false
+);
+SQL
+)"
+if [[ "$STALE_OVERRIDE_RESULT" != "true" ]]; then
+    echo "explicit require_fresh_index := false did not preserve metadata COUNT(*)" >&2
     exit 1
 fi
 

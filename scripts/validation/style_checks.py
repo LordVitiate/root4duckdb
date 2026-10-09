@@ -18,26 +18,38 @@ def check_style(validator: ProjectValidator) -> None:
 
 def _check_cpp(validator: ProjectValidator) -> None:
     """Apply useful JSF-derived header and source hygiene rules."""
-    sources = list((validator.root / "src").rglob("*.cpp")) + list((validator.root / "src").rglob("*.hpp"))
+    sources = [
+        source
+        for directory in ("src", "test", "examples")
+        for source in (validator.root / directory).rglob("*")
+        if source.suffix in (".cpp", ".hpp", ".h", ".C", ".c")
+        and not any(part.startswith(".tmp-") for part in source.relative_to(validator.root).parts)
+    ]
     for source in sources:
         text = source.read_text()
         relative = source.relative_to(validator.root)
+        if re.search(r"\bgSystem\b", text):
+            validator.errors.append(f"process-global ROOT gSystem usage: {relative}")
         for line_number, line in enumerate(text.splitlines(), 1):
             if len(line) > 120:
                 validator.errors.append(f"C++ line exceeds 120 columns: {relative}:{line_number}")
-        if source.suffix == ".hpp" and not text.startswith("#pragma once"):
-            validator.errors.append(f"header does not use #pragma once: {relative}")
+        if source.suffix == ".hpp":
+            if source.is_relative_to(validator.root / "src/include"):
+                header_path = str(source.relative_to(validator.root / "src/include")).removeprefix("root4duckdb/")
+            else:
+                header_path = str(relative).replace("test/fixtures/", "test/", 1)
+            guard = "ROOT4DUCKDB_" + re.sub(r"[^A-Za-z0-9]", "_", header_path).upper()
+            if not text.startswith(f"#ifndef {guard}\n#define {guard}\n") or not text.rstrip().endswith("#endif"):
+                validator.errors.append(f"header guard is missing or inconsistent: {relative}")
         if re.search(r"\bstatic\s+inline\b", text):
             validator.errors.append(f"static-inline implementation remains: {relative}")
         if source.suffix == ".hpp" and source.name != "root_iceberg_internal.hpp" and re.search(
             r"\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?\{", text
         ):
             validator.errors.append(f"non-template implementation remains in header: {relative}")
-        if re.search(r"^\s*#ifndef\s+\w+_H(?:PP)?_?\s*$", text, re.MULTILINE):
-            validator.errors.append(f"legacy header guard remains: {relative}")
-        if re.search(r"^\s*(?:if|for|while)\s*\([^\n]+\)\s*$", text, re.MULTILINE):
+        if re.search(r"^[ \t]*(?:if|for|while)\s*\([^\n]+\)[ \t]*\n(?![ \t]*\{)", text, re.MULTILINE):
             validator.errors.append(f"unbraced control statement remains: {relative}")
-        if source.name != "root_headers.hpp" and re.search(
+        if relative.parts[0] == "src" and source.name != "root_headers.hpp" and re.search(
             r'^\s*#include\s*[<"](?:Rtypes|T[A-Za-z0-9_]*\.h)', text, re.MULTILINE
         ):
             validator.errors.append(f"ROOT header bypasses root_headers.hpp: {relative}")

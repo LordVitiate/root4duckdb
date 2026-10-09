@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_CORE_ROOT_FILE_OPENER_HPP
+#define ROOT4DUCKDB_CORE_ROOT_FILE_OPENER_HPP
 
 #include "root4duckdb/core/root_headers.hpp"
 
@@ -11,10 +12,12 @@
 
 class TTree;
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Result and retry telemetry for a ROOT file open.
-struct RootFileOpenResult {
+struct RootFileOpenResult
+{
     std::unique_ptr<TFile> file;
     uint32_t attempts = 0;
     uint64_t elapsed_us = 0;
@@ -24,19 +27,25 @@ struct RootFileOpenResult {
 };
 
 /// Signals that a remote or local ROOT file exhausted its open budget.
-class RootFileUnavailableException : public std::runtime_error {
+class RootFileUnavailableException : public std::runtime_error
+{
   public:
     RootFileUnavailableException(std::string message, uint32_t attempts, uint64_t elapsed_us);
 
-    uint32_t attempts;
-    uint64_t elapsed_us;
+    uint32_t Attempts() const noexcept;
+    uint64_t ElapsedUs() const noexcept;
+
+  private:
+    uint32_t attempts_;
+    uint64_t elapsed_us_;
 };
 
 /// Opens a file with a deliberately small transient retry budget.
 RootFileOpenResult OpenRootFile(const std::string& path, uint32_t max_attempts = 2);
 
 /// Owns one opened file and its selected tree.
-class RootFileHandle {
+class RootFileHandle
+{
   public:
     /// Replaces the current file and resolves the requested tree.
     RootFileOpenResult Open(const std::string& file_path, const std::string& tree_name,
@@ -55,3 +64,5 @@ class RootFileHandle {
 };
 
 } // namespace duckdb::rootlake
+
+#endif

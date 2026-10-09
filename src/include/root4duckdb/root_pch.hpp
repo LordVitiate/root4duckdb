@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_ROOT_PCH_HPP
+#define ROOT4DUCKDB_ROOT_PCH_HPP
 
 // ROOT must be parsed before DuckDB so the BIT macro is contained once.
 // Headers remain self-contained; this file only reduces repeated parsing.
@@ -27,3 +28,5 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#endif

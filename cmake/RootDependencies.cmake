@@ -2,13 +2,28 @@
 
 # ROOT is intentionally discovered through root-config. Some standalone ROOT
 # installations do not export a complete set of ROOT::* CMake targets.
-find_program(ROOT_CONFIG_EXECUTABLE NAMES root-config)
-if(NOT ROOT_CONFIG_EXECUTABLE)
-    message(FATAL_ERROR
-        "root-config was not found. Source ROOT's thisroot.sh first.")
+if(ROOT4DUCKDB_ROOT_CONFIG_EXECUTABLE)
+    set(ROOT_CONFIG_EXECUTABLE
+        "${ROOT4DUCKDB_ROOT_CONFIG_EXECUTABLE}")
+elseif(DEFINED ENV{ROOT4DUCKDB_ROOT_CONFIG} AND
+       NOT "$ENV{ROOT4DUCKDB_ROOT_CONFIG}" STREQUAL "")
+    set(ROOT_CONFIG_EXECUTABLE
+        "$ENV{ROOT4DUCKDB_ROOT_CONFIG}")
+else()
+    unset(ROOT_CONFIG_EXECUTABLE CACHE)
+    unset(ROOT_CONFIG_EXECUTABLE)
+    find_program(ROOT_CONFIG_EXECUTABLE NAMES root-config NO_CACHE)
 endif()
 
-foreach(_r4d_root_query prefix incdir libdir libs)
+if(NOT ROOT_CONFIG_EXECUTABLE OR
+   NOT EXISTS "${ROOT_CONFIG_EXECUTABLE}")
+    message(FATAL_ERROR
+        "A usable root-config was not found.")
+endif()
+
+message(STATUS "ROOT config: ${ROOT_CONFIG_EXECUTABLE}")
+
+foreach(_r4d_root_query prefix incdir libdir libs version)
     execute_process(
         COMMAND ${ROOT_CONFIG_EXECUTABLE} --${_r4d_root_query}
         OUTPUT_VARIABLE ROOT4DUCKDB_ROOT_${_r4d_root_query}
@@ -25,6 +40,7 @@ set(ROOT4DUCKDB_ROOT_PREFIX "${ROOT4DUCKDB_ROOT_prefix}")
 set(ROOT4DUCKDB_ROOT_INCDIR "${ROOT4DUCKDB_ROOT_incdir}")
 set(ROOT4DUCKDB_ROOT_LIBDIR "${ROOT4DUCKDB_ROOT_libdir}")
 set(ROOT4DUCKDB_ROOT_LIBS_RAW "${ROOT4DUCKDB_ROOT_libs}")
+set(ROOT4DUCKDB_ROOT_VERSION "${ROOT4DUCKDB_ROOT_version}")
 
 execute_process(
     COMMAND ${ROOT_CONFIG_EXECUTABLE} --ldflags
@@ -98,6 +114,7 @@ if(NOT ROOT4DUCKDB_NLOHMANN_INCLUDE_DIRS)
         "CMAKE_PREFIX_PATH to an nlohmann_json package.")
 endif()
 
+message(STATUS "ROOT version: ${ROOT4DUCKDB_ROOT_VERSION}")
 message(STATUS "ROOT prefix: ${ROOT4DUCKDB_ROOT_PREFIX}")
 message(STATUS "ROOT include: ${ROOT4DUCKDB_ROOT_INCDIR}")
 message(STATUS "ROOT libdir: ${ROOT4DUCKDB_ROOT_LIBDIR}")

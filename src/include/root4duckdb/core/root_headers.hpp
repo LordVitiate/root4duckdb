@@ -1,8 +1,7 @@
-#pragma once
+#ifndef ROOT4DUCKDB_CORE_ROOT_HEADERS_HPP
+#define ROOT4DUCKDB_CORE_ROOT_HEADERS_HPP
 
-// ROOT exposes BIT as a process-wide preprocessor macro while DuckDB has
-// identifiers named BIT. Every ROOT header used by the extension is parsed
-// inside this boundary before the macro is removed for DuckDB headers.
+// Parse ROOT headers before removing BIT, which conflicts with DuckDB identifiers.
 #include "Rtypes.h"
 #include "TArrayD.h"
 #include "TAxis.h"
@@ -32,4 +31,6 @@
 
 #ifdef BIT
 #undef BIT
+#endif
+
 #endif

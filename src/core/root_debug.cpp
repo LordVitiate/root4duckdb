@@ -9,23 +9,32 @@
 #include <thread>
 #include <utility>
 
-namespace duckdb {
+namespace duckdb
+{
 
-namespace {
+namespace
+{
 
-bool EnvironmentDebugFlag(const char* name) {
+bool EnvironmentDebugFlag(const char* name)
+{
     const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
+    if (!raw || !*raw)
+    {
         return false;
     }
     std::string value(raw);
     std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                   [](unsigned char c)
+                   {
+                       return static_cast<char>(std::tolower(c));
+                   });
     return value != "0" && value != "false" && value != "off" && value != "no";
 }
 
-bool VerboseStage(const char* stage) {
-    if (!stage) {
+bool VerboseStage(const char* stage)
+{
+    if (!stage)
+    {
         return false;
     }
     const std::string name(stage);
@@ -39,24 +48,29 @@ thread_local uint64_t operation_id = 0;
 
 } // namespace
 
-bool RootDebugEnabled() {
+bool RootDebugEnabled()
+{
     static const bool enabled = EnvironmentDebugFlag("ROOT4DUCKDB_DEBUG");
     return enabled;
 }
 
-bool RootDebugVerboseEnabled() {
+bool RootDebugVerboseEnabled()
+{
     static const bool enabled = EnvironmentDebugFlag("ROOT4DUCKDB_DEBUG_VERBOSE");
     return enabled;
 }
 
-std::string RootPointer(const void* pointer) {
+std::string RootPointer(const void* pointer)
+{
     std::ostringstream output;
     output << pointer;
     return output.str();
 }
 
-void RootDebug(const char* stage, const std::string& message) {
-    if (!RootDebugEnabled() || (VerboseStage(stage) && !RootDebugVerboseEnabled())) {
+void RootDebug(const char* stage, const std::string& message)
+{
+    if (!RootDebugEnabled() || (VerboseStage(stage) && !RootDebugVerboseEnabled()))
+    {
         return;
     }
     const auto sequence = debug_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -68,10 +82,13 @@ void RootDebug(const char* stage, const std::string& message) {
     std::fflush(stderr);
 }
 
-std::string JoinDebugFields(const std::vector<std::string>& fields) {
+std::string JoinDebugFields(const std::vector<std::string>& fields)
+{
     std::ostringstream out;
-    for (size_t i = 0; i < fields.size(); ++i) {
-        if (i) {
+    for (size_t i = 0; i < fields.size(); ++i)
+    {
+        if (i)
+        {
             out << '/';
         }
         out << fields[i];
@@ -80,21 +97,25 @@ std::string JoinDebugFields(const std::vector<std::string>& fields) {
 }
 
 RootDebugOperationScope::RootDebugOperationScope(std::string label_p)
-    : previous_id(operation_id), label(std::move(label_p)) {
+    : previous_id(operation_id), label(std::move(label_p))
+{
     operation_id = operation_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
     RootDebug("OP.ENTER", label);
 }
 
-RootDebugOperationScope::~RootDebugOperationScope() {
+RootDebugOperationScope::~RootDebugOperationScope()
+{
     RootDebug("OP.LEAVE", label);
     operation_id = previous_id;
 }
 
-uint64_t RootDebugOperationScope::Id() const {
+uint64_t RootDebugOperationScope::Id() const
+{
     return operation_id;
 }
 
-RootDebugLifetimeSentinel::~RootDebugLifetimeSentinel() {
+RootDebugLifetimeSentinel::~RootDebugLifetimeSentinel()
+{
     RootDebug("LIFETIME.MEMBERS_DESTROYED", label);
 }
 

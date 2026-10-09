@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_SERIALIZED_ROOT_SERIALIZED_CODEC_HPP
+#define ROOT4DUCKDB_SERIALIZED_ROOT_SERIALIZED_CODEC_HPP
 
 #include "root4duckdb/reader/root_primitive_value.hpp"
 
@@ -7,10 +8,12 @@
 #include <string>
 #include <vector>
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Primitive encodings supported by the basket codec.
-enum class SerializedPrimitiveKind : uint8_t {
+enum class SerializedPrimitiveKind : uint8_t
+{
     UNKNOWN = 0,
     BOOL,
     INT8,
@@ -26,10 +29,11 @@ enum class SerializedPrimitiveKind : uint8_t {
 };
 
 /// Maps ROOT primitive spelling to its serialized encoding.
-SerializedPrimitiveKind ClassifySerializedPrimitive(const std::string& type);
+SerializedPrimitiveKind ClassifySerializedPrimitive(const std::string& raw_type);
 
 /// Fixed layout required to decode one serialized entry.
-struct SerializedEntryLayout {
+struct SerializedEntryLayout
+{
     std::string value_type;
     SerializedPrimitiveKind primitive_kind = SerializedPrimitiveKind::UNKNOWN;
     uint32_t bytes_before_value_per_element = 0;
@@ -53,9 +57,8 @@ bool DecodeSerializedVectorEntry(const uint8_t* bytes, size_t entry_size, const 
 /// collection/version header and returned the exact payload cursor.
 bool DecodeSerializedVectorPayload(const uint8_t* bytes, size_t entry_size, size_t payload_offset, uint64_t count,
                                    const SerializedEntryLayout& layout, uint64_t max_values_per_entry,
-                                   std::vector<RootPrimitiveValue>& values,
-                                   std::vector<int32_t>& flat_indices, std::string& failure_reason,
-                                   bool collect_indices = true);
+                                   std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
+                                   std::string& failure_reason, bool collect_indices = true);
 
 /// Decodes a nested STL primitive member column located by ROOT actions.
 bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t entry_size, size_t column_offset,
@@ -65,8 +68,7 @@ bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t en
                                                  bool collect_indices = true);
 bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t entry_size, size_t column_offset,
                                                  uint64_t outer_count, const SerializedEntryLayout& layout,
-                                                 uint64_t max_values_per_entry,
-                                                 std::vector<RootPrimitiveValue>& values,
+                                                 uint64_t max_values_per_entry, std::vector<RootPrimitiveValue>& values,
                                                  std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                                  bool collect_indices = true);
 
@@ -77,3 +79,5 @@ bool EqualDecodedValues(const std::vector<RootPrimitiveValue>& left, const std::
                         const std::vector<RootPrimitiveValue>& right, const std::vector<int32_t>& right_indices);
 
 } // namespace duckdb::rootlake
+
+#endif

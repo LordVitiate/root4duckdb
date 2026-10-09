@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_INDEX_ROOT_INDEX_METADATA_HPP
+#define ROOT4DUCKDB_INDEX_ROOT_INDEX_METADATA_HPP
 
 #include "duckdb/common/common.hpp"
 
@@ -7,13 +8,16 @@
 #include <string>
 #include <vector>
 
-namespace duckdb {
+namespace duckdb
+{
 class DatabaseInstance;
 
-namespace rootlake {
+namespace rootlake
+{
 
 /// File-level lineage and aggregate statistics row.
-struct RootFileMetadataRow {
+struct RootFileMetadataRow
+{
     uint32_t index_version = 0;
     std::string dataset_id;
     std::string snapshot_id;
@@ -38,7 +42,8 @@ struct RootFileMetadataRow {
 };
 
 /// Logical path and schema identity row.
-struct RootSchemaMetadataRow {
+struct RootSchemaMetadataRow
+{
     uint32_t index_version = 0;
     std::string schema_id;
     std::string column_id;
@@ -52,7 +57,8 @@ struct RootSchemaMetadataRow {
 };
 
 /// One offset traversal step in a semantic access plan.
-struct RootAccessMetadataRow {
+struct RootAccessMetadataRow
+{
     uint32_t index_version = 0;
     std::string access_plan_id;
     uint32_t level_no = 0;
@@ -72,7 +78,8 @@ struct RootAccessMetadataRow {
 };
 
 /// Physical basket bounds and pruning metadata row.
-struct RootBasketMetadataRow {
+struct RootBasketMetadataRow
+{
     uint32_t index_version = 0;
     std::string snapshot_id;
     std::string file_id;
@@ -101,7 +108,8 @@ struct RootBasketMetadataRow {
 };
 
 /// Typed metadata accumulated for one indexed ROOT file.
-struct RootFileIndexMetadata {
+struct RootFileIndexMetadata
+{
     std::vector<RootFileMetadataRow> files;
     std::vector<RootSchemaMetadataRow> schemas;
     std::vector<RootAccessMetadataRow> access;
@@ -111,7 +119,8 @@ struct RootFileIndexMetadata {
 };
 
 /// Flushes typed worker metadata into bounded Parquet segments.
-class RootIndexMetadataWriter {
+class RootIndexMetadataWriter
+{
   public:
     RootIndexMetadataWriter(DatabaseInstance& database, std::string parts_root, idx_t worker_id, uint64_t flush_bytes);
     ~RootIndexMetadataWriter();
@@ -134,3 +143,5 @@ void CompactRootIndexParquet(DatabaseInstance& database, const std::string& stag
 
 } // namespace rootlake
 } // namespace duckdb
+
+#endif

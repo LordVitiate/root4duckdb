@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROOT4DUCKDB_ROOT4DUCKDB_HPP
+#define ROOT4DUCKDB_ROOT4DUCKDB_HPP
 
 /// Public umbrella for all reusable ROOT4DuckDB module APIs.
 #include "root4duckdb/core/core.hpp"
@@ -9,3 +10,5 @@
 #include "root4duckdb/index/index.hpp"
 #include "root4duckdb/reader/reader.hpp"
 #include "root4duckdb/serialized/serialized.hpp"
+
+#endif

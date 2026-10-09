@@ -42,8 +42,20 @@ done
     echo "required: --plan --chunk-id --output-root --project-dir" >&2
     exit 2
 }
+[[ "$CHUNK_ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "invalid chunk id: $CHUNK_ID" >&2; exit 2; }
 DUCKDB_BIN="${DUCKDB_BIN:-$PROJECT_DIR/build/release/duckdb}"
 [[ -x "$DUCKDB_BIN" ]] || { echo "DuckDB binary not found: $DUCKDB_BIN" >&2; exit 2; }
+ROOT_INDEX_REGISTERED="$("$DUCKDB_BIN" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'root_build_dataset_index';")"
+DUCKDB_ARGS=(-bail)
+if [[ "$ROOT_INDEX_REGISTERED" == "false" ]]; then
+    ROOT_EXTENSION="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
+    [[ -f "$ROOT_EXTENSION" ]] || { echo "ROOT extension not found: $ROOT_EXTENSION" >&2; exit 2; }
+    ROOT_EXTENSION_SQL="$(printf '%s' "$ROOT_EXTENSION" | sed "s/'/''/g")"
+    DUCKDB_ARGS=(-unsigned -bail -cmd "LOAD '$ROOT_EXTENSION_SQL';")
+elif [[ "$ROOT_INDEX_REGISTERED" != "true" ]]; then
+    echo "unable to determine ROOT index registration: $ROOT_INDEX_REGISTERED" >&2
+    exit 2
+fi
 [[ -f "$PLAN" ]] || { echo "plan not found: $PLAN" >&2; exit 2; }
 
 readarray -t PLAN_DEFAULTS < <(python3 - "$PLAN" <<'PY'
@@ -123,7 +135,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-rm -rf "$STAGE"
+[[ ! -e "$STAGE" && ! -L "$STAGE" ]] || { echo "staging directory already exists: $STAGE" >&2; exit 2; }
 mkdir -p "$STAGE/index" "$STAGE/temp"
 write_status running "worker started"
 
@@ -219,7 +231,7 @@ SQL
 MALLOC_CHECK_=3 python3 "$PROJECT_DIR/scripts/production/bounded_exec.py" \
     --rss-limit-bytes "$RSS_HARD_LIMIT_BYTES" \
     --report "$STAGE/resource-usage.json" -- \
-    "$DUCKDB_BIN" :memory: < "$STAGE/index.sql" >"$STAGE/duckdb.out" 2>"$STAGE/duckdb.err"
+    "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" :memory: < "$STAGE/index.sql" >"$STAGE/duckdb.out" 2>"$STAGE/duckdb.err"
 
 python3 - "$STAGE" "$PLAN" "$CHUNK_ID" <<'PY'
 import csv,hashlib,json,os,pathlib,sys,time
@@ -262,8 +274,8 @@ mkdir -p "$STAGE/index/_worker"
 for artifact in chunk.json inputs.uris index.sql status.csv duckdb.out duckdb.err resource-usage.json; do
     [[ -f "$STAGE/$artifact" ]] && cp -p "$STAGE/$artifact" "$STAGE/index/_worker/$artifact"
 done
-rm -rf "$FINAL_DIR"
-mv "$STAGE/index" "$FINAL_DIR"
+[[ ! -e "$FINAL_DIR" && ! -L "$FINAL_DIR" ]] || { echo "chunk output already exists: $FINAL_DIR" >&2; exit 1; }
+mv -T "$STAGE/index" "$FINAL_DIR"
 rm -rf "$STAGE"
 write_status succeeded "immutable chunk snapshot complete"
 trap - EXIT INT TERM

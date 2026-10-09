@@ -1,6 +1,6 @@
 {
   "name": "root4duckdb",
-  "version-string": "3.9.0",
+  "version-string": "3.10.0",
   "dependencies": [
     "nlohmann-json"
   ],

@@ -1,11 +1,14 @@
-#pragma once
+#ifndef ROOT4DUCKDB_READER_ROOT_OFFSET_READER_HPP
+#define ROOT4DUCKDB_READER_ROOT_OFFSET_READER_HPP
 
 #include "root4duckdb/reader/root_semantic_types.hpp"
 
-namespace duckdb::rootlake {
+namespace duckdb::rootlake
+{
 
 /// Resolves a logical path through ROOT streamer metadata.
-class PathResolver {
+class PathResolver
+{
   public:
     /// Resolves a path or throws on incompatible streamer metadata.
     static std::vector<PathLevel> Resolve(TClass* root_class, const std::vector<std::string>& fields);
@@ -29,16 +32,23 @@ bool SelectSemanticPath(TClass* root_class, const ParsedPath& path, const std::s
                         SemanticPathSelection& selection);
 
 /// Traverses materialized ROOT objects using resolved offsets.
-class OffsetValueReader {
+class OffsetValueReader
+{
   public:
     /// Collects numeric values without index columns.
     static void CollectValues(void* root_object, const std::vector<PathLevel>& levels, std::vector<double>& out);
     /// Collects numeric values and flattened indices.
     static void CollectFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
                             std::vector<double>& values, std::vector<int32_t>& flat_indices);
+    /// Collects exact primitive values and flat indices without creating per-value rows.
+    static void CollectTypedFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
+                                 int64_t max_values, std::vector<RootPrimitiveValue>& values,
+                                 std::vector<int32_t>& flat_indices);
     /// Collects the mixed direct-scan row representation.
     static void CollectDirect(void* root_object, const std::vector<PathLevel>& levels, int64_t max_values,
                               int64_t entry_id, ReadResult& out);
 };
 
 } // namespace duckdb::rootlake
+
+#endif
