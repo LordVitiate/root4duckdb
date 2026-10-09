@@ -382,18 +382,25 @@ check_root_abi() {
             exit 1
         fi
 
-        if [[ "$root_release" != "$compiler_release" ||
-              "$root_cxx11_abi" != "$compiler_cxx11_abi" ]]; then
-            echo "[ERROR] ROOT/Cling and compiler use incompatible libstdc++ ABI settings." >&2
-            echo "        ROOT:     release=$root_release CXX11_ABI=$root_cxx11_abi" >&2
-            echo "        compiler: release=$compiler_release CXX11_ABI=$compiler_cxx11_abi" >&2
+        # _GLIBCXX_RELEASE identifies the header major version, not a binary
+        # ABI version. ROOT can use GCC 13 headers while an extension uses
+        # GCC 14 headers, provided the dual ABI, symbol versions and linked
+        # libstdc++ runtime are compatible. Do not silently ignore mismatches.
+        if [[ "$root_cxx11_abi" != "$compiler_cxx11_abi" ]]; then
+            echo "[ERROR] ROOT/Cling and compiler use different C++11 string ABIs." >&2
+            echo "        ROOT CXX11_ABI=$root_cxx11_abi; compiler CXX11_ABI=$compiler_cxx11_abi" >&2
             exit 1
+        fi
+
+        if [[ "$root_release" != "$compiler_release" ]]; then
+            echo "[WARN] ROOT/Cling and compiler use different libstdc++ header major versions." >&2
+            echo "       ROOT _GLIBCXX_RELEASE=$root_release; compiler _GLIBCXX_RELEASE=$compiler_release" >&2
+            echo "       CXX11_ABI matches; required symbols and runtime were checked." >&2
         fi
 
         if [[ "$root_glibcxx" != "$compiler_glibcxx" ]]; then
             echo "[WARN] ROOT/Cling and compiler have different libstdc++ header datestamps." >&2
             echo "       ROOT __GLIBCXX__=$root_glibcxx; compiler __GLIBCXX__=$compiler_glibcxx" >&2
-            echo "       ABI release and CXX11_ABI match; required symbols and runtime were checked." >&2
         fi
 
         if grep -Eq \
@@ -406,7 +413,7 @@ check_root_abi() {
     fi
 
     echo "[OK] ROOT/libstdc++ ABI preflight passed"
-    echo "[OK] ROOT/compiler C++ ABI release=$compiler_release CXX11_ABI=$compiler_cxx11_abi"
+    echo "[OK] ROOT/compiler CXX11_ABI=$compiler_cxx11_abi (ROOT headers=$root_release compiler headers=$compiler_release)"
     echo "[OK] ROOT/compiler runtime=$compiler_runtime"
 }
 
