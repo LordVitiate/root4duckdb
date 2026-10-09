@@ -310,6 +310,9 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
                                       " columns=" + std::to_string(bind_data.columns.size()));
     auto* local_state = &target;
     auto* open_mutex = synchronize_open ? &gstate.coordination_mutex : nullptr;
+    const uint64_t cache_entry_begin = gstate.entry_lower;
+    const uint64_t cache_entry_end =
+        gstate.entry_upper == std::numeric_limits<uint64_t>::max() ? gstate.entry_upper : gstate.entry_upper + 1;
     if (bind_data.IsPrimitiveTreeMode())
     {
         const auto open_result = local_state->root_file.Open(file_path, bind_data.tree_name, open_mutex);
@@ -382,7 +385,8 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         else
         {
             const auto projection =
-                rootlake::ApplyBranchProjection(tree, projected_branches, bind_data.root_access.tree_cache_bytes);
+                rootlake::ApplyBranchProjection(tree, projected_branches, bind_data.root_access.tree_cache_bytes,
+                                               cache_entry_begin, cache_entry_end);
             if (!projection.applied)
             {
                 rootlake::EnableAllBranches(tree, bind_data.root_access.tree_cache_bytes);
@@ -442,7 +446,8 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
                     projected_branches.push_back(local_state->direct_leaf->GetLeafCount()->GetBranch());
                 }
                 const auto projection =
-                    rootlake::ApplyBranchProjection(tree, projected_branches, bind_data.root_access.tree_cache_bytes);
+                    rootlake::ApplyBranchProjection(tree, projected_branches, bind_data.root_access.tree_cache_bytes,
+                                               cache_entry_begin, cache_entry_end);
                 if (!projection.applied)
                 {
                     rootlake::EnableAllBranches(tree, bind_data.root_access.tree_cache_bytes);
@@ -609,7 +614,8 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
     {
         const auto projection = all_candidates_projectable
                                     ? rootlake::ApplyBranchProjection(projection_tree, projected_branches,
-                                                                      bind_data.root_access.tree_cache_bytes)
+                                                                      bind_data.root_access.tree_cache_bytes,
+                                                                      cache_entry_begin, cache_entry_end)
                                     : rootlake::BranchProjectionResult{};
         if (!projection.applied)
         {
