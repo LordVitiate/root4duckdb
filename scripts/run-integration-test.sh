@@ -69,6 +69,14 @@ export PATH="$ROOT_BINDIR:$PATH"
 export LD_LIBRARY_PATH="$ROOT_RUNTIME_PATH"
 export ROOT_LIBRARY_PATH="$WORK_DIR/build:$ROOT_LIBDIR"
 export ROOT_INCLUDE_PATH="$ROOT_INCDIR:$FIXTURE_DIR"
+ROOT_DEPENDENCY_STATUS=0
+ROOT_DEPENDENCY_REPORT="$(ldd -v "$ROOT_LIBDIR/libCore.so" 2>&1)" || ROOT_DEPENDENCY_STATUS=$?
+if ((ROOT_DEPENDENCY_STATUS != 0)) || grep -Eq 'not found|no version information available' <<< "$ROOT_DEPENDENCY_REPORT"; then
+    echo "[ROOT] incompatible shared-library dependencies for $ROOT_LIBDIR/libCore.so" >&2
+    grep -E 'not found|no version information available' <<< "$ROOT_DEPENDENCY_REPORT" >&2 || true
+    echo "[ROOT] use a matching LCG view (LCG_110a for ROOT 6.40.04), not LCG_110" >&2
+    exit 2
+fi
 echo "[ROOT] version=$("$ROOT_CONFIG_BIN" --version) config=$ROOT_CONFIG_BIN" >&2
 echo "[ROOT] bin=$ROOT_BINDIR lib=$ROOT_LIBDIR" >&2
 
