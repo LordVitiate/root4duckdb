@@ -158,9 +158,18 @@ bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t 
 bool ResolveSerializedNestedMemberWiseStride(const SerializedReadPlan& plan, int32_t element_version,
                                               uint64_t& bytes_per_element, std::string& failure_reason);
 
+/// Version-specific fixed layout is owned by a single worker-local reader.
+struct SerializedNestedFixedLayoutCache
+{
+    int32_t element_version = -1;
+    SerializedEntryLayout layout;
+    uint64_t element_stride = 0;
+};
+
 /// Reads a nested member-wise vector directly by checked serialized byte offsets.
 bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedReadPlan& plan, size_t entry_size,
                                        uint64_t outer_count, uint64_t max_values_per_entry,
+                                       SerializedNestedFixedLayoutCache& layout_cache,
                                        std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
                                        std::string& failure_reason, bool collect_indices);
 
@@ -267,6 +276,7 @@ class SerializedBasketReader
     std::shared_ptr<SerializedBasketCache> shared_basket_cache;
     int32_t resolved_element_version = -1;
     std::vector<int> resolved_prefix_element_ids;
+    SerializedNestedFixedLayoutCache nested_fixed_layout_cache;
     std::unique_ptr<TStreamerInfoActions::TActionSequence> cached_action_sequence;
     uint32_t observed_memberwise_header = 0;
     SerializedReadCounters counters;
