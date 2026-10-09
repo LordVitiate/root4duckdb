@@ -293,6 +293,13 @@ def _check_production(validator: ProjectValidator) -> None:
         "config.options.allow_unsigned_extensions",
     ))
 
+    cmake = validator.read("CMakeLists.txt")
+    validator.require_tokens("standalone smoke host linkage", cmake, (
+        "target_link_libraries(root_loadable_extension_smoke PRIVATE",
+        "duckdb_static",
+        "dummy_static_extension_loader",
+    ))
+
     native_concurrency = validator.read("test/fixtures/concurrent_root_load.cpp")
     validator.require_tokens("concurrent ROOT load isolation", native_concurrency, (
         "ROOT4DUCKDB_TEST_EXTENSION_PATH",
