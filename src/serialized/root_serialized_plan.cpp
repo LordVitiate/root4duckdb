@@ -935,10 +935,16 @@ bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t elemen
     const auto scalar_width = PrimitiveTypeSize(target_type);
     const auto target_kind = ClassifySerializedPrimitive(PrimitiveBaseType(target_type));
     const auto planned_kind = ClassifySerializedPrimitive(plan.value_type);
+    const bool identical_primitive = target_kind == planned_kind && scalar_width == plan.value_bytes;
+    // The serialized reader emits floating values as doubles. Decoding an
+    // on-file Float_t into a dictionary Double_t is therefore lossless and
+    // mirrors ROOT's widening conversion without treating four bytes as eight.
+    const bool widen_float = target_kind == SerializedPrimitiveKind::FLOAT32 &&
+                             planned_kind == SerializedPrimitiveKind::FLOAT64 && scalar_width == 4 &&
+                             plan.value_bytes == 8;
     if (!array_length || !scalar_width || target_width != array_length * scalar_width ||
-        target_kind == SerializedPrimitiveKind::UNKNOWN || target_kind != planned_kind ||
-        scalar_width != plan.value_bytes || array_length != plan.fixed_array_length ||
-        dimensions != plan.array_dimensions)
+        target_kind == SerializedPrimitiveKind::UNKNOWN || (!identical_primitive && !widen_float) ||
+        array_length != plan.fixed_array_length || dimensions != plan.array_dimensions)
     {
         // ROOT schema evolution can legitimately change persistent primitive
         // types. Do not reinterpret those bytes as the dictionary's type.
@@ -954,10 +960,12 @@ bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t elemen
         return false;
     }
     resolved_layout = {};
-    resolved_layout.value_type = plan.value_type;
-    resolved_layout.primitive_kind = planned_kind;
+    // Decode using the actual on-file primitive width. The resulting
+    // RootPrimitiveValue is promoted to the SQL column's bound type later.
+    resolved_layout.value_type = PrimitiveBaseType(target_type);
+    resolved_layout.primitive_kind = target_kind;
     resolved_layout.bytes_before_value_per_element = static_cast<uint32_t>(prefix_width);
-    resolved_layout.value_bytes = plan.value_bytes;
+    resolved_layout.value_bytes = scalar_width;
     resolved_layout.fixed_array_length = plan.fixed_array_length;
     resolved_layout.array_dimensions = plan.array_dimensions;
     resolved_layout.index_depth = static_cast<size_t>(plan.index_depth);
