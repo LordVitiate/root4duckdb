@@ -356,6 +356,12 @@ Alternatively:
 ./build-root4duckdb.sh --root /path/to/root --jobs 4
 ```
 
+### ROOT dictionary duplicates or incompatible PCRE2
+
+On lxplus, use one matching LCG view, compiler and ROOT runtime. The current CERN test pairing is LCG_110a with ROOT 6.40.04. Mixing LCG_110 with ROOT 6.40.04 can select a PCRE2 library that lacks the versioned symbols required by libCore.so, causing link failures. A conflicting ROOT runtime or PCM search path can also produce duplicate TClassTable registrations.
+
+Use the detected build environment where possible, or explicitly set ROOT4DUCKDB_LCG_VIEW and ROOT4DUCKDB_ROOT_CONFIG. The integration runner checks the CMake-pinned ROOT library and reports incompatible shared-library dependencies before building fixtures.
+
 ### `GLIBCXX_... not found`
 
 The executable is being started with a different `libstdc++` from the one used during compilation.
