@@ -456,6 +456,8 @@ InsertionOrderPreservingMap<string> RootScanExplain::Running(TableFunctionDynami
     {
         result["ROOT Opened Files"] = std::to_string(global.file_scheduler->OpenedFiles());
         result["ROOT Completed Files"] = std::to_string(global.file_scheduler->CompletedFiles());
+        result["ROOT Completed File Read Calls"] = std::to_string(global.file_scheduler->PhysicalReadCalls());
+        result["ROOT Completed File Read Bytes"] = std::to_string(global.file_scheduler->PhysicalReadBytes());
         result["ROOT Skipped Files"] = std::to_string(global.file_scheduler->SkippedFiles());
         result["ROOT Unavailable Files"] = std::to_string(global.file_scheduler->UnavailableFiles());
         result["ROOT Failed Files"] = std::to_string(global.file_scheduler->FailedFiles());
