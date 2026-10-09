@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_DIR="$PROJECT_DIR/test/fixtures"
-WORK_DIR="${ROOT4DUCKDB_TEST_DIR:-$PROJECT_DIR/test/.tmp-root-lakehouse}"
+WORK_DIR="${ROOT4DUCKDB_TEST_DIR:-$(mktemp -d /tmp/root4duckdb-it.XXXXXX)}"
 DUCKDB_BIN="${DUCKDB_BIN:-$PROJECT_DIR/build/release/duckdb}"
 
 if [[ ! -x "$DUCKDB_BIN" ]]; then
@@ -116,7 +116,11 @@ print(match.group(0))
 ' "$label"
 }
 
-rm -rf "$WORK_DIR"
+if [[ -e "$WORK_DIR" && ! -d "$WORK_DIR" ]] ||
+   [[ -d "$WORK_DIR" && -n "$(find "$WORK_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "integration test directory must be empty: $WORK_DIR" >&2
+    exit 2
+fi
 mkdir -p "$WORK_DIR/data" "$WORK_DIR/build" "$WORK_DIR/legacy"
 
 ROOT_REGISTERED="$("$DUCKDB_BIN" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")"
