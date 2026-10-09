@@ -58,9 +58,6 @@ BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBra
         }
         result.branches.emplace_back(branch->GetName());
     }
-    // StopCacheLearningPhase may immediately prefetch selected baskets.
-    // Restrict that first fill to the scheduled event interval instead of
-    // reading the whole TTree to fill a large configured cache.
     if (cache_bytes)
     {
         const auto total_entries = static_cast<uint64_t>(std::max<Long64_t>(0, tree->GetEntries()));
@@ -85,16 +82,11 @@ void EnableAllBranches(TTree* tree, uint64_t cache_bytes)
     tree->SetBranchStatus("*", 1);
     const auto cache_size = static_cast<Long64_t>(
         std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max())));
-    // This may follow a narrow serialized projection whose cache has already
-    // stopped learning. Recreate that cache to learn the object reader's real
-    // branch accesses rather than retaining the stale narrow branch list.
     tree->SetCacheSize(0);
     if (cache_size)
     {
         tree->SetCacheSize(cache_size);
     }
-    // AddBranchToCache("*") would disable learning and include every branch.
-
 }
 
 } // namespace duckdb::rootlake
