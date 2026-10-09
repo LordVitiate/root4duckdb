@@ -45,19 +45,19 @@ BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBra
         return result;
     }
     tree->SetBranchStatus("*", 0);
-    if (cache_bytes)
-    {
-        tree->SetCacheSize(static_cast<Long64_t>(
-            std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max()))));
-    }
+    const auto cache_size = static_cast<Long64_t>(
+        std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max())));
+    tree->SetCacheSize(cache_size);
     for (auto* branch : branches)
     {
         tree->SetBranchStatus(branch->GetName(), 1);
-        tree->AddBranchToCache(branch, true);
+        if (cache_bytes)
+        {
+            tree->AddBranchToCache(branch, true);
+        }
         result.branches.emplace_back(branch->GetName());
     }
-    // The requested branches are already known. End ROOT's learning phase so
-    // TTreeCache can begin prefetching without sampling the first entries.
+    // Explicit projection: all required physical branches are known.
     if (cache_bytes)
     {
         tree->StopCacheLearningPhase();
@@ -73,14 +73,13 @@ void EnableAllBranches(TTree* tree, uint64_t cache_bytes)
         return;
     }
     tree->SetBranchStatus("*", 1);
-    if (cache_bytes)
-    {
-        tree->SetCacheSize(static_cast<Long64_t>(
-            std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max()))));
-    }
-    // In object fallback the actual branch-use pattern is not known here.
-    // Keep ROOT's adaptive learning instead of eagerly prefetching the tree.
-    tree->AddBranchToCache("*", true);
+    const auto cache_size = static_cast<Long64_t>(
+        std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max())));
+    tree->SetCacheSize(cache_size);
+    // AddBranchToCache("*") disables learning and prefetches every branch.
+    // Object fallback cannot predict which branches ROOT will touch. Leave
+    // cache learning active and let real basket reads select the branches.
+
 }
 
 } // namespace duckdb::rootlake
