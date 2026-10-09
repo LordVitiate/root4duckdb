@@ -34,16 +34,41 @@ if [[ -z "$ROOT_CONFIG_BIN" || ! -x "$ROOT_CONFIG_BIN" ]]; then
     exit 2
 fi
 ROOT_CONFIG_BIN="$(readlink -f "$ROOT_CONFIG_BIN")"
-ROOT_LIBDIR="$("$ROOT_CONFIG_BIN" --libdir)"
+ROOT_LIBDIR="$(readlink -f "$("$ROOT_CONFIG_BIN" --libdir)")"
 ROOT_BINDIR="$("$ROOT_CONFIG_BIN" --bindir)"
+ROOT_INCDIR="$("$ROOT_CONFIG_BIN" --incdir)"
 if [[ ! -x "$ROOT_BINDIR/rootcling" || ! -f "$ROOT_LIBDIR/libCore.so" ]]; then
     echo "ROOT tools or libraries are missing from $ROOT_BINDIR / $ROOT_LIBDIR" >&2
     exit 2
 fi
+
+root_library_directory_compatible() {
+    local candidate="$1" library
+    for library in libCore.so libRIO.so libTree.so libHist.so libCling.so libMathCore.so; do
+        if [[ -e "$candidate/$library" &&
+              "$(readlink -f "$candidate/$library")" != "$(readlink -f "$ROOT_LIBDIR/$library")" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+ROOT_RUNTIME_PATH="$ROOT_LIBDIR"
+IFS=: read -r -a existing_runtime_paths <<< "${LD_LIBRARY_PATH:-}"
+for runtime_path in "${existing_runtime_paths[@]}"; do
+    [[ -n "$runtime_path" && "$runtime_path" != "$ROOT_LIBDIR" ]] || continue
+    if root_library_directory_compatible "$runtime_path"; then
+        ROOT_RUNTIME_PATH+=":$runtime_path"
+    else
+        echo "[ROOT] ignoring conflicting library directory: $runtime_path" >&2
+    fi
+done
 export ROOTSYS="$("$ROOT_CONFIG_BIN" --prefix)"
 export ROOT4DUCKDB_ROOT_CONFIG="$ROOT_CONFIG_BIN"
-export LD_LIBRARY_PATH="$ROOT_LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export ROOT_LIBRARY_PATH="$ROOT_LIBDIR${ROOT_LIBRARY_PATH:+:$ROOT_LIBRARY_PATH}"
+export PATH="$ROOT_BINDIR:$PATH"
+export LD_LIBRARY_PATH="$ROOT_RUNTIME_PATH"
+export ROOT_LIBRARY_PATH="$ROOT_LIBDIR"
+export ROOT_INCLUDE_PATH="$ROOT_INCDIR:$FIXTURE_DIR"
 echo "[ROOT] version=$("$ROOT_CONFIG_BIN" --version) config=$ROOT_CONFIG_BIN" >&2
 echo "[ROOT] bin=$ROOT_BINDIR lib=$ROOT_LIBDIR" >&2
 
@@ -91,6 +116,7 @@ source "$PROJECT_DIR/scripts/lib/fixtures.sh"
 CXX_BIN="${CXX:-c++}"
 build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX_BIN" "$ROOT_CONFIG_BIN"
 validate_fixture_runtime "$WORK_DIR/build/make_fixture"
+echo "[ROOT] fixture dictionary=$WORK_DIR/build/libTestEvent_rdict.pcm" >&2
 "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
 
 # In-process concurrency regression: independent DuckDB databases load ROOT
