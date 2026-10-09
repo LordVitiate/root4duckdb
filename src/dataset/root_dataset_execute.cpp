@@ -138,7 +138,8 @@ void DatasetScanExecutor::OpenTaskFile(const DatasetBindData& bind, DatasetGloba
     local.open_schema = task.schema_id;
 }
 
-void DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size) const
+void DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size,
+                                                 DatasetGlobalState& global) const
 {
     if (!file || !size)
     {
@@ -148,7 +149,13 @@ void DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, ui
     while (size)
     {
         const auto chunk = static_cast<Int_t>(std::min<uint64_t>(size, max_chunk));
-        file->ReadBufferAsync(static_cast<Long64_t>(offset), chunk);
+        global.prefetch_hint_calls.fetch_add(1);
+        global.prefetch_hint_bytes.fetch_add(static_cast<uint64_t>(chunk));
+        // ROOT uses kTRUE to report an unsupported or failed async hint.
+        if (file->ReadBufferAsync(static_cast<Long64_t>(offset), chunk))
+        {
+            global.prefetch_hint_rejections.fetch_add(1);
+        }
         offset += static_cast<uint64_t>(chunk);
         size -= static_cast<uint64_t>(chunk);
     }
@@ -210,7 +217,7 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
             for (idx_t index = prefetch_begin; index < prefetch_end; ++index)
             {
                 const auto& next = global.tasks[index];
-                PrefetchPhysicalRange(local.file.get(), next.physical_offset, next.compressed_size);
+                PrefetchPhysicalRange(local.file.get(), next.physical_offset, next.compressed_size, global);
             }
             local.next_prefetch_task_in_group = prefetch_end;
         }
@@ -697,6 +704,9 @@ InsertionOrderPreservingMap<string> DatasetScanExplain::Running(TableFunctionDyn
     result["Stop Requested"] = global.stop_requested.load() ? "true" : "false";
     result["Opened ROOT Files"] = std::to_string(global.opened_files.load());
     result["Reused Open Files"] = std::to_string(global.reused_open_files.load());
+    result["Prefetch Hint Calls"] = std::to_string(global.prefetch_hint_calls.load());
+    result["Prefetch Hint Rejections"] = std::to_string(global.prefetch_hint_rejections.load());
+    result["Prefetch Hint Bytes"] = std::to_string(global.prefetch_hint_bytes.load());
     result["GetEntry Calls"] = std::to_string(global.get_entry_calls.load());
     result["Serialized Entry Calls"] = std::to_string(global.serialized_entry_calls.load());
     result["Serialized Values"] = std::to_string(global.serialized_values.load());
