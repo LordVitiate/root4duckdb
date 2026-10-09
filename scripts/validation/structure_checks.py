@@ -169,8 +169,20 @@ def _check_iceberg_build(validator: ProjectValidator) -> None:
     validator.require_tokens("build-root4duckdb.sh", root_build, (
         "scripts/check-iceberg.sh",
         "scripts/package-release.sh",
-        "libiceberg_bundle.so",
-        "libiceberg_sql_catalog.so",
+        "Unexpected direct ROOT/Iceberg dependency",
+        "ROOT extension: 6/6 public functions registered",
+    ))
+
+    extension_config = validator.read("extension_config.cmake")
+    validator.require_tokens("bootstrap isolation", extension_config, (
+        "ROOT4DUCKDB_RUNTIME_BOOTSTRAP",
+        "DONT_LINK",
+    ))
+    root_cmake = validator.read("CMakeLists.txt")
+    validator.require_tokens("Iceberg target linkage", root_cmake, (
+        "root4duckdb_use_shared_iceberg",
+        "root4duckdb_embed_static_iceberg",
+        "cmake/RootBootstrap.cmake",
     ))
 
 
