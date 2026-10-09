@@ -372,7 +372,7 @@ SELECT '${SNAPSHOT_ID}' AS snapshot_id,
 COMMIT;
 SQL
 
-MALLOC_CHECK_=3 "$DUCKDB_BIN" :memory: < "$SQL_FILE"
+MALLOC_CHECK_=3 "$DUCKDB_BIN" -bail :memory: < "$SQL_FILE"
 write_status committed "native Iceberg generation ${SNAPSHOT_ID} is visible"
 trap - EXIT INT TERM
 rm -f "$SQL_FILE"
