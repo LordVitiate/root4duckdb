@@ -940,8 +940,17 @@ bool ResolveSerializedFixedLayout(const SerializedReadPlan& plan, int32_t elemen
         scalar_width != plan.value_bytes || array_length != plan.fixed_array_length ||
         dimensions != plan.array_dimensions)
     {
-        failure_reason = "projected fixed member changed type or shape in serialized element version " +
-                         std::to_string(element_version);
+        // ROOT schema evolution can legitimately change persistent primitive
+        // types. Do not reinterpret those bytes as the dictionary's type.
+        failure_reason = "projected fixed member changed persistent type or shape in serialized element version " +
+                         std::to_string(element_version) + " (field=" + plan.projected_member_name +
+                         ", on_file_type=" + target_type + ", dictionary_type=" + plan.value_type +
+                         ", on_file_scalar_bytes=" + std::to_string(scalar_width) +
+                         ", dictionary_scalar_bytes=" + std::to_string(plan.value_bytes) +
+                         ", on_file_array_length=" + std::to_string(array_length) +
+                         ", dictionary_array_length=" + std::to_string(plan.fixed_array_length) +
+                         ", on_file_rank=" + std::to_string(dimensions.size()) +
+                         ", dictionary_rank=" + std::to_string(plan.array_dimensions.size()) + ")";
         return false;
     }
     resolved_layout = {};
