@@ -15,7 +15,7 @@ class TestBase : public TObject
 {
   public:
     Int_t inherited = 0;
-    ClassDef(TestBase, 1);
+    ClassDefOverride(TestBase, 1);
 };
 
 enum class TestKind : Int_t
@@ -105,7 +105,7 @@ class TestEvent : public TestBase
     std::vector<UInt_t> header;
     std::vector<std::vector<std::pair<Double_t, Int_t>>> nestedPairs;
 
-    ClassDef(TestEvent, 8);
+    ClassDefOverride(TestEvent, 8);
 };
 
 #endif
