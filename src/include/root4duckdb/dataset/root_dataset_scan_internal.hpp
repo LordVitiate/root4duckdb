@@ -165,6 +165,9 @@ struct DatasetGlobalState final : public GlobalTableFunctionState
     std::atomic<idx_t> completed_tasks{0};
     std::atomic<uint64_t> opened_files{0};
     std::atomic<uint64_t> reused_open_files{0};
+    std::atomic<uint64_t> prefetch_hint_calls{0};
+    std::atomic<uint64_t> prefetch_hint_rejections{0};
+    std::atomic<uint64_t> prefetch_hint_bytes{0};
     std::atomic<uint64_t> get_entry_calls{0};
     std::atomic<uint64_t> serialized_entry_calls{0};
     std::atomic<uint64_t> serialized_values{0};
@@ -265,7 +268,7 @@ class DatasetScanExecutor final
     void SyncSerializedCounters(DatasetLocalState& local, DatasetGlobalState& global) const;
     void OpenTaskFile(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local,
                       const RootBasketTask& task) const;
-    void PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size) const;
+    void PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size, DatasetGlobalState& global) const;
     bool ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local) const;
     bool PassesPathPredicates(const DatasetBindData& bind, const DatasetLocalState& local, void* object) const;
     bool LoadNextEntry(const DatasetBindData& bind, DatasetLocalState& local, DatasetGlobalState& global) const;
