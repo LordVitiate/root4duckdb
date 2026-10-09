@@ -10,13 +10,24 @@ if [[ ! -x "$DUCKDB_BIN" ]]; then
     DISCOVERED_DUCKDB="$(find "$PROJECT_DIR/build/release" -type f -name duckdb -perm -111 2>/dev/null | head -n 1 || true)"
     [[ -n "$DISCOVERED_DUCKDB" ]] && DUCKDB_BIN="$DISCOVERED_DUCKDB"
 fi
-ROOT_CONFIG_BIN="${ROOT4DUCKDB_ROOT_CONFIG:-}"
 CMAKE_CACHE="$PROJECT_DIR/build/release/CMakeCache.txt"
-if [[ -z "$ROOT_CONFIG_BIN" && -r "$CMAKE_CACHE" ]]; then
-    ROOT_CONFIG_BIN="$(sed -n 's/^ROOT4DUCKDB_ROOT_CONFIG_EXECUTABLE:[^=]*=//p' "$CMAKE_CACHE" | head -n 1)"
+CACHED_ROOT_CONFIG=""
+if [[ -r "$CMAKE_CACHE" ]]; then
+    CACHED_ROOT_CONFIG="$(sed -n 's/^ROOT4DUCKDB_ROOT_CONFIG_EXECUTABLE:[^=]*=//p' "$CMAKE_CACHE" | head -n 1)"
 fi
+ROOT_CONFIG_BIN="${ROOT4DUCKDB_ROOT_CONFIG:-${CACHED_ROOT_CONFIG:-}}"
 if [[ -z "$ROOT_CONFIG_BIN" ]]; then
     ROOT_CONFIG_BIN="$(command -v root-config || true)"
+fi
+if [[ -n "$CACHED_ROOT_CONFIG" && -n "${ROOT4DUCKDB_ROOT_CONFIG:-}" ]]; then
+    compiled_root="$("$CACHED_ROOT_CONFIG" --libdir)"
+    requested_root="$("$ROOT4DUCKDB_ROOT_CONFIG" --libdir)"
+    if [[ "$(readlink -f "$compiled_root/libCore.so")" != "$(readlink -f "$requested_root/libCore.so")" ]]; then
+        echo "integration test ROOT differs from the ROOT used by CMake" >&2
+        echo "CMake ROOT: $CACHED_ROOT_CONFIG" >&2
+        echo "Environment ROOT: $ROOT4DUCKDB_ROOT_CONFIG" >&2
+        exit 2
+    fi
 fi
 if [[ -z "$ROOT_CONFIG_BIN" || ! -x "$ROOT_CONFIG_BIN" ]]; then
     echo "missing required ROOT configuration executable: $ROOT_CONFIG_BIN" >&2
@@ -33,6 +44,8 @@ export ROOTSYS="$("$ROOT_CONFIG_BIN" --prefix)"
 export ROOT4DUCKDB_ROOT_CONFIG="$ROOT_CONFIG_BIN"
 export LD_LIBRARY_PATH="$ROOT_LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export ROOT_LIBRARY_PATH="$ROOT_LIBDIR${ROOT_LIBRARY_PATH:+:$ROOT_LIBRARY_PATH}"
+echo "[ROOT] version=$("$ROOT_CONFIG_BIN" --version) config=$ROOT_CONFIG_BIN" >&2
+echo "[ROOT] bin=$ROOT_BINDIR lib=$ROOT_LIBDIR" >&2
 
 validate_fixture_runtime() {
     local executable="$1" library actual expected
