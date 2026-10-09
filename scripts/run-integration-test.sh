@@ -10,12 +10,43 @@ if [[ ! -x "$DUCKDB_BIN" ]]; then
     DISCOVERED_DUCKDB="$(find "$PROJECT_DIR/build/release" -type f -name duckdb -perm -111 2>/dev/null | head -n 1 || true)"
     [[ -n "$DISCOVERED_DUCKDB" ]] && DUCKDB_BIN="$DISCOVERED_DUCKDB"
 fi
-for executable in root-config rootcling; do
-    if ! command -v "$executable" >/dev/null 2>&1; then
-        echo "missing required executable: $executable" >&2
-        exit 2
-    fi
-done
+ROOT_CONFIG_BIN="${ROOT4DUCKDB_ROOT_CONFIG:-}"
+CMAKE_CACHE="$PROJECT_DIR/build/release/CMakeCache.txt"
+if [[ -z "$ROOT_CONFIG_BIN" && -r "$CMAKE_CACHE" ]]; then
+    ROOT_CONFIG_BIN="$(sed -n 's/^ROOT4DUCKDB_ROOT_CONFIG_EXECUTABLE:[^=]*=//p' "$CMAKE_CACHE" | head -n 1)"
+fi
+if [[ -z "$ROOT_CONFIG_BIN" ]]; then
+    ROOT_CONFIG_BIN="$(command -v root-config || true)"
+fi
+if [[ -z "$ROOT_CONFIG_BIN" || ! -x "$ROOT_CONFIG_BIN" ]]; then
+    echo "missing required ROOT configuration executable: $ROOT_CONFIG_BIN" >&2
+    exit 2
+fi
+ROOT_CONFIG_BIN="$(readlink -f "$ROOT_CONFIG_BIN")"
+ROOT_LIBDIR="$("$ROOT_CONFIG_BIN" --libdir)"
+ROOT_BINDIR="$("$ROOT_CONFIG_BIN" --bindir)"
+if [[ ! -x "$ROOT_BINDIR/rootcling" || ! -f "$ROOT_LIBDIR/libCore.so" ]]; then
+    echo "ROOT tools or libraries are missing from $ROOT_BINDIR / $ROOT_LIBDIR" >&2
+    exit 2
+fi
+export ROOTSYS="$("$ROOT_CONFIG_BIN" --prefix)"
+export ROOT4DUCKDB_ROOT_CONFIG="$ROOT_CONFIG_BIN"
+export LD_LIBRARY_PATH="$ROOT_LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export ROOT_LIBRARY_PATH="$ROOT_LIBDIR${ROOT_LIBRARY_PATH:+:$ROOT_LIBRARY_PATH}"
+
+validate_fixture_runtime() {
+    local executable="$1" library actual expected
+    for library in libCore.so libRIO.so libTree.so; do
+        actual="$(ldd "$executable" | awk -v library="$library" '$1 == library {print $3; exit}')"
+        expected="$(readlink -f "$ROOT_LIBDIR/$library")"
+        if [[ -z "$actual" || ! -e "$actual" || "$(readlink -f "$actual")" != "$expected" ]]; then
+            echo "ROOT runtime mismatch for $executable: $library" >&2
+            echo "Expected: $expected" >&2
+            echo "Resolved: ${actual:-missing}" >&2
+            return 2
+        fi
+    done
+}
 if [[ ! -x "$DUCKDB_BIN" ]]; then
     echo "DuckDB shell not found: $DUCKDB_BIN" >&2
     exit 2
@@ -45,7 +76,8 @@ mkdir -p "$WORK_DIR/data" "$WORK_DIR/build" "$WORK_DIR/legacy"
 # shellcheck source=lib/fixtures.sh
 source "$PROJECT_DIR/scripts/lib/fixtures.sh"
 CXX_BIN="${CXX:-c++}"
-build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX_BIN"
+build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX_BIN" "$ROOT_CONFIG_BIN"
+validate_fixture_runtime "$WORK_DIR/build/make_fixture"
 "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
 
 # In-process concurrency regression: independent DuckDB databases load ROOT
@@ -60,7 +92,8 @@ timeout -k 5s 180s "$WORK_DIR/build/concurrent_root_load" \
     "$WORK_DIR/data/a.root" "$WORK_DIR/build/libTestEvent.so" \
     "$WORK_DIR/build/concurrent-index"
 
-build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" LegacyTestEvent make_legacy_fixture "$CXX_BIN"
+build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" LegacyTestEvent make_legacy_fixture "$CXX_BIN" "$ROOT_CONFIG_BIN"
+validate_fixture_runtime "$WORK_DIR/build/make_legacy_fixture"
 
 "$WORK_DIR/build/make_legacy_fixture" "$WORK_DIR/legacy/legacy.root"
 printf '%s\n' "$WORK_DIR/data/a.root" "$WORK_DIR/data/b.root" > "$WORK_DIR/data/two-files.list"
