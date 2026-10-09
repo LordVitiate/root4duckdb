@@ -265,6 +265,16 @@ def _check_production(validator: ProjectValidator) -> None:
         "v1.4.5",
     ))
 
+    native_concurrency = validator.read("test/fixtures/concurrent_root_load.cpp")
+    validator.require_tokens("concurrent ROOT load isolation", native_concurrency, (
+        "ROOT4DUCKDB_TEST_EXTENSION_PATH",
+        "RootLoadSQL()",
+        "QuoteSQL(extension_path)",
+    ))
+    validator.require_tokens("concurrent ROOT load invocation", validator.read("scripts/run-integration-test.sh"), (
+        'ROOT4DUCKDB_TEST_EXTENSION_PATH="${ROOT_EXTENSION:-}"',
+    ))
+
     integration = validator.read("scripts/run-integration-test.sh")
     validator.require_tokens("integration coverage", integration, (
         "reader_mode := 'serialized'",
