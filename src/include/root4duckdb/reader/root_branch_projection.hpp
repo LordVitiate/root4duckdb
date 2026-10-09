@@ -2,6 +2,7 @@
 #define ROOT4DUCKDB_READER_ROOT_BRANCH_PROJECTION_HPP
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -19,8 +20,10 @@ struct BranchProjectionResult
     std::vector<std::string> branches;
 };
 
-/// Enables proven ancestors; callers validate once against object reading.
-BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes);
+/// Enables proven ancestors; bound entry ranges limit speculative basket prefetch.
+BranchProjectionResult ApplyBranchProjection(
+    TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes, uint64_t entry_begin = 0,
+    uint64_t entry_end = std::numeric_limits<uint64_t>::max());
 
 /// Restores all branches and configures the optional tree cache.
 void EnableAllBranches(TTree* tree, uint64_t cache_bytes = 0);
