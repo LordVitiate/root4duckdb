@@ -260,10 +260,13 @@ def _check_production(validator: ProjectValidator) -> None:
         'root_cxx11_abi=',
         '_GLIBCXX_USE_CXX11_ABI',
         '_GLIBCXX_RELEASE',
-        '[ERROR] ROOT/Cling and compiler use incompatible libstdc++ ABI settings.',
+        '[ERROR] ROOT/Cling and compiler use different C++11 string ABIs.',
+        '[WARN] ROOT/Cling and compiler use different libstdc++ header major versions.',
+        'CXX11_ABI matches; required symbols and runtime were checked.',
     ))
-    validator.reject_tokens("obsolete ROOT header date gate", build_script, (
+    validator.reject_tokens("obsolete ROOT header version ABI gate", build_script, (
         '[ERROR] ROOT/Cling and compiler use different C++ headers.',
+        '[ERROR] ROOT/Cling and compiler use incompatible libstdc++ ABI settings.',
     ))
 
     package = validator.read("scripts/package-release.sh")
