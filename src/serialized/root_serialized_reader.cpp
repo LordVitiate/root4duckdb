@@ -52,6 +52,7 @@ SerializedBasketReader& SerializedBasketReader::operator=(SerializedBasketReader
     shared_basket_cache = std::move(other.shared_basket_cache);
     resolved_element_version = other.resolved_element_version;
     resolved_prefix_element_ids = std::move(other.resolved_prefix_element_ids);
+    nested_fixed_layout_cache = std::move(other.nested_fixed_layout_cache);
     cached_action_sequence = std::move(other.cached_action_sequence);
     observed_memberwise_header = other.observed_memberwise_header;
     counters = other.counters;
@@ -64,6 +65,7 @@ SerializedBasketReader& SerializedBasketReader::operator=(SerializedBasketReader
     other.leaf_scratch_capacity = 0;
     other.leaf_make_class = false;
     other.resolved_element_version = -1;
+    other.nested_fixed_layout_cache = {};
     other.observed_memberwise_header = 0;
     other.counters = {};
     return *this;
@@ -184,6 +186,7 @@ void SerializedBasketReader::Reset() noexcept
     shared_basket_cache.reset();
     resolved_element_version = -1;
     resolved_prefix_element_ids.clear();
+    nested_fixed_layout_cache = {};
     cached_action_sequence.reset();
     observed_memberwise_header = 0;
     counters = {};
@@ -502,7 +505,8 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
         if (plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER))
         {
             if (DecodeSerializedNestedFixedColumn(buffer, plan, entry_size, outer_count, max_values_per_entry,
-                                                  values, flat_indices, failure_reason, collect_indices))
+                                                  nested_fixed_layout_cache, values, flat_indices, failure_reason,
+                                                  collect_indices))
             {
                 RootDebug("SERIALIZED.NESTED_FIXED_OFFSET",
                           "path=" + plan.logical_path + " values=" + std::to_string(values.size()));
