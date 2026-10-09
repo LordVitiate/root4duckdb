@@ -18,6 +18,11 @@ DUCKDB="$PROJECT_DIR/build/release/duckdb"
 # shellcheck disable=SC1090
 source "$ICEBERG_ENV"
 
+if [[ -n "${TMPDIR:-}" ]]; then
+    mkdir -p -- "$TMPDIR"
+    [[ -w "$TMPDIR" ]] || { echo "[ERROR] TMPDIR is not writable: $TMPDIR" >&2; exit 1; }
+fi
+
 CXX="$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "$CACHE" | head -1)"
 [[ -x "$CXX" ]] || { echo "[ERROR] Invalid cached compiler: $CXX" >&2; exit 1; }
 
