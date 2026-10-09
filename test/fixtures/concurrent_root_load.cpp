@@ -71,6 +71,46 @@ bool ExecuteSQL(duckdb_connection connection, const std::string& sql, bool requi
     return true;
 }
 
+bool OpenTestDatabase(duckdb_database& database, std::string& error)
+{
+    const char* extension_path = std::getenv("ROOT4DUCKDB_TEST_EXTENSION_PATH");
+    if (!extension_path || !*extension_path)
+    {
+        if (duckdb_open(":memory:", &database) == DuckDBSuccess)
+        {
+            return true;
+        }
+        error = "could not create DuckDB database";
+        return false;
+    }
+
+    duckdb_config config = nullptr;
+    if (duckdb_create_config(&config) != DuckDBSuccess)
+    {
+        error = "could not create DuckDB test configuration";
+        return false;
+    }
+    if (duckdb_set_config(config, "allow_unsigned_extensions", "true") != DuckDBSuccess)
+    {
+        duckdb_destroy_config(&config);
+        error = "could not allow unsigned ROOT extension in DuckDB test configuration";
+        return false;
+    }
+
+    char* open_error = nullptr;
+    const auto status = duckdb_open_ext(":memory:", &database, config, &open_error);
+    duckdb_destroy_config(&config);
+    if (status != DuckDBSuccess)
+    {
+        error = open_error ? open_error : "could not create DuckDB database";
+    }
+    if (open_error)
+    {
+        duckdb_free(open_error);
+    }
+    return status == DuckDBSuccess;
+}
+
 bool OpenConnection(duckdb_database database, duckdb_connection& connection, std::string& error)
 {
     if (duckdb_connect(database, &connection) == DuckDBSuccess)
@@ -97,12 +137,9 @@ bool RunIndependentDatabases(const TestQueries& queries)
                                  duckdb_database database = nullptr;
                                  duckdb_connection connection = nullptr;
                                  std::string error;
-                                 if (duckdb_open(":memory:", &database) != DuckDBSuccess)
-                                 {
-                                     error = "could not create independent DuckDB database";
-                                 }
-                                 else if (OpenConnection(database, connection, error) &&
-                                          ExecuteSQL(connection, RootLoadSQL(), false, error))
+                                 if (OpenTestDatabase(database, error) &&
+                                     OpenConnection(database, connection, error) &&
+                                     ExecuteSQL(connection, RootLoadSQL(), false, error))
                                  {
                                      for (int iteration = 0; iteration < scans_per_worker; ++iteration)
                                      {
@@ -371,13 +408,13 @@ bool RunPhastConcurrency(int argc, char** argv)
     const std::string modes[] = {"object", "auto", "serialized"};
 
     duckdb_database database = nullptr;
-    if (duckdb_open(":memory:", &database) != DuckDBSuccess)
+    std::string error;
+    if (!OpenTestDatabase(database, error))
     {
-        std::cerr << "could not create shared DuckDB database\n";
+        std::cerr << "could not create shared DuckDB database: " << error << '\n';
         return false;
     }
     duckdb_connection bootstrap = nullptr;
-    std::string error;
     const bool initialized = OpenConnection(database, bootstrap, error) &&
                              ExecuteSQL(bootstrap, RootLoadSQL(), false, error);
     if (!initialized)
@@ -531,13 +568,13 @@ int main(int argc, char** argv)
     }
 
     duckdb_database database = nullptr;
-    if (duckdb_open(":memory:", &database) != DuckDBSuccess)
+    std::string error;
+    if (!OpenTestDatabase(database, error))
     {
-        std::cerr << "could not open shared DuckDB database\n";
+        std::cerr << "could not open shared DuckDB database: " << error << '\n';
         return 1;
     }
     duckdb_connection bootstrap = nullptr;
-    std::string error;
     const bool initialized = OpenConnection(database, bootstrap, error) &&
                              ExecuteSQL(bootstrap, RootLoadSQL(), false, error);
     if (bootstrap)
