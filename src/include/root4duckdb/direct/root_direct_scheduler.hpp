@@ -41,8 +41,9 @@ class RootDirectFileScheduler
     void RecordUnavailable(const RootDirectFileTask& task, uint32_t attempts, uint64_t elapsed_us);
     /// Records a file-level scan failure.
     void RecordFailure(const RootDirectFileTask& task, const std::string& message);
-    /// Records successful completion and elapsed scan time.
-    void RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us);
+    /// Records a finished file's scan time and physical I/O counters.
+    void RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us, uint64_t read_calls,
+                        uint64_t read_bytes);
     /// Tracks schema reuse across source files.
     void ObserveSchema(const std::string& fingerprint);
     /// Captures time to the first materialized output row.
@@ -54,6 +55,8 @@ class RootDirectFileScheduler
     uint64_t RetriedOpens() const;
     uint64_t OpenTimeUs() const;
     uint64_t CompletedFiles() const;
+    uint64_t PhysicalReadCalls() const;
+    uint64_t PhysicalReadBytes() const;
     uint64_t SkippedFiles() const;
     uint64_t SchemaVariants() const;
     uint64_t SchemaPlanReuses() const;
@@ -73,6 +76,8 @@ class RootDirectFileScheduler
     std::atomic<uint64_t> retried_opens_{0};
     std::atomic<uint64_t> open_time_us_{0};
     std::atomic<uint64_t> completed_files_{0};
+    std::atomic<uint64_t> physical_read_calls_{0};
+    std::atomic<uint64_t> physical_read_bytes_{0};
     std::atomic<uint64_t> skipped_files_{0};
     std::atomic<uint64_t> schema_plan_reuses_{0};
     std::atomic<uint64_t> first_row_us_{0};
