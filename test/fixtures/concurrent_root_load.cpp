@@ -3,6 +3,7 @@
 #include <atomic>
 #include <barrier>
 #include <cstdint>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <fstream>
 #include <iostream>
@@ -15,6 +16,18 @@ namespace
 {
 
 constexpr int WORKER_COUNT = 8;
+
+std::string QuoteSQL(const std::string& value);
+
+std::string RootLoadSQL()
+{
+    const char* extension_path = std::getenv("ROOT4DUCKDB_TEST_EXTENSION_PATH");
+    if (!extension_path || !*extension_path)
+    {
+        return "LOAD root";
+    }
+    return "LOAD " + QuoteSQL(extension_path);
+}
 
 struct TestQueries
 {
@@ -89,7 +102,7 @@ bool RunIndependentDatabases(const TestQueries& queries)
                                      error = "could not create independent DuckDB database";
                                  }
                                  else if (OpenConnection(database, connection, error) &&
-                                          ExecuteSQL(connection, "LOAD root", false, error))
+                                          ExecuteSQL(connection, RootLoadSQL(), false, error))
                                  {
                                      for (int iteration = 0; iteration < scans_per_worker; ++iteration)
                                      {
@@ -366,7 +379,7 @@ bool RunPhastConcurrency(int argc, char** argv)
     duckdb_connection bootstrap = nullptr;
     std::string error;
     const bool initialized = OpenConnection(database, bootstrap, error) &&
-                             ExecuteSQL(bootstrap, "LOAD root", false, error);
+                             ExecuteSQL(bootstrap, RootLoadSQL(), false, error);
     if (!initialized)
     {
         std::cerr << "PHAST LOAD failed: " << error << '\n';
@@ -526,7 +539,7 @@ int main(int argc, char** argv)
     duckdb_connection bootstrap = nullptr;
     std::string error;
     const bool initialized = OpenConnection(database, bootstrap, error) &&
-                             ExecuteSQL(bootstrap, "LOAD root", false, error);
+                             ExecuteSQL(bootstrap, RootLoadSQL(), false, error);
     if (bootstrap)
     {
         duckdb_disconnect(&bootstrap);
