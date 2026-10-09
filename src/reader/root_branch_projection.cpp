@@ -9,7 +9,8 @@
 namespace duckdb::rootlake
 {
 
-BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes)
+BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes,
+                                             uint64_t entry_begin, uint64_t entry_end)
 {
     BranchProjectionResult result;
     if (!tree)
@@ -57,9 +58,18 @@ BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBra
         }
         result.branches.emplace_back(branch->GetName());
     }
-    // Explicit projection: all required physical branches are known.
+    // StopCacheLearningPhase may immediately prefetch selected baskets.
+    // Restrict that first fill to the scheduled event interval instead of
+    // reading the whole TTree to fill a large configured cache.
     if (cache_bytes)
     {
+        const auto total_entries = static_cast<uint64_t>(std::max<Long64_t>(0, tree->GetEntries()));
+        const auto begin = std::min(entry_begin, total_entries);
+        const auto end = std::min(entry_end, total_entries);
+        if (begin < end)
+        {
+            tree->SetCacheEntryRange(static_cast<Long64_t>(begin), static_cast<Long64_t>(end));
+        }
         tree->StopCacheLearningPhase();
     }
     result.applied = true;
