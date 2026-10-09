@@ -146,20 +146,25 @@ bool DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, ui
         return false;
     }
     constexpr uint64_t max_chunk = static_cast<uint64_t>(std::numeric_limits<Int_t>::max());
+    constexpr uint64_t max_offset = static_cast<uint64_t>(std::numeric_limits<Long64_t>::max());
     while (size)
     {
-        const auto chunk = static_cast<Int_t>(std::min<uint64_t>(size, max_chunk));
+        const auto chunk_bytes = std::min<uint64_t>(size, max_chunk);
+        if (offset > max_offset || chunk_bytes > max_offset - offset)
+        {
+            global.prefetch_hint_rejections.fetch_add(1);
+            return false;
+        }
+        const auto chunk = static_cast<Int_t>(chunk_bytes);
         global.prefetch_hint_calls.fetch_add(1);
-        global.prefetch_hint_bytes.fetch_add(static_cast<uint64_t>(chunk));
-        // kTRUE means that the transport rejected or cannot provide this hint.
-        // An ordinary ROOT basket read still works and is the correctness path.
+        global.prefetch_hint_bytes.fetch_add(chunk_bytes);
         if (file->ReadBufferAsync(static_cast<Long64_t>(offset), chunk))
         {
             global.prefetch_hint_rejections.fetch_add(1);
             return false;
         }
-        offset += static_cast<uint64_t>(chunk);
-        size -= static_cast<uint64_t>(chunk);
+        offset += chunk_bytes;
+        size -= chunk_bytes;
     }
     return true;
 }
@@ -202,8 +207,6 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
             global.skipped_entries.fetch_add((local.current_task.entry_begin - old_begin) +
                                              (old_end - local.current_task.entry_end));
         }
-        // Prefetch hints are tied to the current TFile. A newly opened ROOT
-        // context cannot reuse hints submitted through the previous handle.
         const bool new_file_context = !local.file || local.open_uri != local.current_task.root_uri ||
                                       local.open_schema != local.current_task.schema_id;
         OpenTaskFile(bind, global, local, local.current_task);
