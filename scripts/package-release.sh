@@ -8,7 +8,10 @@ OUTPUT_DIR="${ROOT4DUCKDB_RELEASE_DIR:-$PROJECT_DIR/dist}"
 EXTENSION="$BUILD_DIR/extension/root/root.duckdb_extension"
 LOADABLE_SMOKE="$BUILD_DIR/extension/root/root_loadable_extension_smoke"
 PLATFORM_FILE="$BUILD_DIR/duckdb_platform_out"
-EXPECTED_DUCKDB_VERSION="${DUCKDB_VERSION:-v1.4.5}"
+EXPECTED_CAPI_VERSION="$(
+    sed -nE 's/^[[:space:]]*build_loadable_extension_capi\(\$\{TARGET_NAME\}[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+).*/v\1.\2.\3/p' \
+        "$PROJECT_DIR/cmake/RootBootstrap.cmake"
+)"
 
 fail() {
     echo "[ERROR] $*" >&2
@@ -98,15 +101,18 @@ IFS=$'\t' read -r \
     fail "Platform metadata mismatch: expected $EXPECTED_PLATFORM, found $platform"
 }
 
-[[ "$duckdb_version" == "$EXPECTED_DUCKDB_VERSION" ]] || {
-    fail "DuckDB metadata mismatch: expected $EXPECTED_DUCKDB_VERSION, found $duckdb_version"
+[[ -n "$EXPECTED_CAPI_VERSION" ]] ||
+    fail "Cannot resolve C API version from RootBootstrap.cmake"
+
+[[ "$duckdb_version" == "$EXPECTED_CAPI_VERSION" ]] || {
+    fail "DuckDB C API metadata mismatch: expected $EXPECTED_CAPI_VERSION, found $duckdb_version"
 }
 
 [[ "$extension_version" == "$EXPECTED_EXTENSION_VERSION" ]] || {
     fail "Extension metadata mismatch: expected $EXPECTED_EXTENSION_VERSION, found $extension_version"
 }
 
-[[ "$abi_type" == "CPP" ]] ||
+[[ "$abi_type" == "C_STRUCT" ]] ||
     fail "Unexpected extension ABI: $abi_type"
 
 dynamic_section="$(readelf -d "$EXTENSION")"
@@ -129,7 +135,7 @@ mapfile -t exports < <(
 )
 
 if ((${#exports[@]} != 1)) ||
-   [[ "${exports[0]:-}" != "root_duckdb_cpp_init" ]]; then
+   [[ "${exports[0]:-}" != "root_init_c_api" ]]; then
     printf '[ERROR] Unexpected exported symbols:\n' >&2
     printf '        %s\n' "${exports[@]:-<none>}" >&2
     exit 1
@@ -196,7 +202,7 @@ safe_root="$(
 )"
 
 bundle_name="root4duckdb-${EXPECTED_EXTENSION_VERSION}"
-bundle_name+="-duckdb-${duckdb_version}"
+bundle_name+="-capi-${duckdb_version}"
 bundle_name+="-${safe_platform}"
 bundle_name+="-root-${safe_root}"
 
@@ -259,8 +265,10 @@ fi
 {
     printf 'ROOT4DUCKDB_VERSION=%s\n' \
         "$EXPECTED_EXTENSION_VERSION"
-    printf 'DUCKDB_VERSION=%s\n' \
+    printf 'DUCKDB_C_API_VERSION=%s\n' \
         "$duckdb_version"
+    printf 'DUCKDB_BUILD_VERSION=%s\n' \
+        "${DUCKDB_VERSION:-v1.5.6}"
     printf 'DUCKDB_PLATFORM=%s\n' \
         "$platform"
     printf 'DUCKDB_EXTENSION_ABI=%s\n' \
