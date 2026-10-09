@@ -280,12 +280,12 @@ fi
     printf 'SOURCE_COMMIT=%s\n' \
         "$SOURCE_COMMIT"
     printf 'COMPILER=%s\n' \
-        "$COMPILER"
+        "$(basename "$COMPILER")"
     printf 'COMPILER_VERSION=%s\n' \
         "$COMPILER_VERSION"
 
-    printf '\nDYNAMIC_DEPENDENCIES\n%s\n' \
-        "$dependencies"
+    printf '\nDYNAMIC_DEPENDENCIES\n'
+    readelf -d "$EXTENSION" | grep '(NEEDED)' || true
 
     printf '\nREQUIRED_SYMBOL_VERSIONS\n'
     readelf --version-info "$EXTENSION" |
