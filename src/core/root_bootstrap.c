@@ -175,13 +175,14 @@ static int canonical_path(const char* path, char* out, size_t out_size, char* er
         return 0;
     }
 
-    if (strlen(resolved) >= out_size)
+    const size_t resolved_length = strlen(resolved);
+    if (!out || resolved_length >= out_size)
     {
         set_message(error, error_size, "resolved path is too long");
         return 0;
     }
 
-    strcpy(out, resolved);
+    memcpy(out, resolved, resolved_length + 1);
     return 1;
 }
 
@@ -191,7 +192,7 @@ static int directory_name(const char* path, char* out, size_t out_size)
     const char* slash;
     size_t length;
 
-    if (!path || !*path)
+    if (!path || !*path || !out)
     {
         return 0;
     }
@@ -208,7 +209,8 @@ static int directory_name(const char* path, char* out, size_t out_size)
         {
             return 0;
         }
-        strcpy(out, "/");
+        out[0] = '/';
+        out[1] = '\0';
         return 1;
     }
 
