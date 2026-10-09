@@ -508,13 +508,18 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
                                                   nested_fixed_layout_cache, values, flat_indices, failure_reason,
                                                   collect_indices))
             {
-                RootDebug("SERIALIZED.NESTED_FIXED_OFFSET",
-                          "path=" + plan.logical_path + " values=" + std::to_string(values.size()));
+                if (counters.entries == 0)
+                {
+                    RootDebug("SERIALIZED.NESTED_FIXED_OFFSET", "path=" + plan.logical_path);
+                }
                 return true;
             }
             const auto offset_reason = failure_reason;
-            RootDebug("SERIALIZED.NESTED_FIXED_FALLBACK",
-                      "path=" + plan.logical_path + " reason=" + offset_reason);
+            if (counters.entries == 0)
+            {
+                RootDebug("SERIALIZED.NESTED_FIXED_FALLBACK",
+                          "path=" + plan.logical_path + " reason=" + offset_reason);
+            }
             buffer.SetBufferOffset(nested_column_start);
             cached_action_sequence.reset();
             SerializedReadPlan selected_plan = plan;
