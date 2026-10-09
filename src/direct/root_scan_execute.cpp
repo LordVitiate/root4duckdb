@@ -445,6 +445,11 @@ InsertionOrderPreservingMap<string> RootScanExplain::Running(TableFunctionDynami
         return result;
     }
     const auto& global = input.global_state->Cast<RootScanGlobalState>();
+    result["ROOT Entry Prune Begin"] = std::to_string(global.entry_lower);
+    result["ROOT Entry Prune End"] =
+        global.entry_upper == std::numeric_limits<uint64_t>::max()
+            ? "unbounded"
+            : std::to_string(global.entry_upper + 1);
     result["Serialized Entry Calls"] = std::to_string(global.serialized_entries.load());
     result["Serialized Values"] = std::to_string(global.serialized_values.load());
     result["Serialized Baskets"] = std::to_string(global.serialized_baskets.load());
