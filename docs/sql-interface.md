@@ -97,7 +97,7 @@ FROM read_root(
 ```
 
 ```text
-event_id | tracks_idx | quality
+entry_id | tracks_idx | quality
 ---------|------------|--------
 929      | 0          | 1.84
 929      | 1          | 3.12
@@ -108,7 +108,7 @@ event_id | tracks_idx | quality
 One SQL index column is added for every variable-size collection level:
 
 ```text
-event_id | particles_idx | vertices_idx | value
+entry_id | particles_idx | vertices_idx | value
 ```
 
 ### Reader modes
@@ -127,7 +127,7 @@ In automatic mode, unsupported or mismatching layouts fall back to the universal
 
 ```sql
 SELECT
-    event_id,
+    entry_id,
     tracks_idx,
     quality
 FROM read_root(
@@ -135,11 +135,11 @@ FROM read_root(
     dictionary := '/data/libExperiment.so',
     path_prefix := '/EventRecord/tracks/quality'
 )
-WHERE event_id >= 929
-  AND event_id < 934;
+WHERE entry_id >= 929
+  AND entry_id < 934;
 ```
 
-Projection pushdown prevents unused logical columns from being materialized. An `event_id` range limits the entries scheduled for reading.
+Projection pushdown prevents unused logical columns from being materialized. An `entry_id` range limits the entries scheduled for reading.
 
 For a compatible serialized layout, an execution profile may show:
 
@@ -165,7 +165,7 @@ FROM read_root(
     '/data/primitive-tree.root',
     path_prefix := '/Events/value'
 )
-WHERE event_id < 100;
+WHERE entry_id < 100;
 ```
 
 Primitive values preserve their signedness and width in the DuckDB schema where a direct mapping exists.
@@ -200,15 +200,15 @@ Multi-file results add two identity columns:
 | `source_id` | `UBIGINT` | Stable zero-based position after input expansion |
 | `source_path` | `VARCHAR` | Resolved ROOT input path |
 
-`event_id` remains the entry number inside one source. The stable identity of a flattened value is therefore:
+`entry_id` remains the entry number inside one source. The stable identity of a flattened value is therefore:
 
 ```text
-source_id + event_id + nested collection indices
+source_id + entry_id + nested collection indices
 ```
 
 A predicate on `source_id` is pushed into the scheduler and prevents unrelated files from being opened.
 
-Remote opens use a bounded retry budget. If one input in a multi-file request remains unavailable, root4duckdb emits an explicit warning, records the failure in profiling counters and continues with the remaining sources.
+Remote opens use a bounded retry budget. If a required input remains unavailable, the query fails instead of silently omitting its rows.
 
 A single exact input remains strict and fails when it cannot be opened. Schema and decoding failures are always strict.
 
