@@ -1,6 +1,5 @@
 #include "root4duckdb/reader/root_path_reader.hpp"
 
-#include "root4duckdb/core/root_debug.hpp"
 #include "root4duckdb/core/root_headers.hpp"
 #include "root4duckdb/core/root_file_opener.hpp"
 #include "root4duckdb/reader/root_branch_projection.hpp"
@@ -9,15 +8,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <utility>
 
-#ifdef __linux__
-#include <dlfcn.h>
-#endif
 
 namespace duckdb::rootlake
 {
@@ -196,33 +190,7 @@ void RootPathReader::Resolve(TTree* tree_p, TBranch* object_branch, TClass* root
     const auto physical = ResolvePhysicalBranch(object_branch, path.fields);
     physical_branch = physical.branch;
     physical_mode = physical.mode;
-    const auto* offset_flag = std::getenv("ROOT4DUCKDB_NESTED_FIXED_OFFSET");
-    if (offset_flag && std::string(offset_flag) == "1")
-    {
-        std::string plan_image = "unresolved";
-#ifdef __linux__
-        const auto function = &BuildSerializedReadPlan;
-        static_assert(sizeof(function) == sizeof(void*));
-        void* function_address = nullptr;
-        std::memcpy(&function_address, &function, sizeof(function_address));
-        Dl_info symbol_info{};
-        if (dladdr(function_address, &symbol_info) != 0 && symbol_info.dli_fname)
-        {
-            plan_image = symbol_info.dli_fname;
-        }
-#endif
-        RootDebug("SERIALIZED.PLAN_DISPATCH", "path=" + path.root_class + "/" + JoinStrings(path.fields, "/") +
-                                                   " image=" + plan_image +
-                                                   " physical_mode=" + physical_mode);
-    }
     serialized_plan = BuildSerializedReadPlan(root_class, path, physical_branch);
-    if (offset_flag && std::string(offset_flag) == "1")
-    {
-        RootDebug("SERIALIZED.PLAN_RESULT", "projection=" +
-                                                 (serialized_plan.Supported()
-                                                      ? std::string(SerializedProjectionName(serialized_plan.Kind()))
-                                                      : "rejected"));
-    }
 }
 
 RootPathReaderStartResult RootPathReader::StartSerialized(RootPathReaderOptions options_p, std::string rejection_reason)
