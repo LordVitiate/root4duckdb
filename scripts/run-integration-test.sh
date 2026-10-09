@@ -212,7 +212,7 @@ if ! MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     cat "$WORK_DIR/tobject-discovery.log" >&2
     exit 1
 fi
-if [[ "$(head -n 1 "$WORK_DIR/tobject-discovery.log")" != "true" ]] ||
+if ! grep -qx true "$WORK_DIR/tobject-discovery.log" ||
    grep -Eq '(^|,)(fUniqueID|fBits)(,|$)' "$WORK_DIR/tobject-discovery.log" ||
    ! grep -q '^run,' "$WORK_DIR/tobject-discovery.log"; then
     echo "TObject semantic discovery schema is incorrect" >&2
