@@ -6,7 +6,10 @@
   <a href="https://github.com/LordVitiate/root4duckdb/releases/latest">
     <img alt="Latest release" src="https://img.shields.io/github/v/release/LordVitiate/root4duckdb?sort=semver&display_name=release&style=flat">
   </a>
-  <img alt="DuckDB" src="https://img.shields.io/badge/DuckDB-v1.4.5-FFF000">
+  <a href="https://deepwiki.com/LordVitiate/root4duckdb/">
+    <img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg">
+  </a>
+  <img alt="DuckDB dev" src="https://img.shields.io/badge/DuckDB-dev%20v1.5.6-FFF000">
   <img alt="CERN ROOT" src="https://img.shields.io/badge/CERN%20ROOT-6.40-2c6aa6">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
@@ -16,6 +19,8 @@
 
 ## Latest news 🔥
 
+- **2026-10-09 — Fixes driven by real analysis.** Production ROOT data exposed schema-evolution and projection issues; fixes were checked against the object reader. EOS/FUSE cache range pruning and physical I/O diagnostics were also improved.
+- **2026-10-09 — DuckDB 1.5.6 migration.** The development source tree and build scripts now target DuckDB 1.5.6; published release binaries retain their own version requirements.
 - **2026-08-25 — Relation-level ROOT queries and parallel decoding.** `read_root()` now selects objects and collections as SQL relations, exposes their immediate fields as columns. Both object and serialized readers now parallelize single-file scans, while multi-column serialized reads share basket decoding work across sibling fields. Exact remote [ROOT URIs](https://root.cern/doc/master/classTS3WebFile.html), including `s3://` and `davix://`, use the common ROOT input layer.
 - **2026-08-13 — ROOT histograms in SQL.** `TH1`, `TH2`, `TH3` and profile objects are available as relational views.
 - **2026-08-11 — 10.7 billion values on one node.** A direct query scanned 117 remote ROOT files in 10 min 44 s at 16.6 million values/s with approximately 1.3 GiB peak memory. [Methodology and results](https://github.com/LordVitiate/root4duckdb/blob/main/docs/direct-multifile-scan.md).
@@ -29,6 +34,8 @@ The current binary release requires:
 - Linux x86-64 with glibc 2.34 or newer;
 - DuckDB 1.4.5;
 - a compatible CERN ROOT 6.40 installation.
+
+The `dev` source build instead targets **DuckDB 1.5.6**. Use its pinned build scripts; do not mix extension binaries from different DuckDB versions.
 
 Download the extension:
 
@@ -57,13 +64,13 @@ SELECT *
 FROM read_root('events.root');
 ```
 
-Read a primitive branch:
+Read a primitive branch from a TTree:
 
 ```sql
-SELECT *
+SELECT energy
 FROM read_root(
     'events.root',
-    path_prefix := '/energy'
+    path_prefix := '/Events'
 );
 ```
 
