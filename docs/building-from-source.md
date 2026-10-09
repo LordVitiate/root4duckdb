@@ -55,7 +55,7 @@ A ROOT prefix can also be passed directly to the extension build:
 
 The source archive does not need Git submodule metadata.
 
-Prepare the exact DuckDB and extension tool revisions required by the current ROOT4DuckDB release:
+Prepare the pinned DuckDB and extension tool revisions for this source checkout (DuckDB 1.5.6 on `dev`):
 
 ```bash
 ./setup-source-tree.sh
