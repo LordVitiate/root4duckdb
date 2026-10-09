@@ -138,12 +138,12 @@ void DatasetScanExecutor::OpenTaskFile(const DatasetBindData& bind, DatasetGloba
     local.open_schema = task.schema_id;
 }
 
-void DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size,
+bool DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size,
                                                  DatasetGlobalState& global) const
 {
-    if (!file || !size)
+    if (!file)
     {
-        return;
+        return false;
     }
     constexpr uint64_t max_chunk = static_cast<uint64_t>(std::numeric_limits<Int_t>::max());
     while (size)
@@ -151,14 +151,17 @@ void DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, ui
         const auto chunk = static_cast<Int_t>(std::min<uint64_t>(size, max_chunk));
         global.prefetch_hint_calls.fetch_add(1);
         global.prefetch_hint_bytes.fetch_add(static_cast<uint64_t>(chunk));
-        // ROOT uses kTRUE to report an unsupported or failed async hint.
+        // kTRUE means that the transport rejected or cannot provide this hint.
+        // An ordinary ROOT basket read still works and is the correctness path.
         if (file->ReadBufferAsync(static_cast<Long64_t>(offset), chunk))
         {
             global.prefetch_hint_rejections.fetch_add(1);
+            return false;
         }
         offset += static_cast<uint64_t>(chunk);
         size -= static_cast<uint64_t>(chunk);
     }
+    return true;
 }
 
 bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global,
@@ -207,8 +210,9 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
         if (new_file_context)
         {
             local.next_prefetch_task_in_group = task_index;
+            local.prefetch_hints_accepted = true;
         }
-        if (bind.prefetch_ranges)
+        if (bind.prefetch_ranges && local.prefetch_hints_accepted)
         {
             const idx_t available = local.task_group_end - task_index;
             const idx_t lookahead = std::min<idx_t>(available, static_cast<idx_t>(bind.prefetch_depth) + 1);
@@ -217,7 +221,11 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
             for (idx_t index = prefetch_begin; index < prefetch_end; ++index)
             {
                 const auto& next = global.tasks[index];
-                PrefetchPhysicalRange(local.file.get(), next.physical_offset, next.compressed_size, global);
+                if (!PrefetchPhysicalRange(local.file.get(), next.physical_offset, next.compressed_size, global))
+                {
+                    local.prefetch_hints_accepted = false;
+                    break;
+                }
             }
             local.next_prefetch_task_in_group = prefetch_end;
         }
