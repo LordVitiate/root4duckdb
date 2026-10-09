@@ -549,36 +549,46 @@ if command -v ldd >/dev/null 2>&1; then
         fi
     done
 
-    duckdb_dependencies="$(ldd "$DUCKDB_BIN")"
-
-    for component in \
-        libiceberg.so \
-        libiceberg_data.so \
-        libiceberg_bundle.so \
-        libiceberg_sql_catalog.so; do
-        grep -Fq "$component" <<<"$duckdb_dependencies" || {
-            echo "[ERROR] Bundled DuckDB is not linked to $component" >&2
-            exit 1
-        }
-    done
+    # ROOT is built with DONT_LINK in bootstrap mode. The DuckDB host
+    # must not carry another ROOT/Iceberg implementation: the loadable
+    # extension embeds Iceberg and discovers ROOT at load time.
+    if command -v readelf >/dev/null 2>&1; then
+        for artifact in "$DUCKDB_BIN" "$LOADABLE_EXT"; do
+            if readelf -d "$artifact" |
+                grep -E '\\(NEEDED\\)' |
+                grep -Eq 'libiceberg(_data|_bundle|_sql_catalog)?\\.so|lib(Core|RIO|Tree|Hist|Cling)\\.so'; then
+                echo "[ERROR] Unexpected direct ROOT/Iceberg dependency in $artifact" >&2
+                exit 1
+            fi
+        done
+    fi
 fi
 
-echo "[5/6] Smoke testing registered functions"
+echo "[5/6] Smoke testing loadable ROOT extension"
 "$DUCKDB_BIN" -c "SELECT 42 AS root4duckdb_build_ok;"
 
-"$DUCKDB_BIN" <<'SQL'
-SELECT DISTINCT function_name
-FROM duckdb_functions()
-WHERE function_name IN (
-    'read_root',
-    'root_build_index',
-    'root_build_dataset_index',
-    'read_root_dataset',
-    'root_dataset_stats',
-    'root_iceberg_catalog'
-)
-ORDER BY function_name;
-SQL
+# DONT_LINK deliberately leaves the bundled CLI without ROOT functions.
+# Explicitly LOAD the built extension and require all public functions.
+ROOT_EXTENSION_SQL="$(printf '%s' "$LOADABLE_EXT" | sed "s/'/''/g")"
+registered="$(
+    "$DUCKDB_BIN" -unsigned -bail -cmd "LOAD '$ROOT_EXTENSION_SQL';" \
+        -csv -noheader :memory: -c "
+            SELECT count(DISTINCT function_name)
+            FROM duckdb_functions()
+            WHERE function_name IN (
+                'read_root',
+                'root_build_index',
+                'root_build_dataset_index',
+                'read_root_dataset',
+                'root_dataset_stats',
+                'root_iceberg_catalog'
+            );"
+)"
+if [[ "$registered" != "6" ]]; then
+    echo "[ERROR] ROOT loadable extension registered $registered/6 public functions" >&2
+    exit 1
+fi
+echo "[OK] ROOT extension: 6/6 public functions registered"
 
 if ((RUN_TESTS)); then
     echo "[6/6] Running SQL and native integration tests"
