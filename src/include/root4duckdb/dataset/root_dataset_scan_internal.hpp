@@ -223,6 +223,7 @@ struct DatasetLocalState final : public LocalTableFunctionState
     idx_t next_task_in_group = 0;
     idx_t next_prefetch_task_in_group = 0;
     idx_t task_group_end = 0;
+    bool prefetch_hints_accepted = true;
     RootFilterEvaluator filter_evaluator;
 };
 
@@ -268,7 +269,7 @@ class DatasetScanExecutor final
     void SyncSerializedCounters(DatasetLocalState& local, DatasetGlobalState& global) const;
     void OpenTaskFile(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local,
                       const RootBasketTask& task) const;
-    void PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size, DatasetGlobalState& global) const;
+    bool PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size, DatasetGlobalState& global) const;
     bool ClaimTask(const DatasetBindData& bind, DatasetGlobalState& global, DatasetLocalState& local) const;
     bool PassesPathPredicates(const DatasetBindData& bind, const DatasetLocalState& local, void* object) const;
     bool LoadNextEntry(const DatasetBindData& bind, DatasetLocalState& local, DatasetGlobalState& global) const;
