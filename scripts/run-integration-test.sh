@@ -119,20 +119,16 @@ print(match.group(0))
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/data" "$WORK_DIR/build" "$WORK_DIR/legacy"
 
-DUCKDB_INIT="$WORK_DIR/duckdb-init.sql"
-ROOT_REGISTERED="$("$DUCKDB_BIN" -init /dev/null -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")"
-DUCKDB_ARGS=(-init "$DUCKDB_INIT")
-if [[ "$ROOT_REGISTERED" == "true" ]]; then
-    printf '.bail on\n' > "$DUCKDB_INIT"
-elif [[ "$ROOT_REGISTERED" == "false" ]]; then
+ROOT_REGISTERED="$("$DUCKDB_BIN" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")"
+DUCKDB_ARGS=(-bail)
+if [[ "$ROOT_REGISTERED" == "false" ]]; then
     ROOT_EXTENSION="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
     if [[ ! -f "$ROOT_EXTENSION" ]]; then
         echo "ROOT extension is not built: $ROOT_EXTENSION" >&2
         exit 2
     fi
-    printf ".bail on\nLOAD '%s';\n" "$ROOT_EXTENSION" > "$DUCKDB_INIT"
-    DUCKDB_ARGS=(-unsigned -init "$DUCKDB_INIT")
-else
+    DUCKDB_ARGS=(-unsigned -bail -cmd "LOAD '$ROOT_EXTENSION';")
+elif [[ "$ROOT_REGISTERED" != "true" ]]; then
     echo "unable to determine ROOT registration in $DUCKDB_BIN: $ROOT_REGISTERED" >&2
     exit 2
 fi
@@ -140,7 +136,6 @@ if [[ "$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: -c "SELECT co
     echo "read_root was not registered in DuckDB CLI" >&2
     exit 2
 fi
-
 
 # shellcheck source=lib/fixtures.sh
 source "$PROJECT_DIR/scripts/lib/fixtures.sh"
@@ -212,7 +207,7 @@ if ! MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     cat "$WORK_DIR/tobject-discovery.log" >&2
     exit 1
 fi
-if ! grep -qx true "$WORK_DIR/tobject-discovery.log" ||
+if [[ "$(head -n 1 "$WORK_DIR/tobject-discovery.log")" != "true" ]] ||
    grep -Eq '(^|,)(fUniqueID|fBits)(,|$)' "$WORK_DIR/tobject-discovery.log" ||
    ! grep -q '^run,' "$WORK_DIR/tobject-discovery.log"; then
     echo "TObject semantic discovery schema is incorrect" >&2
