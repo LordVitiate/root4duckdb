@@ -49,6 +49,16 @@ uint64_t RootDirectFileScheduler::CompletedFiles() const
     return completed_files_.load();
 }
 
+uint64_t RootDirectFileScheduler::PhysicalReadCalls() const
+{
+    return physical_read_calls_.load();
+}
+
+uint64_t RootDirectFileScheduler::PhysicalReadBytes() const
+{
+    return physical_read_bytes_.load();
+}
+
 uint64_t RootDirectFileScheduler::SkippedFiles() const
 {
     return skipped_files_.load();
@@ -117,9 +127,12 @@ void RootDirectFileScheduler::RecordFailure(const RootDirectFileTask& task, cons
     failures_.push_back(task.path + ": " + message);
 }
 
-void RootDirectFileScheduler::RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us)
+void RootDirectFileScheduler::RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us,
+                                             uint64_t read_calls, uint64_t read_bytes)
 {
     completed_files_.fetch_add(1);
+    physical_read_calls_.fetch_add(read_calls);
+    physical_read_bytes_.fetch_add(read_bytes);
     const std::lock_guard<std::mutex> lock(mutex_);
     if (elapsed_us > slowest_file_us_)
     {
