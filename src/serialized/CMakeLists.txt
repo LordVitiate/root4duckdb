@@ -3,6 +3,7 @@ list(APPEND ROOT4DUCKDB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/root_serialized_codec.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_serialized_nested_codec.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_serialized_plan.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/root_serialized_plan_layout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_reader_mode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_serialized_deep.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_serialized_basket_cache.cpp

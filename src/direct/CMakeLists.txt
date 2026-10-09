@@ -4,6 +4,7 @@ list(APPEND ROOT4DUCKDB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_bind.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_filter_pruning.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_state.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_file_manager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_special_modes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_modes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_scan_execute.cpp
