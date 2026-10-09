@@ -20,7 +20,6 @@ struct BranchProjectionResult
     std::vector<std::string> branches;
 };
 
-/// Enables proven ancestors; bound entry ranges limit speculative basket prefetch.
 BranchProjectionResult ApplyBranchProjection(
     TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes, uint64_t entry_begin = 0,
     uint64_t entry_end = std::numeric_limits<uint64_t>::max());
