@@ -55,9 +55,7 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(root_loadable_extension_smoke EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/test/loadable_extension_smoke.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/root_text.cpp
     )
-    target_include_directories(root_loadable_extension_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/include)
     target_link_libraries(root_loadable_extension_smoke PRIVATE duckdb_static)
     target_compile_features(root_loadable_extension_smoke PRIVATE cxx_std_17)
     set_target_properties(root_loadable_extension_smoke PROPERTIES
