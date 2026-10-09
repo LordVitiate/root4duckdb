@@ -281,6 +281,18 @@ def _check_production(validator: ProjectValidator) -> None:
         "v1.4.5",
     ))
 
+    smoke_host = validator.read("test/loadable_extension_smoke.cpp")
+    validator.require_tokens("standalone loadable C API smoke", smoke_host, (
+        '#include "duckdb.h"',
+        'duckdb_set_config(config, "allow_unsigned_extensions", "true")',
+        "duckdb_open_ext(",
+        "duckdb_query(",
+        "duckdb_value_int64(",
+    ))
+    validator.reject_tokens("removed C++ DuckDB config member", smoke_host, (
+        "config.options.allow_unsigned_extensions",
+    ))
+
     native_concurrency = validator.read("test/fixtures/concurrent_root_load.cpp")
     validator.require_tokens("concurrent ROOT load isolation", native_concurrency, (
         "ROOT4DUCKDB_TEST_EXTENSION_PATH",
