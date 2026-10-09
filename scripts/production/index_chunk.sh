@@ -42,6 +42,7 @@ done
     echo "required: --plan --chunk-id --output-root --project-dir" >&2
     exit 2
 }
+[[ "$CHUNK_ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "invalid chunk id: $CHUNK_ID" >&2; exit 2; }
 DUCKDB_BIN="${DUCKDB_BIN:-$PROJECT_DIR/build/release/duckdb}"
 [[ -x "$DUCKDB_BIN" ]] || { echo "DuckDB binary not found: $DUCKDB_BIN" >&2; exit 2; }
 [[ -f "$PLAN" ]] || { echo "plan not found: $PLAN" >&2; exit 2; }
@@ -123,7 +124,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-rm -rf "$STAGE"
+[[ ! -e "$STAGE" && ! -L "$STAGE" ]] || { echo "staging directory already exists: $STAGE" >&2; exit 2; }
 mkdir -p "$STAGE/index" "$STAGE/temp"
 write_status running "worker started"
 
@@ -262,8 +263,8 @@ mkdir -p "$STAGE/index/_worker"
 for artifact in chunk.json inputs.uris index.sql status.csv duckdb.out duckdb.err resource-usage.json; do
     [[ -f "$STAGE/$artifact" ]] && cp -p "$STAGE/$artifact" "$STAGE/index/_worker/$artifact"
 done
-rm -rf "$FINAL_DIR"
-mv "$STAGE/index" "$FINAL_DIR"
+[[ ! -e "$FINAL_DIR" && ! -L "$FINAL_DIR" ]] || { echo "chunk output already exists: $FINAL_DIR" >&2; exit 1; }
+mv -T "$STAGE/index" "$FINAL_DIR"
 rm -rf "$STAGE"
 write_status succeeded "immutable chunk snapshot complete"
 trap - EXIT INT TERM
