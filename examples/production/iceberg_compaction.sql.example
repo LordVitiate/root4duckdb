@@ -10,4 +10,4 @@
 -- Do not use DELETE+INSERT as a generic substitute: that can duplicate or
 -- temporarily expose data depending on the catalog. Use the catalog's native
 -- rewrite/expire procedures and validate them in a test namespace first.
-SELECT 'configure native catalog compaction here' AS required_action;
+SELECT error('Catalog-specific compaction is not configured; provide native maintenance SQL');
