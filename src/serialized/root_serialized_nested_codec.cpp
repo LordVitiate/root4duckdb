@@ -342,23 +342,36 @@ bool DecodeNestedObjectWise(TBufferFile& buffer, const SerializedReadPlan& plan,
 
 bool DecodeNestedMemberWise(TBufferFile& buffer, const SerializedReadPlan& plan, uint64_t frame_end,
                             uint64_t outer_count, uint64_t max_values_per_entry,
-                            SerializedPrimitiveKind primitive_kind, std::vector<RootPrimitiveValue>& values,
+                            SerializedPrimitiveKind primitive_kind, SerializedNestedFixedLayoutCache& layout_cache,
+                            std::vector<RootPrimitiveValue>& values,
                             std::vector<int32_t>& flat_indices, std::string& failure_reason, bool collect_indices)
 {
     // An STL array streamed by ROOT has ONE framed version/header for the
     // entire outer vector's selected member. Each outer element then carries
     // its own element count followed by member-wise PaTPar columns.
     const Version_t element_version = buffer.ReadVersionForMemberWise(plan.nested_element_class);
-    SerializedEntryLayout layout;
-    if (!ResolveSerializedNestedFixedLayout(plan, element_version, layout, failure_reason))
+    if (element_version < 0)
     {
+        failure_reason = "nested member-wise STL has an invalid element version";
         return false;
     }
-    uint64_t element_stride = 0;
-    if (!ResolveSerializedNestedMemberWiseStride(plan, element_version, element_stride, failure_reason))
+    if (layout_cache.element_version != element_version)
     {
-        return false;
+        SerializedEntryLayout resolved_layout;
+        uint64_t resolved_stride = 0;
+        if (!ResolveSerializedNestedFixedLayout(plan, element_version, resolved_layout, failure_reason) ||
+            !ResolveSerializedNestedMemberWiseStride(plan, element_version, resolved_stride, failure_reason))
+        {
+            return false;
+        }
+        // Commit both values together: a failed schema change must never leave
+        // the reader with a half-updated layout.
+        layout_cache.layout = std::move(resolved_layout);
+        layout_cache.element_stride = resolved_stride;
+        layout_cache.element_version = element_version;
     }
+    const auto& layout = layout_cache.layout;
+    const uint64_t element_stride = layout_cache.element_stride;
     if (!layout.value_bytes ||
         plan.fixed_array_length > std::numeric_limits<uint64_t>::max() / layout.value_bytes)
     {
@@ -436,6 +449,7 @@ bool DecodeNestedMemberWise(TBufferFile& buffer, const SerializedReadPlan& plan,
 
 bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedReadPlan& plan, size_t entry_size,
                                        uint64_t outer_count, uint64_t max_values_per_entry,
+                                       SerializedNestedFixedLayoutCache& layout_cache,
                                        std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
                                        std::string& failure_reason, bool collect_indices)
 {
@@ -500,7 +514,8 @@ bool DecodeSerializedNestedFixedColumn(TBufferFile& buffer, const SerializedRead
         if (memberwise && stl_version >= 8)
         {
             decoded = DecodeNestedMemberWise(buffer, plan, frame_end, outer_count, max_values_per_entry,
-                                             primitive_kind, values, flat_indices, failure_reason, collect_indices);
+                                             primitive_kind, layout_cache, values, flat_indices, failure_reason,
+                                             collect_indices);
         }
         else if (!memberwise && stl_version == 9)
         {
