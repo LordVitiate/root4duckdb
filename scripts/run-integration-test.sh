@@ -119,6 +119,29 @@ print(match.group(0))
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/data" "$WORK_DIR/build" "$WORK_DIR/legacy"
 
+DUCKDB_INIT="$WORK_DIR/duckdb-init.sql"
+ROOT_REGISTERED="$("$DUCKDB_BIN" -init /dev/null -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")"
+DUCKDB_ARGS=(-init "$DUCKDB_INIT")
+if [[ "$ROOT_REGISTERED" == "true" ]]; then
+    printf '.bail on\n' > "$DUCKDB_INIT"
+elif [[ "$ROOT_REGISTERED" == "false" ]]; then
+    ROOT_EXTENSION="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
+    if [[ ! -f "$ROOT_EXTENSION" ]]; then
+        echo "ROOT extension is not built: $ROOT_EXTENSION" >&2
+        exit 2
+    fi
+    printf ".bail on\nLOAD '%s';\n" "$ROOT_EXTENSION" > "$DUCKDB_INIT"
+    DUCKDB_ARGS=(-unsigned -init "$DUCKDB_INIT")
+else
+    echo "unable to determine ROOT registration in $DUCKDB_BIN: $ROOT_REGISTERED" >&2
+    exit 2
+fi
+if [[ "$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")" != "true" ]]; then
+    echo "read_root was not registered in DuckDB CLI" >&2
+    exit 2
+fi
+
+
 # shellcheck source=lib/fixtures.sh
 source "$PROJECT_DIR/scripts/lib/fixtures.sh"
 CXX_BIN="${CXX:-c++}"
@@ -163,7 +186,7 @@ FROM read_root(
     path_prefix := '/TestEvent/vecHit/uv'
 );
 SQL
-MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-bind.sql" >/dev/null
+MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/direct-bind.sql" >/dev/null
 
 # TestBase inherits TObject: its bookkeeping fields must not leak into
 # physics-facing semantic discovery or into the automatic SELECT * schema.
@@ -183,7 +206,7 @@ FROM read_root(
     path_prefix := '/TestEvent'
 );
 SQL
-if ! MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if ! MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/tobject-discovery.sql" > "$WORK_DIR/tobject-discovery.log" 2>&1; then
     echo "TObject semantic discovery failed" >&2
     cat "$WORK_DIR/tobject-discovery.log" >&2
@@ -199,7 +222,7 @@ fi
 
 # A scalar relation projected only as entry_id still contains every event.
 # An empty physical projection is not the end of the ROOT tree.
-if ! ID_ONLY_RESULT="$("$DUCKDB_BIN" -csv -noheader :memory: 2>"$WORK_DIR/entry-id-only.log" <<SQL
+if ! ID_ONLY_RESULT="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: 2>"$WORK_DIR/entry-id-only.log" <<SQL
 SELECT count(*) = 3 AND sum(entry_id) = 3
 FROM read_root(
     '$WORK_DIR/data/a.root',
@@ -235,7 +258,7 @@ FROM read_root(
 );
 SQL
 for iteration in 1 2 3 4 5 6 7 8 9 10; do
-    if ! "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/object-mode-repeat.sql" \
+    if ! "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/object-mode-repeat.sql" \
         > "$WORK_DIR/object-mode-repeat.log" 2>&1; then
         echo "Repeated ROOT object-mode scan failed on iteration $iteration" >&2
         cat "$WORK_DIR/object-mode-repeat.log" >&2
@@ -726,7 +749,7 @@ FROM read_root(
 );
 SQL
 
-DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
+DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
 DIRECT_EXPECTED="$(grep -Ec '^(SELECT|WITH)([[:space:]]|$)' "$WORK_DIR/direct-read.sql")"
 DIRECT_PASSED="$(printf '%s\n' "$DIRECT_RESULT" | grep -c '^true$' || true)"
 if [[ "$DIRECT_PASSED" -ne "$DIRECT_EXPECTED" ]] || \
@@ -744,7 +767,7 @@ FROM read_root(
     path_prefix := '/TestEvent/run'
 );
 SQL
-if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/direct-leaf-selector.sql" > "$WORK_DIR/direct-leaf-selector.log" 2>&1; then
     echo "primitive leaf unexpectedly remained a read_root relation selector" >&2
     exit 1
@@ -764,7 +787,7 @@ FROM read_root(
     path_prefix := '/TestEvent'
 );
 SQL
-if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/direct-missing-input.sql" > "$WORK_DIR/direct-missing-input.log" 2>&1; then
     echo "multi-file direct scan silently accepted an unavailable required input" >&2
     cat "$WORK_DIR/direct-missing-input.log" >&2
@@ -788,7 +811,7 @@ FROM read_root(
     path_prefix := '/TestEvent'
 );
 SQL
-if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/direct-first-missing.sql" > "$WORK_DIR/direct-first-missing.log" 2>&1; then
     echo "representative-file bind silently skipped a required missing ROOT input" >&2
     exit 1
@@ -801,7 +824,7 @@ fi
 
 # The normal scan must select the contiguous std::vector<T> path, and disabling
 # it must produce byte-for-byte identical SQL output through the proxy fallback.
-ROOT4DUCKDB_DEBUG=1 ROOT4DUCKDB_DEBUG_VERBOSE=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+ROOT4DUCKDB_DEBUG=1 ROOT4DUCKDB_DEBUG_VERBOSE=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     > "$WORK_DIR/contiguous.csv" 2> "$WORK_DIR/contiguous.log" <<SQL
 SELECT entry_id, vecHit_idx, u
 FROM read_root(
@@ -817,7 +840,7 @@ if ! grep -q '\[VECTOR.CONTIGUOUS\].*vector<TestHit>' "$WORK_DIR/contiguous.log"
     cat "$WORK_DIR/contiguous.log" >&2
     exit 1
 fi
-ROOT4DUCKDB_DISABLE_CONTIGUOUS_VECTOR=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+ROOT4DUCKDB_DISABLE_CONTIGUOUS_VECTOR=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     > "$WORK_DIR/proxy-fallback.csv" <<SQL
 SELECT entry_id, vecHit_idx, u
 FROM read_root(
@@ -850,13 +873,13 @@ FROM build_status
 WHERE status = 'OK';
 SQL
 
-BUILD_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/build-index.sql")"
+BUILD_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/build-index.sql")"
 if [[ "$BUILD_RESULT" != "3" ]]; then
     echo "unexpected index build result: $BUILD_RESULT" >&2
     exit 1
 fi
 
-BLOOM_FORMAT_RESULT="$("$DUCKDB_BIN" -csv -noheader :memory: <<SQL
+BLOOM_FORMAT_RESULT="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
 LOAD parquet;
 SELECT count(*) > 0
        AND bool_and(substr(hex(bloom_filter), 1, 8) = '52344246')
@@ -878,7 +901,7 @@ import json,sys
 print("\n".join(sorted(row["source_id"] for row in json.load(open(sys.argv[1]))["files"])))
 PY2
 )"
-ACTUAL_SOURCE_IDS="$("$DUCKDB_BIN" -csv -noheader :memory: <<SQL
+ACTUAL_SOURCE_IDS="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
 LOAD parquet;
 SELECT DISTINCT source_id
 FROM read_root_dataset(
@@ -936,7 +959,7 @@ FROM read_parquet('$WORK_DIR/index_scalar/warehouse/root_index/baskets/data/*.pa
 WHERE filename LIKE '%' || current_root_snapshot() || '-%';
 SQL
 
-SCALAR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/build-scalar-index.sql")"
+SCALAR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/build-scalar-index.sql")"
 if [[ "$SCALAR_RESULT" != $'1\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected scalar index result: $SCALAR_RESULT" >&2
     exit 1
@@ -1004,7 +1027,7 @@ SELECT
       WHERE value = 0.1) AS float_literal_bloom;
 SQL
 
-QUERY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/query.sql")"
+QUERY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/query.sql")"
 if [[ "$QUERY_RESULT" != "5,71.5,9,6,0,5,9,1,6,1" ]]; then
     echo "unexpected scan result: $QUERY_RESULT" >&2
     exit 1
@@ -1054,7 +1077,7 @@ WHERE field_name = 'vertex'
   AND filename LIKE '%' || current_root_snapshot() || '-%';
 SQL
 
-FIXED_ARRAY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/fixed-array.sql")"
+FIXED_ARRAY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/fixed-array.sql")"
 if [[ "$FIXED_ARRAY_RESULT" != $'1\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected fixed-array result: $FIXED_ARRAY_RESULT" >&2
     exit 1
@@ -1103,7 +1126,7 @@ WHERE field_name = 'matrix'
   AND filename LIKE '%' || current_root_snapshot() || '-%';
 SQL
 
-MULTIDIM_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/multidim-array.sql")"
+MULTIDIM_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/multidim-array.sql")"
 if [[ "$MULTIDIM_RESULT" != $'1\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected multidimensional-array result: $MULTIDIM_RESULT" >&2
     exit 1
@@ -1130,7 +1153,7 @@ FROM read_root_dataset(
 );
 SQL
 
-INHERITED_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/inherited.sql")"
+INHERITED_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/inherited.sql")"
 if [[ "$INHERITED_RESULT" != $'1\ntrue' ]]; then
     echo "unexpected inherited-field result: $INHERITED_RESULT" >&2
     exit 1
@@ -1230,7 +1253,7 @@ FROM read_root_dataset(
 );
 SQL
 
-ANCESTOR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/ancestor.sql")"
+ANCESTOR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/ancestor.sql")"
 if [[ "$ANCESTOR_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\n1\ntrue' ]]; then
     echo "unexpected ancestor-fallback result: $ANCESTOR_RESULT" >&2
     exit 1
@@ -1269,7 +1292,7 @@ SELECT (SELECT count(DISTINCT schema_id)
         WHERE filename LIKE '%' || current_root_snapshot() || '-%') >= 2;
 SQL
 
-MIXED_LAYOUT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/mixed-layout.sql")"
+MIXED_LAYOUT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/mixed-layout.sql")"
 if [[ "$MIXED_LAYOUT_RESULT" != $'5\ntrue\ntrue' ]]; then
     echo "unexpected mixed-layout result: $MIXED_LAYOUT_RESULT" >&2
     exit 1
@@ -1294,7 +1317,7 @@ SELECT row_count = 11
        AND compressed_bytes > 0
 FROM root_dataset_stats('$WORK_DIR/index', '/TestEvent/vecHit/u');
 SQL
-LINEAGE_STATS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/lineage-stats.sql")"
+LINEAGE_STATS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/lineage-stats.sql")"
 if [[ "$LINEAGE_STATS_RESULT" != $'true\ntrue' ]]; then
     echo "unexpected lineage/stats result: $LINEAGE_STATS_RESULT" >&2
     exit 1
@@ -1334,7 +1357,7 @@ FROM read_root_dataset(
     entry_selection := '{"$SOURCE_ID_A":{"ranges":[[0,1]],"entries":[2]}}'
 );
 SQL
-ENTRY_SELECTION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/entry-selection.sql")"
+ENTRY_SELECTION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/entry-selection.sql")"
 ENTRY_SELECTION_METRIC="$(profile_metric 'Explicit Entry Selections' <<<"$ENTRY_SELECTION_RESULT" || true)"
 if [[ "$(printf '%s\n' "$ENTRY_SELECTION_RESULT" | head -n 1)" != "true" ]] || \
    [[ "$ENTRY_SELECTION_METRIC" != "1" ]]; then
@@ -1362,7 +1385,7 @@ FROM root_dataset_stats('$WORK_DIR/index', '/TestEvent/vecHit/u');
 SELECT row_count = 11 FROM root_dataset_count('$WORK_DIR/index', '/TestEvent/vecHit/u');
 SELECT non_null_count = 11 FROM root_dataset_non_null_count('$WORK_DIR/index', '/TestEvent/vecHit/u');
 SQL
-LIMITS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/limits-and-aggregates.sql")"
+LIMITS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/limits-and-aggregates.sql")"
 if [[ "$LIMITS_RESULT" != $'true\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected row-limit/aggregate result: $LIMITS_RESULT" >&2
     exit 1
@@ -1380,7 +1403,7 @@ FROM read_root_dataset(
 WHERE event_fk = 2;
 SQL
 
-EVENT_PRUNING_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/event-pruning.sql")"
+EVENT_PRUNING_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/event-pruning.sql")"
 if ! grep -q 'Skipped ROOT Entries' <<<"$EVENT_PRUNING_RESULT"; then
     echo "event-entry pruning metric is absent" >&2
     exit 1
@@ -1404,7 +1427,7 @@ FROM read_root_dataset(
 )
 WHERE value IS NULL;
 SQL
-NULL_PRUNING_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/null-pruning.sql")"
+NULL_PRUNING_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/null-pruning.sql")"
 if [[ "$(printf '%s\n' "$NULL_PRUNING_RESULT" | head -n 1)" != "true" ]]; then
     echo "unexpected IS NULL result: $NULL_PRUNING_RESULT" >&2
     exit 1
@@ -1421,7 +1444,7 @@ FROM read_root_dataset(
 )
 WHERE value IN (12345.0, 23456.0);
 SQL
-IN_BLOOM_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/in-bloom.sql")"
+IN_BLOOM_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/in-bloom.sql")"
 IN_SELECTED_FILES="$(profile_metric 'Selected ROOT Files' <<<"$IN_BLOOM_RESULT" || true)"
 IN_DECODED_VALUES="$(profile_metric 'Decoded Values' <<<"$IN_BLOOM_RESULT" || true)"
 if [[ "$IN_SELECTED_FILES" != "0" || "$IN_DECODED_VALUES" != "0" ]]; then
@@ -1439,7 +1462,7 @@ FROM read_root_dataset(
     dictionary := '$WORK_DIR/build/libTestEvent.so'
 );
 SQL
-METADATA_COUNT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/metadata-count.sql")"
+METADATA_COUNT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/metadata-count.sql")"
 METADATA_ONLY_ROWS="$(profile_metric 'Metadata-only Rows' <<<"$METADATA_COUNT_RESULT" || true)"
 METADATA_DECODED_VALUES="$(profile_metric 'Decoded Values' <<<"$METADATA_COUNT_RESULT" || true)"
 METADATA_TASKS="$(profile_metric 'Coalesced Read Tasks' <<<"$METADATA_COUNT_RESULT" || true)"
@@ -1504,7 +1527,7 @@ FROM read_root_dataset(
 );
 SQL
 
-PUBLICATION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: < "$WORK_DIR/catalog-publication.sql")"
+PUBLICATION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/catalog-publication.sql")"
 PUBLICATION_HEAD="$(printf '%s\n' "$PUBLICATION_RESULT" | head -n 5)"
 if [[ "$PUBLICATION_HEAD" != $'true\ntrue\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected catalog-publication result: $PUBLICATION_RESULT" >&2
@@ -1535,7 +1558,7 @@ FROM read_root_dataset(
     commits_table := 'main.broken_root_commits'
 );
 SQL
-if "$DUCKDB_BIN" -csv -noheader :memory: \
+if "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/missing-commit-ledger.sql" > "$WORK_DIR/missing-commit-ledger.log" 2>&1; then
     echo "ROOT catalog accepted a snapshot without its required commit ledger" >&2
     exit 1
@@ -1560,7 +1583,7 @@ FROM read_root_dataset(
     dictionary := '$WORK_DIR/build/libTestEvent.so'
 );
 SQL
-if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/stale-index-count.sql" > "$WORK_DIR/stale-index-count.log" 2>&1; then
     echo "COUNT(*) accepted stale ROOT index metadata" >&2
     exit 1
@@ -1581,7 +1604,7 @@ FROM read_root_dataset(
 )
 WHERE value IN (-999999.0);
 SQL
-if MALLOC_CHECK_=3 "$DUCKDB_BIN" -csv -noheader :memory: \
+if MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
     < "$WORK_DIR/stale-index-pruning.sql" > "$WORK_DIR/stale-index-pruning.log" 2>&1; then
     echo "pruned dataset scan accepted stale ROOT index metadata" >&2
     exit 1
@@ -1593,7 +1616,7 @@ if ! grep -q 'ROOT file mtime changed after indexing' "$WORK_DIR/stale-index-pru
 fi
 
 # Explicit opt-out remains available for intentional use of stored metadata.
-STALE_OVERRIDE_RESULT="$("$DUCKDB_BIN" -csv -noheader :memory: <<SQL
+STALE_OVERRIDE_RESULT="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
 LOAD parquet;
 SELECT count(*) = 11
 FROM read_root_dataset(
