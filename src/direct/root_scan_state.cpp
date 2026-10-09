@@ -703,9 +703,15 @@ void RootScanFileManager::Reset(RootScanGlobalState& gstate, RootScanLocalState&
     if (completed && local_state.file_active && gstate.file_scheduler)
     {
         const auto elapsed = std::chrono::steady_clock::now() - local_state.file_started;
+        auto* file = local_state.root_file.GetTFile();
+        const uint64_t read_calls =
+            file ? static_cast<uint64_t>(std::max<Long64_t>(0, file->GetReadCalls())) : 0;
+        const uint64_t read_bytes =
+            file ? static_cast<uint64_t>(std::max<Long64_t>(0, file->GetBytesRead())) : 0;
         gstate.file_scheduler->RecordComplete(
             local_state.file_task,
-            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()),
+            read_calls, read_bytes);
     }
     local_state.serialized_columns.clear();
     local_state.cached_results.clear();
