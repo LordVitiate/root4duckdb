@@ -218,6 +218,7 @@ struct DatasetLocalState final : public LocalTableFunctionState
     uint64_t value_entry_id = 0;
     std::string value_source_id;
     idx_t next_task_in_group = 0;
+    idx_t next_prefetch_task_in_group = 0;
     idx_t task_group_end = 0;
     RootFilterEvaluator filter_evaluator;
 };
