@@ -345,6 +345,35 @@ FROM read_root(
     reader_mode := 'serialized',
     raw_validation_entries := 2
 );
+WITH
+uncached AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized',
+        tree_cache_bytes := 0,
+        raw_validation_entries := 0
+    )
+    WHERE entry_id < 2
+),
+cached AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized',
+        tree_cache_bytes := 67108864,
+        raw_validation_entries := 0
+    )
+    WHERE entry_id < 2
+)
+SELECT (SELECT count(*) FROM uncached) > 0
+       AND NOT EXISTS (SELECT * FROM uncached EXCEPT ALL SELECT * FROM cached)
+       AND NOT EXISTS (SELECT * FROM cached EXCEPT ALL SELECT * FROM uncached)
+       AS serialized_cache_range_equivalence_ok;
 SELECT count(*) = 6
        AND abs(sum(uv) - 13.5) < 0.00001
        AND min(vecHit_idx) = 0 AND max(vecHit_idx) = 1
