@@ -243,6 +243,16 @@ def _check_production(validator: ProjectValidator) -> None:
     if "catalog_mode:='external'" not in validator.read("scripts/production/index_chunk.sh"):
         validator.errors.append("production worker does not use explicit external catalog staging")
 
+    build_script = validator.read("build-root4duckdb.sh")
+    validator.require_tokens("bootstrap build smoke test", build_script, (
+        "Unexpected direct ROOT/Iceberg dependency",
+        "ROOT extension: 6/6 public functions registered",
+        '"$DUCKDB_BIN" -unsigned -bail -cmd',
+    ))
+    validator.reject_tokens("obsolete shared Iceberg host requirement", build_script, (
+        "Bundled DuckDB is not linked to",
+    ))
+
     package = validator.read("scripts/package-release.sh")
     validator.require_tokens("C API release packaging", package, (
         "EXPECTED_CAPI_VERSION",
