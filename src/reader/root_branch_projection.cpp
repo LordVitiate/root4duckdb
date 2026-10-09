@@ -75,10 +75,15 @@ void EnableAllBranches(TTree* tree, uint64_t cache_bytes)
     tree->SetBranchStatus("*", 1);
     const auto cache_size = static_cast<Long64_t>(
         std::min<uint64_t>(cache_bytes, static_cast<uint64_t>(std::numeric_limits<Long64_t>::max())));
-    tree->SetCacheSize(cache_size);
-    // AddBranchToCache("*") disables learning and prefetches every branch.
-    // Object fallback cannot predict which branches ROOT will touch. Leave
-    // cache learning active and let real basket reads select the branches.
+    // This may follow a narrow serialized projection whose cache has already
+    // stopped learning. Recreate that cache to learn the object reader's real
+    // branch accesses rather than retaining the stale narrow branch list.
+    tree->SetCacheSize(0);
+    if (cache_size)
+    {
+        tree->SetCacheSize(cache_size);
+    }
+    // AddBranchToCache("*") would disable learning and include every branch.
 
 }
 
