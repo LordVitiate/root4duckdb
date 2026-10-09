@@ -18,7 +18,8 @@ def find_orphans(root: Path, cutoff: float) -> list[Path]:
     return [
         item
         for item in sorted(root.iterdir())
-        if item.name.startswith(".staging-") and item.is_dir() and item.stat().st_mtime <= cutoff
+        if item.name.startswith(".staging-") and item.is_dir() and not item.is_symlink()
+        and item.stat().st_mtime <= cutoff
     ]
 
 
@@ -31,7 +32,11 @@ def main() -> None:
     parser.add_argument("--output")
     args = parser.parse_args()
 
-    root = Path(args.root)
+    if args.older_than_hours <= 0:
+        parser.error("--older-than-hours must be positive")
+    root = Path(args.root).resolve()
+    if root == Path(root.anchor):
+        parser.error("--root must not be a filesystem root")
     orphans = find_orphans(root, time.time() - args.older_than_hours * 3600)
     if args.delete:
         for path in orphans:
