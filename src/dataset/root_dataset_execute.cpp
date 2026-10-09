@@ -167,6 +167,7 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
                 return false;
             }
             local.next_task_in_group = global.task_groups[group_index].begin;
+            local.next_prefetch_task_in_group = local.next_task_in_group;
             local.task_group_end = global.task_groups[group_index].end;
         }
         const auto task_index = local.next_task_in_group++;
@@ -191,16 +192,27 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
             global.skipped_entries.fetch_add((local.current_task.entry_begin - old_begin) +
                                              (old_end - local.current_task.entry_end));
         }
+        // Prefetch hints are tied to the current TFile. A newly opened ROOT
+        // context cannot reuse hints submitted through the previous handle.
+        const bool new_file_context = !local.file || local.open_uri != local.current_task.root_uri ||
+                                      local.open_schema != local.current_task.schema_id;
         OpenTaskFile(bind, global, local, local.current_task);
+        if (new_file_context)
+        {
+            local.next_prefetch_task_in_group = task_index;
+        }
         if (bind.prefetch_ranges)
         {
-            PrefetchPhysicalRange(local.file.get(), local.current_task.physical_offset,
-                                  local.current_task.compressed_size);
-            for (uint32_t ahead = 1; ahead <= bind.prefetch_depth && task_index + ahead < local.task_group_end; ++ahead)
+            const idx_t available = local.task_group_end - task_index;
+            const idx_t lookahead = std::min<idx_t>(available, static_cast<idx_t>(bind.prefetch_depth) + 1);
+            const idx_t prefetch_end = task_index + lookahead;
+            const idx_t prefetch_begin = std::max(task_index, local.next_prefetch_task_in_group);
+            for (idx_t index = prefetch_begin; index < prefetch_end; ++index)
             {
-                const auto& next = global.tasks[task_index + ahead];
+                const auto& next = global.tasks[index];
                 PrefetchPhysicalRange(local.file.get(), next.physical_offset, next.compressed_size);
             }
+            local.next_prefetch_task_in_group = prefetch_end;
         }
         local.current_entry = local.current_task.entry_begin;
         local.values.clear();
