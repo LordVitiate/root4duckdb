@@ -220,7 +220,7 @@ SQL
 MALLOC_CHECK_=3 python3 "$PROJECT_DIR/scripts/production/bounded_exec.py" \
     --rss-limit-bytes "$RSS_HARD_LIMIT_BYTES" \
     --report "$STAGE/resource-usage.json" -- \
-    "$DUCKDB_BIN" :memory: < "$STAGE/index.sql" >"$STAGE/duckdb.out" 2>"$STAGE/duckdb.err"
+    "$DUCKDB_BIN" -bail :memory: < "$STAGE/index.sql" >"$STAGE/duckdb.out" 2>"$STAGE/duckdb.err"
 
 python3 - "$STAGE" "$PLAN" "$CHUNK_ID" <<'PY'
 import csv,hashlib,json,os,pathlib,sys,time
