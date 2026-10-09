@@ -1,8 +1,8 @@
 {
   "format": "root4duckdb-production-config-v1",
   "project_dir": "../..",
-  "workspace": "/tmp/root4duckdb-demo/work",
-  "chunks_dir": "/tmp/root4duckdb-demo/chunks",
+  "workspace": "/data/root4duckdb/work",
+  "chunks_dir": "/data/root4duckdb/chunks",
   "inputs": [
     "/data/events/*.root*"
   ],
