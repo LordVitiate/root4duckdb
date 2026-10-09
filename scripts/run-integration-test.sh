@@ -157,7 +157,8 @@ echo "[ROOT] fixture dictionary=$WORK_DIR/build/libTestEvent_rdict.pcm" >&2
     -L"$PROJECT_DIR/build/release/src" \
     -Wl,-rpath,"$PROJECT_DIR/build/release/src" \
     -lduckdb -ldl -o "$WORK_DIR/build/concurrent_root_load"
-timeout -k 5s 180s "$WORK_DIR/build/concurrent_root_load" \
+ROOT4DUCKDB_TEST_EXTENSION_PATH="${ROOT_EXTENSION:-}" \
+    timeout -k 5s 180s "$WORK_DIR/build/concurrent_root_load" \
     "$WORK_DIR/data/a.root" "$WORK_DIR/build/libTestEvent.so" \
     "$WORK_DIR/build/concurrent-index"
 
