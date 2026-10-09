@@ -270,6 +270,8 @@ def _check_production(validator: ProjectValidator) -> None:
         "ROOT4DUCKDB_TEST_EXTENSION_PATH",
         "RootLoadSQL()",
         "QuoteSQL(extension_path)",
+        'duckdb_set_config(config, "allow_unsigned_extensions", "true")',
+        "duckdb_open_ext(",
     ))
     validator.require_tokens("concurrent ROOT load invocation", validator.read("scripts/run-integration-test.sh"), (
         'ROOT4DUCKDB_TEST_EXTENSION_PATH="${ROOT_EXTENSION:-}"',
