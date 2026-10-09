@@ -20,7 +20,19 @@ TREE="${ROOT4DUCKDB_VERIFY_TREE:-PaEvent}"
   echo "[FAIL] Set ROOT4DUCKDB_VERIFY_ROOT_FILE and ROOT4DUCKDB_VERIFY_DICTIONARY" >&2
   exit 2
 }
-"${DUCKDB_BIN}" <<SQL
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REGISTERED="$("${DUCKDB_BIN}" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name='root_build_dataset_index';")"
+DUCKDB_ARGS=(-bail)
+if [[ "$REGISTERED" == "false" ]]; then
+  ROOT_EXTENSION="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
+  [[ -f "$ROOT_EXTENSION" ]] || { echo "[FAIL] ROOT extension not found: $ROOT_EXTENSION" >&2; exit 2; }
+  ROOT_EXTENSION_SQL="${ROOT_EXTENSION//\'/\'\'}"
+  DUCKDB_ARGS=(-unsigned -bail -cmd "LOAD '$ROOT_EXTENSION_SQL';")
+elif [[ "$REGISTERED" != "true" ]]; then
+  echo "[FAIL] Cannot determine ROOT extension registration: $REGISTERED" >&2
+  exit 2
+fi
+"${DUCKDB_BIN}" "${DUCKDB_ARGS[@]}" :memory: <<SQL
 SET threads=1;
 SET root_max_in_flight_files=1;
 SET root_memory_limit='2GB';
