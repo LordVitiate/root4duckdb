@@ -470,7 +470,8 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
                                                               target->GetTypeName() ? target->GetTypeName() : ""));
     const auto value_width = PrimitiveTypeSize(type);
     if (!array_length || !value_width || array_length > std::numeric_limits<uint64_t>::max() / value_width ||
-        target_width != array_length * value_width || ClassifySerializedPrimitive(type) == SerializedPrimitiveKind::UNKNOWN)
+        target_width != array_length * value_width ||
+        ClassifySerializedPrimitive(type) == SerializedPrimitiveKind::UNKNOWN)
     {
         return reject("fixed member primitive width, dimensions, or encoding are unsupported");
     }
@@ -487,7 +488,8 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     plan.projection_levels = levels;
     plan.projection_levels.front().offset_in_parent = 0;
     plan.projection_levels.front().cumulative_offset = 0;
-    plan.streamer_version = static_cast<uint32_t>(std::max(0, static_cast<int>(outer_element_class->GetClassVersion())));
+    plan.streamer_version =
+        static_cast<uint32_t>(std::max(0, static_cast<int>(outer_element_class->GetClassVersion())));
     plan.value_type = type;
     plan.value_bytes = value_width;
     plan.fixed_array_length = array_length;
@@ -772,7 +774,8 @@ bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t 
     nested_plan.value_bytes = plan.value_bytes;
     nested_plan.fixed_array_length = plan.fixed_array_length;
     nested_plan.array_dimensions = plan.array_dimensions;
-    nested_plan.streamer_version = static_cast<uint32_t>(std::max(0, static_cast<int>(plan.nested_element_class->GetClassVersion())));
+    nested_plan.streamer_version =
+        static_cast<uint32_t>(std::max(0, static_cast<int>(plan.nested_element_class->GetClassVersion())));
     nested_plan.index_depth = 1 + (plan.fixed_array_length > 1 ?
                                    std::max<idx_t>(1, plan.array_dimensions.size()) : 0);
     return ResolveSerializedFixedLayout(nested_plan, element_version, resolved_layout, failure_reason);
