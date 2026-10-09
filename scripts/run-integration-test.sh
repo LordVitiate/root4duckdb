@@ -745,7 +745,7 @@ FROM read_root(
 SQL
 
 DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
-DIRECT_EXPECTED="$(grep -Ec '^(SELECT|WITH)([[:space:]]|$)' "$WORK_DIR/direct-read.sql")"
+DIRECT_EXPECTED="$(grep -Ec '^SELECT([[:space:]]|$)' "$WORK_DIR/direct-read.sql")"
 DIRECT_PASSED="$(printf '%s\n' "$DIRECT_RESULT" | grep -c '^true$' || true)"
 if [[ "$DIRECT_PASSED" -ne "$DIRECT_EXPECTED" ]] || \
         printf '%s\n' "$DIRECT_RESULT" | grep -qv '^true$'; then
