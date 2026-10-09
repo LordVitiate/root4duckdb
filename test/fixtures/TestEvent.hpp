@@ -27,7 +27,7 @@ enum class TestKind : Int_t
 class TestHit
 {
   public:
-    Float_t u = 0.0F;
+    Double_t u = 0.0;
     Float_t uv[2] = {0.0F, 0.0F};
     TestKind kind = TestKind::PRIMARY;
     Long64_t exact_id = 0;
@@ -42,7 +42,7 @@ class TestHit
     TestHit() = default;
     explicit TestHit(Double_t value);
 
-    ClassDef(TestHit, 6);
+    ClassDef(TestHit, 7);
 };
 
 class TestGroup
