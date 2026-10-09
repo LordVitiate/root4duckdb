@@ -171,7 +171,7 @@ ROOT remains external because its I/O runtime and experiment dictionaries must m
 
 Release artifacts are written to `dist/`.
 
-The build requires a C++23 compiler, CMake 3.28+, Python, Ninja and CERN ROOT.
+The build requires a C++23 compiler, CMake 3.25+, Python, Ninja and CERN ROOT.
 
 See [Building from source](docs/building-from-source.md).
 
