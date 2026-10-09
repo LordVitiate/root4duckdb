@@ -53,6 +53,19 @@ def _check_path_reader(validator: ProjectValidator) -> None:
         "EqualDecodedValues",
         "OffsetValueReader::CollectFlat",
     ))
+    nested_codec = validator.read("src/serialized/root_serialized_nested_codec.cpp")
+    validator.reject_tokens("standalone nested codec", nested_codec, (
+        "root_serialized_reader.hpp",
+        "root_headers.hpp",
+        "TBufferFile",
+        "SerializedReadPlan",
+    ))
+    nested_fixed = validator.read("src/serialized/root_serialized_nested_fixed.cpp")
+    validator.require_tokens("ROOT-backed nested decoder", nested_fixed, (
+        "DecodeSerializedNestedFixedColumn",
+        "DecodeNestedMemberWise",
+    ))
+
     codec_utils = validator.read("src/include/root4duckdb/serialized/root_serialized_codec_utils.hpp")
     validator.require_tokens("serialized codec documentation", codec_utils, (
         "/// Reads an unsigned big-endian 16-bit integer.",
