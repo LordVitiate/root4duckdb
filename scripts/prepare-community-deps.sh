@@ -51,4 +51,14 @@ fi
 export CMAKE_PREFIX_PATH="$root_prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export LD_LIBRARY_PATH="$root_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+# Fail on bootstrap/sysroot C API incompatibilities before the expensive Iceberg build.
+if [[ -f "$project_dir/duckdb/src/include/duckdb.h" ]]; then
+    echo "[PRECHECK] Compile ROOT bootstrap against the Community toolchain"
+    "$CC" -std=gnu11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion \
+        -fsyntax-only \
+        -I"$project_dir/duckdb/src/include" \
+        -I"$project_dir/src/include" \
+        "$project_dir/src/core/root_bootstrap.c"
+fi
+
 "$project_dir/build-iceberg.sh" --jobs "${ROOT4DUCKDB_COMMUNITY_JOBS:-2}"
