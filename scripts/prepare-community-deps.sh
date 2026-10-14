@@ -43,7 +43,11 @@ export ROOT4DUCKDB_DISABLE_PINNED_LCG=1
 export ROOT4DUCKDB_ROOT_CONFIG="$root_prefix/bin/root-config"
 export CC="$root_prefix/bin/x86_64-conda-linux-gnu-gcc"
 export CXX="$root_prefix/bin/x86_64-conda-linux-gnu-g++"
-export PATH="$root_prefix/bin:$PATH"
+export PATH="$community_tools:$root_prefix/bin:$PATH"
+if [[ "$(command -v curl)" != "$community_tools/curl" ]]; then
+    echo "[ERROR] vcpkg would not use the isolated HTTPS curl" >&2
+    exit 1
+fi
 export CMAKE_PREFIX_PATH="$root_prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export LD_LIBRARY_PATH="$root_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
