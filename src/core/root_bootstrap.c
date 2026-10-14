@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -28,6 +29,25 @@
 
 #ifndef ROOT4DUCKDB_BUILD_ROOT_VERSION
 #define ROOT4DUCKDB_BUILD_ROOT_VERSION ""
+#endif
+
+/*
+ * Conda-forge's Linux sysroot may expose glibc 2.17 headers, which predate
+ * memfd_create() and <linux/memfd.h>. Use its stable Linux syscall ABI rather
+ * than requiring a newer libc declaration or symbol.
+ */
+#ifndef SYS_memfd_create
+#if defined(__x86_64__) && defined(__LP64__)
+#define SYS_memfd_create 319
+#elif defined(__aarch64__)
+#define SYS_memfd_create 279
+#else
+#error "ROOT4DuckDB bootstrap requires a Linux memfd_create syscall number for this architecture"
+#endif
+#endif
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -869,7 +889,7 @@ static int load_embedded_payload(char* error, size_t error_size)
 
     payload_size = (size_t)(end - begin);
 
-    fd = memfd_create("root4duckdb-payload", MFD_CLOEXEC);
+    fd = (int)syscall(SYS_memfd_create, "root4duckdb-payload", (unsigned int)MFD_CLOEXEC);
 
     if (fd < 0)
     {
