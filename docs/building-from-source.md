@@ -421,3 +421,13 @@ Reduce parallelism:
 ```
 
 The same recommendation applies to Iceberg and incremental extension builds.
+
+## DuckDB Community CI
+
+The official DuckDB distribution workflow is in `.github/workflows/MainDistributionPipeline.yml`. It targets DuckDB 1.5.6 on Linux x86_64 only and is independent of the CERN release-package path.
+
+When DuckDB's Linux container sets `LINUX_CI_IN_DOCKER=1`, `make release` first runs `scripts/prepare-community-deps.sh`. This installs CERN ROOT 6.40.04 and GCC 14 via conda-forge into `.deps/community-root/`, then builds the pinned Apache Iceberg C++ into `.deps/iceberg-cpp/`. The resulting extension uses the runtime bootstrap and keeps CERN ROOT external.
+
+The equivalent opt-in for a manual build is `ROOT4DUCKDB_COMMUNITY_BUILD=1 make release` after preparing the pinned DuckDB and CI-tool sources. No changes to the regular CERN build are needed.
+
+A GitHub Actions build must finish successfully before publishing. Registration is a separate pull request adding `extensions/root/description.yml` to `duckdb/community-extensions`, referring to a public commit of `LordVitiate/root4duckdb`. The private `root4duckdb-dev` repository cannot be used as the Community source. A matching CERN ROOT installation is still required when the user loads the extension.
