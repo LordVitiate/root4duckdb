@@ -8,6 +8,19 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 # Drop extension-ci options unused by the pinned DuckDB build.
 BUILD_FLAGS := $(filter-out -DBENCHMARK_ROOT_DIRECTORY=% -DBUILD_EXTENSION_TEST_DEPS=%,$(BUILD_FLAGS))
 
+.PHONY: duckdb-source-for-ci
+duckdb-source-for-ci:
+	@if [ ! -d duckdb/.git ]; then \
+		if [ -e duckdb ]; then \
+			echo "[ERROR] duckdb/ exists but is not a Git checkout" >&2; exit 1; \
+		fi; \
+		git clone --filter=blob:none --depth 1 --branch "$(DUCKDB_GIT_VERSION)" \
+			https://github.com/duckdb/duckdb.git duckdb; \
+	fi
+
+set_duckdb_version: duckdb-source-for-ci
+
+
 .PHONY: release-package
 release-package: ${EXTENSION_CONFIG_STEP}
 	cmake -E make_directory build/release-package
