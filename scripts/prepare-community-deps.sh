@@ -8,7 +8,27 @@ mamba_bin="$deps_dir/micromamba/bin/micromamba"
 export MAMBA_ROOT_PREFIX="$deps_dir/mamba-root"
 
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { echo "Community build supports Linux x86_64 only" >&2; exit 2; }
-mkdir -p "$deps_dir/micromamba"
+# The DuckDB manylinux CI image ships a working HTTPS curl. Keep it
+# isolated from conda's libcurl: vcpkg invokes curl after LD_LIBRARY_PATH
+# has been extended with the conda environment, which otherwise breaks
+# HTTPS downloads with curl exit code 4.
+system_curl=/usr/bin/curl
+community_tools="$deps_dir/community-tools"
+if [[ ! -x "$system_curl" ]]; then
+    echo "[ERROR] Community build needs $system_curl for vcpkg downloads" >&2
+    exit 1
+fi
+mkdir -p "$deps_dir/micromamba" "$community_tools"
+cat > "$community_tools/curl" <<'EOF'
+#!/bin/sh
+exec /usr/bin/env -u LD_LIBRARY_PATH /usr/bin/curl "$@"
+EOF
+chmod 755 "$community_tools/curl"
+if ! /usr/bin/env -u LD_LIBRARY_PATH "$system_curl" --version |
+        grep -Eq '^Protocols:.*(^|[[:space:]])https([[:space:]]|$)'; then
+    echo "[ERROR] System curl cannot handle HTTPS downloads" >&2
+    exit 1
+fi
 
 if [[ ! -x "$mamba_bin" ]]; then
     curl -fsSL https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C "$deps_dir/micromamba" bin/micromamba
