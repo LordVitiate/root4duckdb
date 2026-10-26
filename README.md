@@ -18,7 +18,7 @@
 </div>
 
 ## Latest news 🔥
-
+- **2026-10-19 — 52.7 billion values from three-level nested ROOT arrays indexed in just 1.5 GiB.** On a **single node** (14vCPU, 8GB RAM), ROOT4DuckDB indexed 3.51 billion track states across 100 ROOT files at **14.3M values/s**. The Iceberg metadata index is **~168× smaller** than the 252 GiB of indexed ROOT baskets. Indexed SQL access took **0.283 s** for a single event — all without converting the underlying ROOT data.
 - **2026-10-09 — Fixes driven by real analysis.** Production ROOT data exposed schema-evolution and projection issues; fixes were checked against the object reader. EOS/FUSE cache range pruning and physical I/O diagnostics were also improved.
 - **2026-10-09 — DuckDB 1.5.6 migration.** The development source tree and build scripts now target DuckDB 1.5.6; published release binaries retain their own version requirements.
 - **2026-08-25 — Relation-level ROOT queries and parallel decoding.** `read_root()` now selects objects and collections as SQL relations, exposes their immediate fields as columns. Both object and serialized readers now parallelize single-file scans, while multi-column serialized reads share basket decoding work across sibling fields. Exact remote [ROOT URIs](https://root.cern/doc/master/classTS3WebFile.html), including `s3://` and `davix://`, use the common ROOT input layer.
