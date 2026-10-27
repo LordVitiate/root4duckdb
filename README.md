@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/images/NewBanner.png" alt="ROOT to SQL" width="100%">
+<img src="assets/images/Halloween Root4DuckDB Infographic.png" alt="ROOT to SQL" width="100%">
 
 <p>
   <a href="https://github.com/LordVitiate/root4duckdb/releases/latest">
