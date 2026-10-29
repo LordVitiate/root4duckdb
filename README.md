@@ -1,15 +1,15 @@
 <div align="center">
 
-<img src="assets/images/NewBanner.png" alt="ROOT to SQL" width="100%">
+<img src="assets/images/Halloween Root4DuckDB Infographic.png" alt="ROOT to SQL" width="100%">
 
 <p>
   <a href="https://github.com/LordVitiate/root4duckdb/releases/latest">
     <img alt="Latest release" src="https://img.shields.io/github/v/release/LordVitiate/root4duckdb?sort=semver&display_name=release&style=flat">
-  </a>
-  <a href="https://deepwiki.com/LordVitiate/root4duckdb/">
-    <img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg">
-  </a>
-  <img alt="DuckDB dev" src="https://img.shields.io/badge/DuckDB-dev%20v2.0.0-FFF000">
+  </a><a href="https://deepwiki.com/LordVitiate/root4duckdb/">
+  <img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-6E56CF">
+</a>
+
+<img alt="DuckDB dev" src="https://img.shields.io/badge/DuckDB-dev%20v2.0.0-FFF000">
   <img alt="CERN ROOT" src="https://img.shields.io/badge/CERN%20ROOT-6.40-2c6aa6">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
@@ -17,7 +17,7 @@
 
 </div>
 
-## Latest news 🔥
+## Latest news 🎃
 
 - **2026-10-27 — DuckDB 2.0 migration.** The development branch builds against DuckDB 2.0.0 (Cyanoptera). Native integration tests and ten ROOT SQL checks with an independent DuckDB CLI passed. Loading on hosts with older libstdc++ still needs runtime work.
 - **2026-10-09 — Fixes driven by real analysis.** Production ROOT data exposed schema-evolution and projection issues; fixes were checked against the object reader. EOS/FUSE cache range pruning and physical I/O diagnostics were also improved.
