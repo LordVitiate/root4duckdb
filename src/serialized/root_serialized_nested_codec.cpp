@@ -112,13 +112,15 @@ bool DecodeNestedPrimitiveColumn(const uint8_t* bytes, size_t entry_size, size_t
             Fail(values, flat_indices, failure_reason, "serialized nested vector length is truncated");
             return false;
         }
-        const int32_t signed_count = static_cast<int32_t>(encoded_count);
-        if (signed_count < 0)
+        // ROOT encodes signed STL lengths in a big-endian 32-bit field.
+        // Check the sign bit before converting instead of relying on an
+        // implementation-defined unsigned-to-signed narrowing conversion.
+        if (encoded_count > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
         {
             Fail(values, flat_indices, failure_reason, "serialized nested vector has a negative element count");
             return false;
         }
-        const uint64_t inner_count = static_cast<uint32_t>(signed_count);
+        const uint64_t inner_count = encoded_count;
         if (inner_count > max_values_per_entry - total_values ||
             inner_count > std::numeric_limits<uint64_t>::max() / layout.value_bytes ||
             total_values + inner_count > std::numeric_limits<size_t>::max())

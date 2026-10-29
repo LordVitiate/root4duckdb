@@ -59,6 +59,7 @@ void TestCustom::Streamer(TBuffer& buffer)
 }
 
 ClassImp(TestBase);
+ClassImp(TestParam);
 ClassImp(TestHit);
 ClassImp(TestGroup);
 ClassImp(TestLayer);

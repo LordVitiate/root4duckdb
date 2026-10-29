@@ -106,8 +106,7 @@ bool Load(const std::string& path, bool detailed_debug)
             std::string dependency_error;
             if (!LoadRootGeometryDependency(dependency_error))
             {
-                throw IOException("Failed to load ROOT dictionary " + path + ": " + failure +
-                                  "; " + dependency_error);
+                throw IOException("Failed to load ROOT dictionary " + path + ": " + failure + "; " + dependency_error);
             }
             dlerror();
             handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_GLOBAL);

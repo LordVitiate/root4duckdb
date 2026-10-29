@@ -46,7 +46,7 @@ enum class SerializedProjectionKind : uint8_t
     ROOT_SELECTED_SUBTREE = 4,
     /// One self-contained split STL member decoded into a private root scratch object.
     COLLECTION_BRANCH = 5,
-    // Opt-in byte-offset decoder for nested vector<object>/vector<object>/fixed primitive.
+    // Checked byte-offset decoder for nested vector<object>/vector<object>/fixed primitive.
     NESTED_FIXED_MEMBER = 6
 };
 
@@ -156,7 +156,7 @@ bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t 
 // Validates the complete versioned member-wise element layout so that the
 // decoder can advance between nested vectors without materializing PaTPar.
 bool ResolveSerializedNestedMemberWiseStride(const SerializedReadPlan& plan, int32_t element_version,
-                                              uint64_t& bytes_per_element, std::string& failure_reason);
+                                             uint64_t& bytes_per_element, std::string& failure_reason);
 
 /// Version-specific fixed layout is owned by a single worker-local reader.
 struct SerializedNestedFixedLayoutCache
@@ -182,10 +182,6 @@ bool ConsumeSerializedSelectedMembers(TBufferFile& buffer, const SerializedReadP
 
 /// Projects nested objects from the serialized scratch object.
 bool CollectSerializedSelectedSubtree(const SerializedReadPlan& plan, void* outer_collection_scratch,
-                                      uint64_t max_values_per_entry, std::vector<double>& values,
-                                      std::vector<int32_t>& flat_indices, std::string& failure_reason,
-                                      bool collect_indices);
-bool CollectSerializedSelectedSubtree(const SerializedReadPlan& plan, void* outer_collection_scratch,
                                       uint64_t max_values_per_entry, std::vector<RootPrimitiveValue>& values,
                                       std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                       bool collect_indices);
@@ -198,6 +194,9 @@ struct SerializedReadCounters
     uint64_t baskets = 0;
     uint64_t compressed_bytes = 0;
     uint64_t serialized_bytes = 0;
+    // Actual executed nested-fixed backends, not the chosen planner kind.
+    uint64_t nested_fixed_direct_entries = 0;
+    uint64_t nested_fixed_scratch_entries = 0;
 };
 
 /// Owns one serialized basket decode state.
@@ -223,11 +222,16 @@ class SerializedBasketReader
     void ReleaseBindings() noexcept;
     void Reset() noexcept;
 
-    bool Decode(uint64_t entry, std::vector<double>& values, std::vector<int32_t>& flat_indices,
-                std::string& failure_reason, bool collect_indices = true);
     bool Decode(uint64_t entry, std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
                 std::string& failure_reason, bool collect_indices = true);
     /// @}
+
+    /// Serialize fixed members in bounded chunks without materializing the entry.
+    bool BeginPagedEntry(uint64_t entry, std::string& reason);
+    bool ReadPage(size_t rows, std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& indices,
+                  std::string& reason);
+    [[nodiscard]] bool HasPage() const noexcept;
+    void EndPagedEntry() noexcept;
 
     /// @name Reader state
     /// @{
@@ -240,15 +244,14 @@ class SerializedBasketReader
   private:
     bool LoadBasket(uint64_t entry, std::string& failure_reason);
     bool EntrySlice(uint64_t entry, const uint8_t*& begin, size_t& size, std::string& failure_reason);
-    bool DecodeNestedProjectionEntry(const uint8_t* bytes, size_t entry_size, std::vector<double>& values,
-                                     std::vector<int32_t>& flat_indices, std::string& failure_reason,
-                                     bool collect_indices);
     bool DecodeNestedProjectionEntry(const uint8_t* bytes, size_t entry_size, std::vector<RootPrimitiveValue>& values,
                                      std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                      bool collect_indices);
     bool DecodeRootProjectionEntry(const uint8_t* bytes, size_t entry_size, std::vector<RootPrimitiveValue>& values,
                                    std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                    bool collect_indices);
+    bool PrepareFixedProjectionEntry(const uint8_t* bytes, size_t entry_size, size_t& payload_offset, uint64_t& count,
+                                     std::string& reason);
     bool DecodeFixedProjectionEntry(const uint8_t* bytes, size_t entry_size, std::vector<RootPrimitiveValue>& values,
                                     std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                     bool collect_indices);
@@ -260,6 +263,7 @@ class SerializedBasketReader
     bool basket_prepared = false;
     SerializedReadPlan plan;
     SerializedEntryLayout layout;
+    SerializedVectorPageCursor page_cursor;
     int current_basket = -1;
     uint64_t current_basket_entry_begin = 0;
     uint64_t current_basket_entry_end = 0;

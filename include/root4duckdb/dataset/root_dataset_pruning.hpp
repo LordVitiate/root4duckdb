@@ -21,8 +21,11 @@ void ParsePathPredicates(const RootDatasetCatalog& catalog, DatasetBindData& bin
 std::string ZonemapClause(const TableFilter& filter, const std::string& min_expr, const std::string& max_expr,
                           const LogicalType& physical_type);
 
+bool PassesDatasetEntryFilters(ClientContext& context, DatasetLocalState& local, const DatasetBindData& bind,
+                               const DatasetGlobalState& global, uint64_t entry_id);
+
 /// Finds the filter attached to a full output column.
-optional_ptr<TableFilter> FilterForFullColumn(const DatasetGlobalState& global, column_t full_column);
+optional_ptr<const TableFilter> FilterForFullColumn(const DatasetGlobalState& global, column_t full_column);
 
 /// Conservatively evaluates a Bloom payload against a filter.
 bool BloomMayContainFilter(const TableFilter& filter, const string& bytes, const LogicalType& physical_type);

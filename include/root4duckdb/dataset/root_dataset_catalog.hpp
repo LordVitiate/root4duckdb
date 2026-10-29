@@ -22,6 +22,7 @@ struct CatalogSources
     std::string baskets;
     std::string snapshots;
     std::string commits;
+    std::string path_sources;
     std::string catalog_prefix;
     std::string snapshot_id;
     bool sql_tables = false;
@@ -56,11 +57,12 @@ class RootDatasetCatalog final
 {
   public:
     RootDatasetCatalog(ClientContext& context_p, const std::string& catalog_path,
-                       const named_parameter_map_t& parameters);
+                       const named_argument_map_t& parameters);
     RootDatasetCatalog(ClientContext& context_p, CatalogSources sources_p);
 
     /// Returns the committed physical catalog sources.
     const CatalogSources& Sources() const;
+    std::string PathSnapshot(const std::string& logical_path) const;
     /// Loads all compatible variants of the requested logical path.
     DatasetSchemaSet LoadSchemas(const std::string& logical_path) const;
     /// Loads path schemas while returning their common value type.
@@ -68,7 +70,7 @@ class RootDatasetCatalog final
                                                std::unordered_map<std::string, idx_t>& lookup) const;
 
   private:
-    CatalogSources ResolveSources(const std::string& catalog_path, const named_parameter_map_t& parameters) const;
+    CatalogSources ResolveSources(const std::string& catalog_path, const named_argument_map_t& parameters) const;
     void ResolveCommittedSnapshot();
 
     ClientContext& context;

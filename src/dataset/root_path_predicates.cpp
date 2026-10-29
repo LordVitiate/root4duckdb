@@ -208,6 +208,7 @@ void ParsePathPredicates(const RootDatasetCatalog& catalog, DatasetBindData& bin
         }
         PathPredicateBinding predicate;
         predicate.path = NormalizePath(item.at("path").get<std::string>());
+        predicate.source_snapshot_id = catalog.PathSnapshot(predicate.path);
         predicate.op = ParsePathPredicateOp(item.at("op").get<std::string>());
         const auto quantifier = item.value("quantifier", std::string("any"));
         predicate.require_all_values = quantifier == "all";

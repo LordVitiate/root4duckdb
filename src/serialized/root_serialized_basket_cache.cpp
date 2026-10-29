@@ -31,6 +31,7 @@ void SerializedBasketCache::Reset() noexcept
     basket = nullptr;
     basket_prepared = false;
     current_basket = -1;
+    loaded_baskets = 0;
     current_basket_entry_begin = 0;
     current_basket_entry_end = 0;
 }
@@ -38,6 +39,11 @@ void SerializedBasketCache::Reset() noexcept
 TBranch* SerializedBasketCache::Branch() const noexcept
 {
     return branch;
+}
+
+uint64_t SerializedBasketCache::LoadedBaskets() const noexcept
+{
+    return loaded_baskets;
 }
 
 bool SerializedBasketCache::LoadBasket(uint64_t entry, bool& loaded_new_basket, uint64_t& compressed_bytes,
@@ -80,6 +86,7 @@ bool SerializedBasketCache::LoadBasket(uint64_t entry, bool& loaded_new_basket, 
     current_basket_entry_begin = basket_begin;
     current_basket_entry_end = basket_end;
     loaded_new_basket = true;
+    ++loaded_baskets;
     auto* basket_bytes = branch->GetBasketBytes();
     compressed_bytes = basket_bytes && basket_bytes[basket_number] > 0
                            ? static_cast<uint64_t>(basket_bytes[basket_number])

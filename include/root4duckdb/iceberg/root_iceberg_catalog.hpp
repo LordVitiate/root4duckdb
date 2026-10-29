@@ -42,8 +42,12 @@ bool IsRootIcebergCatalog(const std::string& catalog_root);
 /// Loads the active table snapshots for one ROOT commit.
 std::unordered_map<std::string, RootIcebergTableCommit> LoadRootIcebergCatalogState(const std::string& catalog_root);
 
+/// Returns whether an optional ROOT4DuckDB Iceberg metadata table exists.
+bool RootIcebergTableExists(const std::string& catalog_root, const std::string& table_name);
+
 /// Builds a relation over active Iceberg data files.
-std::string RootIcebergRelation(const std::string& catalog_root, const std::string& table_name);
+std::string RootIcebergRelation(const std::string& catalog_root, const std::string& table_name,
+                                int64_t iceberg_snapshot_id = 0);
 
 /// Adapts the Iceberg commit log to the reader's snapshot relation.
 std::string RootIcebergCommittedSnapshotsRelation(const std::string& catalog_root, uint32_t index_version);

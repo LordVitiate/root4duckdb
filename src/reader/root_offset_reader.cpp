@@ -67,6 +67,10 @@ void PushArrayCoordinates(uint64_t flat_index, const std::vector<uint32_t>& dime
 {
     if (dimensions.empty())
     {
+        if (flat_index > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+        {
+            throw IOException("ROOT fixed-array index exceeds the supported 32-bit SQL index range");
+        }
         indices.push_back(static_cast<int32_t>(flat_index));
         return;
     }
@@ -75,7 +79,16 @@ void PushArrayCoordinates(uint64_t flat_index, const std::vector<uint32_t>& dime
     for (size_t reverse = dimensions.size(); reverse > 0; --reverse)
     {
         const size_t dim = reverse - 1;
-        indices[base + dim] = static_cast<int32_t>(flat_index % dimensions[dim]);
+        if (dimensions[dim] == 0)
+        {
+            throw IOException("ROOT fixed array has a zero dimension");
+        }
+        const uint64_t coordinate = flat_index % dimensions[dim];
+        if (coordinate > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+        {
+            throw IOException("ROOT fixed-array coordinate exceeds the supported 32-bit SQL index range");
+        }
+        indices[base + dim] = static_cast<int32_t>(coordinate);
         flat_index /= dimensions[dim];
     }
 }
@@ -136,6 +149,10 @@ class DirectSink
         : max_values(max_values_p), entry_id(entry_id_p), result(result_p)
     {
     }
+    size_t StartIndex(const PathLevel&, const std::vector<int32_t>&) const noexcept
+    {
+        return 0;
+    }
     bool Full() const
     {
         return max_values >= 0 && result.size() >= static_cast<size_t>(max_values);
@@ -161,68 +178,6 @@ class DirectSink
     ReadResult& result;
 };
 
-class NumericOnlySink
-{
-  public:
-    explicit NumericOnlySink(std::vector<double>& result_p) : result(result_p)
-    {
-    }
-    bool Full() const
-    {
-        return false;
-    }
-    bool RequiresContainerDictionary() const
-    {
-        return false;
-    }
-    void Number(void* pointer, const std::string& type, const std::vector<int32_t>&, const std::vector<std::string>&)
-    {
-        result.push_back(ReadPrimitiveAsDouble(pointer, type));
-    }
-    void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&)
-    {
-    }
-
-  private:
-    std::vector<double>& result;
-};
-
-class FlatNumericSink
-{
-  public:
-    FlatNumericSink(idx_t index_depth_p, std::vector<double>& values_p, std::vector<int32_t>& indices_p)
-        : index_depth(index_depth_p), values(values_p), indices(indices_p)
-    {
-    }
-    bool Full() const
-    {
-        return false;
-    }
-    bool RequiresContainerDictionary() const
-    {
-        return false;
-    }
-    void Number(void* pointer, const std::string& type, const std::vector<int32_t>& current_indices,
-                const std::vector<std::string>&)
-    {
-        if (current_indices.size() != index_depth)
-        {
-            throw IOException("ROOT container depth mismatch while executing indexed access plan: expected " +
-                              std::to_string(index_depth) + ", got " + std::to_string(current_indices.size()));
-        }
-        values.push_back(ReadPrimitiveAsDouble(pointer, type));
-        indices.insert(indices.end(), current_indices.begin(), current_indices.end());
-    }
-    void String(void*, const std::string&, const std::vector<int32_t>&, const std::vector<std::string>&)
-    {
-    }
-
-  private:
-    idx_t index_depth;
-    std::vector<double>& values;
-    std::vector<int32_t>& indices;
-};
-
 class FlatTypedSink
 {
   public:
@@ -230,6 +185,10 @@ class FlatTypedSink
                   std::vector<int32_t>& flat_indices_p)
         : index_depth(index_depth_p), max_values(max_values_p), values(values_p), flat_indices(flat_indices_p)
     {
+    }
+    size_t StartIndex(const PathLevel&, const std::vector<int32_t>&) const noexcept
+    {
+        return 0;
     }
     bool Full() const
     {
@@ -261,6 +220,110 @@ class FlatTypedSink
     std::vector<int32_t>& flat_indices;
 };
 
+// The resume position is a flattened index tuple, not a ROOT object pointer.
+// Recreate TPushPop frames on every page; no proxy iterator survives a call.
+class CursorPageSink
+{
+  public:
+    CursorPageSink(size_t limit_p, int64_t entry_id_p, const std::vector<int32_t>& previous_p, bool skip_previous_p,
+                   ReadResult& output_p)
+        : limit(limit_p), entry_id(entry_id_p), previous(previous_p), skip_previous(skip_previous_p), output(output_p)
+    {
+    }
+
+    bool Full() const noexcept
+    {
+        return output.size() >= limit;
+    }
+    bool RequiresContainerDictionary() const noexcept
+    {
+        return true;
+    }
+
+    size_t StartIndex(const PathLevel& level, const std::vector<int32_t>& prefix) const
+    {
+        if (!skip_previous || prefix.size() > previous.size() ||
+            !std::equal(prefix.begin(), prefix.end(), previous.begin()))
+        {
+            return 0;
+        }
+        const size_t rank = level.is_fixed_array ? std::max<size_t>(1, level.array_dimensions.size()) : 1;
+        if (previous.size() - prefix.size() < rank)
+        {
+            return 0;
+        }
+        if (!level.is_fixed_array || level.array_dimensions.size() <= 1)
+        {
+            if (previous[prefix.size()] < 0)
+            {
+                throw IOException("ROOT cursor has a negative container index");
+            }
+            return static_cast<size_t>(previous[prefix.size()]);
+        }
+        size_t index = 0;
+        for (size_t dim = 0; dim < rank; ++dim)
+        {
+            const auto coordinate = previous[prefix.size() + dim];
+            const auto dimension = level.array_dimensions[dim];
+            if (coordinate < 0 || dimension == 0 || static_cast<uint64_t>(coordinate) >= dimension ||
+                index > (std::numeric_limits<size_t>::max() - static_cast<size_t>(coordinate)) / dimension)
+            {
+                throw IOException("ROOT cursor has an invalid flattened array position");
+            }
+            index = index * dimension + static_cast<size_t>(coordinate);
+        }
+        return index;
+    }
+
+    void Number(void* pointer, const std::string& type, const std::vector<int32_t>& indices,
+                const std::vector<std::string>& names)
+    {
+        if (Skip(indices))
+        {
+            return;
+        }
+        output.AddNumber(RootPrimitiveValue::FromPointer(pointer, type), entry_id, indices, names);
+        last_indices = indices;
+    }
+    void String(void* pointer, const std::string& type, const std::vector<int32_t>& indices,
+                const std::vector<std::string>& names)
+    {
+        if (Skip(indices))
+        {
+            return;
+        }
+        output.AddString(ReadRootString(pointer, type), entry_id, indices, names);
+        last_indices = indices;
+    }
+    [[nodiscard]] const std::vector<int32_t>& LastIndices() const noexcept
+    {
+        return last_indices;
+    }
+
+  private:
+    bool Skip(const std::vector<int32_t>& indices)
+    {
+        if (!skip_previous)
+        {
+            return false;
+        }
+        if (indices == previous)
+        {
+            skip_previous = false;
+            return true;
+        }
+        // A restored cursor must encounter its previous value before moving past it.
+        throw IOException("ROOT cursor could not restore its previous logical index");
+    }
+
+    size_t limit;
+    int64_t entry_id;
+    const std::vector<int32_t>& previous;
+    bool skip_previous;
+    ReadResult& output;
+    std::vector<int32_t> last_indices;
+};
+
 template <class SINK>
 void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels, size_t level_index,
                             std::vector<int32_t>& indices, std::vector<std::string>& index_names, SINK& sink)
@@ -284,7 +347,7 @@ void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels,
     {
         AppendArrayIndexNames(level, indices.size(), index_names);
         const size_t pushed = std::max<size_t>(1, level.array_dimensions.size());
-        for (uint64_t i = 0; i < level.fixed_array_length && !sink.Full(); ++i)
+        for (uint64_t i = sink.StartIndex(level, indices); i < level.fixed_array_length && !sink.Full(); ++i)
         {
             auto* element = field + i * level.element_size;
             PushArrayCoordinates(i, level.array_dimensions, indices);
@@ -318,7 +381,7 @@ void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels,
             index_names.push_back(level.name + "_idx");
         }
         const auto access = PrepareContainerAccess(level, proxy, size);
-        for (size_t i = 0; i < size && !sink.Full(); ++i)
+        for (size_t i = sink.StartIndex(level, indices); i < size && !sink.Full(); ++i)
         {
             const auto container_index = CheckedContainerIndex(i);
             auto* element = access.contiguous ? static_cast<void*>(access.base + i * access.stride)
@@ -370,7 +433,7 @@ void CollectValuesRecursive(void* current, const std::vector<PathLevel>& levels,
             index_names.push_back(level.name + "_idx");
         }
         const auto access = PrepareContainerAccess(level, proxy, size);
-        for (size_t i = 0; i < size && !sink.Full(); ++i)
+        for (size_t i = sink.StartIndex(level, indices); i < size && !sink.Full(); ++i)
         {
             const auto container_index = CheckedContainerIndex(i);
             auto* element = access.contiguous ? static_cast<void*>(access.base + i * access.stride)
@@ -400,22 +463,8 @@ template <class SINK> void RunTraversal(void* root_object, const std::vector<Pat
 
 } // namespace
 
-void OffsetValueReader::CollectValues(void* root_object, const std::vector<PathLevel>& levels, std::vector<double>& out)
-{
-    NumericOnlySink sink{out};
-    RunTraversal(root_object, levels, sink);
-}
-
-void OffsetValueReader::CollectFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
-                                    std::vector<double>& values, std::vector<int32_t>& flat_indices)
-{
-    FlatNumericSink sink{index_depth, values, flat_indices};
-    RunTraversal(root_object, levels, sink);
-}
-
-void OffsetValueReader::CollectTypedFlat(void* root_object, const std::vector<PathLevel>& levels,
-                                         idx_t index_depth, int64_t max_values,
-                                         std::vector<RootPrimitiveValue>& values,
+void OffsetValueReader::CollectTypedFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
+                                         int64_t max_values, std::vector<RootPrimitiveValue>& values,
                                          std::vector<int32_t>& flat_indices)
 {
     FlatTypedSink sink{index_depth, max_values, values, flat_indices};
@@ -427,6 +476,57 @@ void OffsetValueReader::CollectDirect(void* root_object, const std::vector<PathL
 {
     DirectSink sink{max_values, entry_id, out};
     RunTraversal(root_object, levels, sink);
+}
+
+void OffsetValueCursor::Open(void* root_object, const std::vector<PathLevel>& levels, int64_t entry_id)
+{
+    Reset();
+    root_object_ = root_object;
+    levels_ = &levels;
+    entry_id_ = entry_id;
+    complete_ = !root_object || levels.empty();
+}
+
+bool OffsetValueCursor::ReadPage(idx_t maximum_rows, ReadResult& result)
+{
+    result.Clear();
+    if (maximum_rows == 0)
+    {
+        throw InvalidInputException("ROOT cursor page size must be positive");
+    }
+    if (complete_)
+    {
+        return false;
+    }
+    CursorPageSink sink{static_cast<size_t>(maximum_rows), entry_id_, resume_indices_, previous_emitted_, result};
+    RunTraversal(root_object_, *levels_, sink);
+    if (result.empty())
+    {
+        complete_ = true;
+        return false;
+    }
+    resume_indices_ = sink.LastIndices();
+    previous_emitted_ = true;
+    if (!sink.Full())
+    {
+        complete_ = true;
+    }
+    return true;
+}
+
+bool OffsetValueCursor::HasMore() const noexcept
+{
+    return !complete_;
+}
+
+void OffsetValueCursor::Reset() noexcept
+{
+    root_object_ = nullptr;
+    levels_ = nullptr;
+    resume_indices_.clear();
+    entry_id_ = 0;
+    previous_emitted_ = false;
+    complete_ = true;
 }
 
 } // namespace duckdb::rootlake

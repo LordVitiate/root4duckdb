@@ -1,7 +1,9 @@
 #ifndef ROOT4DUCKDB_INDEX_ROOT_FILTER_HPP
 #define ROOT4DUCKDB_INDEX_ROOT_FILTER_HPP
 
+#include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -9,16 +11,36 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace duckdb
 {
 class ClientContext;
 class ExpressionExecutor;
+class Expression;
 class ExpressionFilter;
 class TableFilter;
 
 namespace rootlake
 {
+
+bool RootIsColumnReference(const Expression& expression);
+bool RootIsComparison(ExpressionType type);
+/// True only for a direct reference-versus-constant comparison; never unwrap optional filters.
+bool RootIsSimpleConstantComparisonFilter(const TableFilter& filter);
+ExpressionType RootReverseComparison(ExpressionType type);
+
+/// One filter binding whose owner is the copied scan-level TableFilterSet.
+struct RootFilterBinding
+{
+    idx_t column_id;
+    const TableFilter* filter;
+};
+
+template <typename Column, typename IsEntryScoped>
+void PartitionRootRowFilters(const TableFilterSet& filters, const std::vector<Column>& scan_columns,
+                             IsEntryScoped&& is_entry_scoped, std::vector<RootFilterBinding>& entry_filters,
+                             std::vector<RootFilterBinding>& element_filters);
 
 /// Exact scalar supplied to DuckDB table-filter evaluation.
 struct RootScalarActual
@@ -49,6 +71,10 @@ struct RootUnsignedFilterRange
     uint64_t upper = std::numeric_limits<uint64_t>::max();
 };
 
+/// Unwraps DuckDB's metadata-only optional table filters without executing them.
+/// Returns nullptr when no safe expression is available.
+const Expression* RootFilterMetadataExpression(const TableFilter& filter);
+
 /// Extracts event/source bounds without rejecting uncertain filters.
 RootUnsignedFilterRange ExtractRootUnsignedRange(const TableFilter& filter);
 
@@ -71,7 +97,13 @@ class RootFilterEvaluator
     std::unique_ptr<Impl> impl;
 };
 
+template <typename ResolveScalar>
+bool EvaluateRootRowFilters(ClientContext& context, RootFilterEvaluator& evaluator,
+                            const std::vector<RootFilterBinding>& filters, ResolveScalar&& resolve);
+
 } // namespace rootlake
 } // namespace duckdb
+
+#include "root4duckdb/index/root_filter.tpp"
 
 #endif

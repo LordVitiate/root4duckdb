@@ -95,17 +95,15 @@ bool ResolveSerializedNestedFixedLayout(const SerializedReadPlan& plan, int32_t 
     nested_plan.array_dimensions = plan.array_dimensions;
     nested_plan.streamer_version =
         static_cast<uint32_t>(std::max(0, static_cast<int>(plan.nested_element_class->GetClassVersion())));
-    nested_plan.index_depth = 1 + (plan.fixed_array_length > 1 ?
-                                   std::max<idx_t>(1, plan.array_dimensions.size()) : 0);
+    nested_plan.index_depth = 1 + (plan.fixed_array_length > 1 ? std::max<idx_t>(1, plan.array_dimensions.size()) : 0);
     return ResolveSerializedFixedLayout(nested_plan, element_version, resolved_layout, failure_reason);
 }
 
 bool ResolveSerializedNestedMemberWiseStride(const SerializedReadPlan& plan, int32_t element_version,
-                                              uint64_t& bytes_per_element, std::string& failure_reason)
+                                             uint64_t& bytes_per_element, std::string& failure_reason)
 {
     bytes_per_element = 0;
-    if (!plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER) || !plan.nested_element_class ||
-        element_version < 0)
+    if (!plan.Is(SerializedProjectionKind::NESTED_FIXED_MEMBER) || !plan.nested_element_class || element_version < 0)
     {
         failure_reason = "nested member-wise stride requires a versioned element class";
         return false;

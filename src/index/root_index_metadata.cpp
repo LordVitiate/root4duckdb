@@ -1,4 +1,5 @@
 #include "root4duckdb/index/root_index_metadata.hpp"
+#include "root4duckdb/index/root_index_pipeline_utils.hpp"
 
 #include "root4duckdb/core/root_lake_common.hpp"
 
@@ -8,7 +9,10 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <tuple>
+
+#include <nlohmann/json.hpp>
 
 namespace duckdb::rootlake
 {
@@ -87,7 +91,7 @@ class RootIndexMetadataWriter::Impl
         fs::create_directories(part_dir);
         CreateBuffers();
     }
-    void Append(const RootFileIndexMetadata& metadata)
+    void Append(const RootFileIndexMetadata& metadata, const nlohmann::json& file_status)
     {
         if (finished)
         {
@@ -180,6 +184,7 @@ class RootIndexMetadataWriter::Impl
             (void)rollback;
             throw;
         }
+        checkpoint_files.push_back(file_status);
         buffered_bytes += metadata.EstimatedBytes();
         if (!metadata.files.empty())
         {
@@ -235,9 +240,9 @@ class RootIndexMetadataWriter::Impl
         auto result = connection.Query(sql);
         EnsureQueryOK(*result, label);
     }
-    void FlushTable(const std::string& table, const std::string& file_prefix, bool distinct)
+    void FlushTable(const fs::path& checkpoint, const std::string& table, const std::string& file_prefix, bool distinct)
     {
-        const auto path = part_dir / (file_prefix + "-" + std::to_string(segment) + ".parquet");
+        const auto path = checkpoint / (file_prefix + ".parquet");
         Run("COPY (SELECT " + std::string(distinct ? "DISTINCT " : "") + "* FROM " + table + ") TO " +
                 SqlLiteral(path.string()) + " (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 262144)",
             "flush " + file_prefix + " Parquet segment");
@@ -248,10 +253,35 @@ class RootIndexMetadataWriter::Impl
         {
             return;
         }
-        FlushTable("root_index_files", "root_files", false);
-        FlushTable("root_index_schemas", "root_schemas", true);
-        FlushTable("root_index_access", "root_access_levels", true);
-        FlushTable("root_index_baskets", "root_baskets", false);
+        // Do not expose partial batches: rename the complete directory on the
+        // same filesystem after all four Parquet files and the receipt exist.
+        const auto pending = part_dir / (".pending-" + std::to_string(segment));
+        const auto committed = part_dir / ("segment-" + std::to_string(segment));
+        if (fs::exists(pending) || fs::exists(committed) || !fs::create_directory(pending))
+        {
+            throw IOException("ROOT metadata checkpoint directory already exists: " + pending.string());
+        }
+        FlushTable(pending, "root_index_files", "root_files", false);
+        FlushTable(pending, "root_index_schemas", "root_schemas", true);
+        FlushTable(pending, "root_index_access", "root_access_levels", true);
+        FlushTable(pending, "root_index_baskets", "root_baskets", false);
+        nlohmann::json receipt = {{"format", "root4duckdb-segment-v1"}, {"files", checkpoint_files}};
+        nlohmann::json checksums = nlohmann::json::object();
+        for (const auto& table : {"root_files", "root_schemas", "root_access_levels", "root_baskets"})
+        {
+            const auto filename = std::string(table) + ".parquet";
+            checksums[filename] = FileContentFingerprint((pending / filename).string());
+        }
+        receipt["checksums"] = std::move(checksums);
+        {
+            std::ofstream out(pending / "checkpoint.json", std::ios::binary);
+            if (!out || !(out << receipt.dump() << '\n'))
+            {
+                throw IOException("Cannot write ROOT metadata checkpoint receipt");
+            }
+        }
+        fs::rename(pending, committed);
+        checkpoint_files.clear();
         // Recreate buffers; DELETE retains old row versions and defeats memory bounds.
         Run("DROP TABLE root_index_files", "drop typed files buffer");
         Run("DROP TABLE root_index_schemas", "drop typed schemas buffer");
@@ -262,6 +292,7 @@ class RootIndexMetadataWriter::Impl
         buffered_bytes = 0;
         buffered_files = 0;
     }
+    std::vector<nlohmann::json> checkpoint_files;
     Connection connection;
     fs::path part_dir;
     uint64_t flush_bytes;
@@ -279,9 +310,26 @@ RootIndexMetadataWriter::RootIndexMetadataWriter(DatabaseInstance& database, std
 
 RootIndexMetadataWriter::~RootIndexMetadataWriter() = default;
 
-void RootIndexMetadataWriter::Append(const RootFileIndexMetadata& metadata)
+void RootIndexMetadataWriter::Append(const RootFileIndexMetadata& metadata, const std::string& file_path,
+                                     const std::string& file_id, const std::string& schema_id, uint64_t entries,
+                                     uint64_t flattened_values, uint64_t baskets)
 {
-    impl->Append(metadata);
+    if (metadata.files.empty())
+    {
+        throw IOException("ROOT metadata checkpoint cannot record a file without metadata");
+    }
+    const auto& first = metadata.files.front();
+    nlohmann::json receipt = {{"file_path", file_path},
+                              {"file_id", file_id},
+                              {"schema_id", schema_id},
+                              {"entries", entries},
+                              {"flattened_values", flattened_values},
+                              {"baskets", baskets},
+                              {"event_base", first.event_base},
+                              {"file_size", first.file_size},
+                              {"mtime_ns", first.mtime_ns},
+                              {"snapshot_id", first.snapshot_id}};
+    impl->Append(metadata, receipt);
 }
 
 void RootIndexMetadataWriter::Finish()
@@ -295,19 +343,34 @@ void CompactRootIndexParquet(DatabaseInstance& database, const std::string& stag
     const auto staging = fs::path(staging_root);
     const auto parts = staging / "parts";
     const std::vector<std::tuple<std::string, std::string, bool>> tables = {
-        {"root_files-*.parquet", "root_files.parquet", false},
-        {"root_schemas-*.parquet", "root_schemas.parquet", true},
-        {"root_access_levels-*.parquet", "root_access_levels.parquet", true},
-        {"root_baskets-*.parquet", "root_baskets.parquet", false},
+        {"root_files.parquet", "root_files.parquet", false},
+        {"root_schemas.parquet", "root_schemas.parquet", true},
+        {"root_access_levels.parquet", "root_access_levels.parquet", true},
+        {"root_baskets.parquet", "root_baskets.parquet", false},
     };
     for (const auto& entry : tables)
     {
-        const auto glob = SqlLiteral((parts / "*" / std::get<0>(entry)).string());
-        const auto output = SqlLiteral((staging / std::get<1>(entry)).string());
+        const auto final = staging / std::get<1>(entry);
+        if (fs::exists(final))
+        {
+            auto verify = connection.Query("SELECT count(*) FROM read_parquet(" + SqlLiteral(final.string()) + ")");
+            EnsureQueryOK(*verify, "validate completed ROOT metadata compaction");
+            continue;
+        }
+        const auto pending = fs::path(final.string() + ".pending");
+        std::error_code error;
+        fs::remove(pending, error);
+        if (error)
+        {
+            throw IOException("Cannot clear abandoned ROOT compaction: " + error.message());
+        }
+        const auto glob = SqlLiteral((parts / "*" / "segment-*" / std::get<0>(entry)).string());
         auto result = connection.Query("COPY (SELECT " + std::string(std::get<2>(entry) ? "DISTINCT " : "") +
-                                       "* FROM read_parquet(" + glob + ", union_by_name=true)) TO " + output +
+                                       "* FROM read_parquet(" + glob + ", union_by_name=true)) TO " +
+                                       SqlLiteral(pending.string()) +
                                        " (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 262144)");
         EnsureQueryOK(*result, "compact " + std::get<1>(entry));
+        fs::rename(pending, final);
     }
 }
 

@@ -1,7 +1,10 @@
 #include "root4duckdb/dataset/root_dataset_pruning.hpp"
 
+#include <algorithm>
 #include <cerrno>
+#include <memory>
 #include <system_error>
+#include <utility>
 
 namespace duckdb::rootlake
 {
@@ -64,15 +67,15 @@ void DatasetTaskPlanner::ValidateFreshIndex(ClientContext& context, const Datase
     Connection connection(*context.db);
     auto indexed_files = connection.Query(sql);
     EnsureQueryOK(*indexed_files, "validate ROOT index freshness");
-    for (idx_t row = 0; row < indexed_files->RowCount(); ++row)
+    for (const auto& row : *indexed_files)
     {
-        const auto root_uri = indexed_files->GetValue(0, row).GetValue<std::string>();
-        const auto indexed_size = indexed_files->GetValue(1, row).GetValue<uint64_t>();
-        const auto indexed_mtime = indexed_files->GetValue(2, row).GetValue<int64_t>();
+        const auto root_uri = row.GetBaseValue(0).GetValue<std::string>();
+        const auto indexed_size = row.GetBaseValue(1).GetValue<uint64_t>();
+        const auto indexed_mtime = row.GetBaseValue(2).GetValue<int64_t>();
         if (indexed_size == 0 || indexed_mtime == 0)
         {
-            throw IOException("Cannot verify ROOT index freshness: file metadata is incomplete for " +
-                              root_uri + " (use require_fresh_index := false only to accept a stale index)");
+            throw IOException("Cannot verify ROOT index freshness: file metadata is incomplete for " + root_uri +
+                              " (use require_fresh_index := false only to accept a stale index)");
         }
 
         struct stat current_stat{};
@@ -83,8 +86,7 @@ void DatasetTaskPlanner::ValidateFreshIndex(ClientContext& context, const Datase
                               std::generic_category().message(saved_errno) +
                               " (use require_fresh_index := false only to accept an unverified index)");
         }
-        if (current_stat.st_size < 0 ||
-            static_cast<uint64_t>(current_stat.st_size) != indexed_size)
+        if (current_stat.st_size < 0 || static_cast<uint64_t>(current_stat.st_size) != indexed_size)
         {
             throw IOException("ROOT file size changed after indexing: " + root_uri);
         }
@@ -92,16 +94,47 @@ void DatasetTaskPlanner::ValidateFreshIndex(ClientContext& context, const Datase
                                 static_cast<int64_t>(current_stat.st_mtim.tv_nsec);
         if (current_ns != indexed_mtime)
         {
-            throw IOException("ROOT file mtime changed after indexing: " + root_uri +
-                              " (indexed_mtime_ns=" + std::to_string(indexed_mtime) +
-                              ", current_mtime_ns=" + std::to_string(current_ns) + ")");
+            throw IOException("ROOT file mtime changed after indexing: " + root_uri + " (indexed_mtime_ns=" +
+                              std::to_string(indexed_mtime) + ", current_mtime_ns=" + std::to_string(current_ns) + ")");
         }
     }
 }
 
-void DatasetTaskPlanner::BuildFileTaskGroups(DatasetGlobalState& global) const
+// A ROOT cache is useful only for a sequential, complete per-file scan.
+// Sparse baskets are loaded directly by the indexed decoder without broad
+// TTreeCache prefetch. Check both basket identity and entry coverage: a partial
+// entry selection may retain all physical baskets while reading very few rows.
+static bool ScansEntireFileSequentially(const std::vector<RootBasketTask>& tasks, idx_t begin, idx_t end)
+{
+    const auto& first = tasks[begin];
+    if (first.file_total_entries == 0 || first.file_total_baskets == 0)
+    {
+        return false;
+    }
+    uint64_t next_entry = 0;
+    uint64_t selected_baskets = 0;
+    for (idx_t i = begin; i < end; ++i)
+    {
+        const auto& task = tasks[i];
+        if (task.file_id != first.file_id || task.schema_id != first.schema_id ||
+            task.file_total_entries != first.file_total_entries ||
+            task.file_total_baskets != first.file_total_baskets || task.entry_begin != next_entry ||
+            task.entry_begin >= task.entry_end || task.entry_end > first.file_total_entries ||
+            task.basket_count > first.file_total_baskets - selected_baskets)
+        {
+            return false;
+        }
+        selected_baskets += task.basket_count;
+        next_entry = task.entry_end;
+    }
+    return selected_baskets == first.file_total_baskets && next_entry == first.file_total_entries;
+}
+
+void DatasetTaskPlanner::BuildFileTaskGroups(const DatasetBindData& bind, DatasetGlobalState& global) const
 {
     global.task_groups.clear();
+    global.tree_cache_enabled_files = 0;
+    global.tree_cache_disabled_files = 0;
     idx_t begin = 0;
     while (begin < global.tasks.size())
     {
@@ -110,7 +143,21 @@ void DatasetTaskPlanner::BuildFileTaskGroups(DatasetGlobalState& global) const
         {
             ++end;
         }
-        global.task_groups.push_back({begin, end});
+        const bool complete_scan = !global.local_entry_range.known && !global.has_event_range &&
+                                   !bind.entry_selection_active && bind.path_predicates.empty() &&
+                                   (!global.filters || !global.filters->HasFilters()) &&
+                                   bind.row_limit == std::numeric_limits<uint64_t>::max() &&
+                                   ScansEntireFileSequentially(global.tasks, begin, end);
+        const auto cache_bytes = bind.tree_cache_explicit || complete_scan ? bind.root_access.tree_cache_bytes : 0;
+        global.task_groups.push_back({begin, end, cache_bytes});
+        if (cache_bytes)
+        {
+            ++global.tree_cache_enabled_files;
+        }
+        else
+        {
+            ++global.tree_cache_disabled_files;
+        }
         begin = end;
     }
 }
@@ -123,13 +170,23 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
     if (filters)
     {
         global.filters = filters->Copy();
+        PartitionRootRowFilters(
+            *global.filters, global.scan_column_ids,
+            [&](idx_t column)
+            {
+                return column == 0 || column == bind.source_id_column || column == bind.entry_id_column;
+            },
+            global.entry_filters, global.element_filters);
     }
-    // event_fk is the first public output column. Both event_fk and entry_id
-    // address the same global event coordinate and can prune ROOT baskets.
+    // entry_id is file-local; event_fk includes event_base and is dataset-global.
     constexpr column_t kEventFkOutputColumn = 0;
     if (auto entry_filter = FilterForFullColumn(global, static_cast<column_t>(bind.entry_id_column)))
     {
-        MergeEventRangeIntoGlobal(global, ExtractRootUnsignedRange(*entry_filter));
+        global.local_entry_range = ExtractRootUnsignedRange(*entry_filter);
+        if (global.local_entry_range.impossible)
+        {
+            return;
+        }
     }
     if (auto event_fk_filter = FilterForFullColumn(global, kEventFkOutputColumn))
     {
@@ -141,9 +198,9 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
     }
     if (global.filters)
     {
-        for (const auto& entry : global.filters->filters)
+        for (const auto& entry : *global.filters)
         {
-            if (RejectsAllMaterializedRows(*entry.second))
+            if (RejectsAllMaterializedRows(entry.Filter()))
             {
                 return;
             }
@@ -170,8 +227,13 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
                           "COALESCE(sum(f.value_count),0)::UBIGINT FROM " +
                           files_relation + " f" + totals_filter);
         EnsureQueryOK(*totals, "read ROOT catalog totals");
-        global.catalog_files = totals->GetValue(0, 0).GetValue<uint64_t>();
-        global.catalog_baskets = totals->GetValue(1, 0).GetValue<uint64_t>();
+        auto chunk = totals->Fetch();
+        if (!chunk || chunk->size() != 1)
+        {
+            throw IOException("ROOT catalog totals query returned no row");
+        }
+        global.catalog_files = chunk->GetValue(0, 0).GetValue<uint64_t>();
+        global.catalog_baskets = chunk->GetValue(1, 0).GetValue<uint64_t>();
     }
     std::string predicate;
     if (!bind.sources.snapshot_id.empty())
@@ -195,20 +257,10 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
             }
         }
     }
-    if (auto entry_filter = FilterForFullColumn(global, static_cast<column_t>(bind.entry_id_column)))
+    if (global.local_entry_range.known)
     {
-        const auto file_clause =
-            ZonemapClause(*entry_filter, "f.event_base", "f.event_base + f.total_entries - 1", LogicalType::UBIGINT);
-        const auto basket_clause = ZonemapClause(*entry_filter, "f.event_base + b.entry_begin",
-                                                 "f.event_base + b.entry_end - 1", LogicalType::UBIGINT);
-        if (!file_clause.empty())
-        {
-            predicate += " AND (" + file_clause + ")";
-        }
-        if (!basket_clause.empty())
-        {
-            predicate += " AND (" + basket_clause + ")";
-        }
+        predicate += " AND b.entry_begin <= " + std::to_string(global.local_entry_range.upper);
+        predicate += " AND b.entry_end > " + std::to_string(global.local_entry_range.lower);
     }
     if (auto event_fk_filter = FilterForFullColumn(global, kEventFkOutputColumn))
     {
@@ -239,23 +291,23 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
     const auto sql = "SELECT f.file_id, f.root_uri, f.tree_name, f.schema_id, f.event_base, f.file_size, f.mtime_ns, "
                      "b.basket_id, b.entry_begin, b.entry_end, b.flat_value_begin, b.value_count, b.physical_offset, "
                      "b.compressed_size, " +
-                     std::string(needs_bloom ? "b.bloom_filter" : "NULL::BLOB") + " FROM " + baskets_relation +
-                     " b JOIN " + files_relation +
+                     std::string(needs_bloom ? "b.bloom_filter" : "NULL::BLOB") +
+                     ", f.total_entries, f.basket_count FROM " + baskets_relation + " b JOIN " + files_relation +
                      " f ON f.file_id=b.file_id AND f.column_id=b.column_id WHERE b.column_id IN " +
                      IdListSQL(bind.schemas, true) + " AND f.schema_id IN " + IdListSQL(bind.schemas, false) +
                      predicate + " ORDER BY f.root_uri, b.physical_offset";
     Connection connection(*context.db);
-    auto result = connection.SendQuery(sql);
+    auto result = connection.Submit(sql);
     if (result->HasError())
     {
         throw IOException("plan ROOT basket scan: " + result->GetError());
     }
+    QueryResultStream<> stream(std::move(result));
     std::unordered_map<std::string, bool> selected_files;
     const bool can_stop_after_row_limit = bind.row_limit != std::numeric_limits<uint64_t>::max() &&
-                                          (!global.filters || global.filters->filters.empty()) &&
-                                          !interval_filter_active;
+                                          (!global.filters || !global.filters->HasFilters()) && !interval_filter_active;
     bool row_limit_planned = false;
-    while (auto chunk = result->Fetch())
+    while (auto chunk = stream.Fetch())
     {
         for (idx_t row = 0; row < chunk->size(); ++row)
         {
@@ -272,6 +324,8 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
             task.value_count = chunk->GetValue(11, row).GetValue<uint64_t>();
             task.physical_offset = chunk->GetValue(12, row).GetValue<uint64_t>();
             task.compressed_size = chunk->GetValue(13, row).GetValue<uint32_t>();
+            task.file_total_entries = chunk->GetValue(15, row).GetValue<uint64_t>();
+            task.file_total_baskets = chunk->GetValue(16, row).GetValue<uint64_t>();
             if (task.compressed_size > std::numeric_limits<uint64_t>::max() - task.physical_offset)
             {
                 throw IOException("Indexed ROOT basket extends beyond the addressable file range: " + task.root_uri);
@@ -367,9 +421,9 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
             break;
         }
     }
-    if (result->HasError())
+    if (stream.HasError())
     {
-        throw IOException("plan ROOT basket scan: " + result->GetError());
+        throw IOException("plan ROOT basket scan: " + stream.GetError());
     }
     global.planned_files = selected_files.size();
     global.skipped_files =
@@ -380,7 +434,7 @@ void DatasetTaskPlanner::Plan(ClientContext& context, const DatasetBindData& bin
     {
         global.scheduled_read_bytes += task.compressed_size;
     }
-    BuildFileTaskGroups(global);
+    BuildFileTaskGroups(bind, global);
 }
 
 unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFunctionBindInput& input,
@@ -407,6 +461,7 @@ unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFu
     if (it != input.named_parameters.end())
     {
         bind->root_access.tree_cache_bytes = it->second.GetValue<uint64_t>();
+        bind->tree_cache_explicit = true;
     }
     it = input.named_parameters.find("reader_mode");
     if (it != input.named_parameters.end())
@@ -480,6 +535,7 @@ unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFu
     bind->index_names = std::move(schema_set.index_names);
     bind->value_type = schema_set.value_type;
     bind->value_column = 1 + bind->index_names.size();
+    bind->sources.snapshot_id = catalog.PathSnapshot(bind->logical_path);
     it = input.named_parameters.find("path_predicates");
     if (it != input.named_parameters.end())
     {
@@ -514,7 +570,12 @@ unique_ptr<FunctionData> DatasetScanBinder::Bind(ClientContext& context, TableFu
         Connection connection(*context.db);
         auto result = connection.Query(sql);
         EnsureQueryOK(*result, "estimate ROOT dataset cardinality");
-        const auto total = result->GetValue(0, 0).GetValue<uint64_t>();
+        auto chunk = result->Fetch();
+        if (!chunk || chunk->size() != 1)
+        {
+            throw IOException("ROOT dataset cardinality query returned no row");
+        }
+        const auto total = chunk->GetValue(0, 0).GetValue<uint64_t>();
         bind->estimated_cardinality =
             static_cast<idx_t>(std::min<uint64_t>(total, static_cast<uint64_t>(std::numeric_limits<idx_t>::max())));
     }
@@ -564,9 +625,14 @@ void DatasetTaskPlanner::PlanMetadataCount(ClientContext& context, const Dataset
                          "COALESCE(sum(f.value_count),0)::UBIGINT FROM " +
                          files_relation + " f" + predicate);
     EnsureQueryOK(*totals, "plan metadata-only ROOT count");
-    global.catalog_files = totals->GetValue(0, 0).GetValue<uint64_t>();
-    global.catalog_baskets = totals->GetValue(1, 0).GetValue<uint64_t>();
-    global.metadata_total_rows = totals->GetValue(2, 0).GetValue<uint64_t>();
+    auto chunk = totals->Fetch();
+    if (!chunk || chunk->size() != 1)
+    {
+        throw IOException("ROOT metadata totals query returned no row");
+    }
+    global.catalog_files = chunk->GetValue(0, 0).GetValue<uint64_t>();
+    global.catalog_baskets = chunk->GetValue(1, 0).GetValue<uint64_t>();
+    global.metadata_total_rows = chunk->GetValue(2, 0).GetValue<uint64_t>();
     global.skipped_files = global.catalog_files;
     global.skipped_baskets = global.catalog_baskets;
 }
@@ -603,7 +669,11 @@ unique_ptr<GlobalTableFunctionState> DatasetScanStateFactory::CreateGlobal(Clien
                      {
                          return column < public_column_count;
                      });
-    const bool has_materialized_filters = input.filters && !input.filters->filters.empty();
+    if (input.filters && input.filters->HasMultiColumnFilters())
+    {
+        throw NotImplementedException("ROOT4DuckDB does not yet support DuckDB 2.0 multi-column filter pushdown");
+    }
+    const bool has_materialized_filters = input.filters && input.filters->HasFilters();
     global->metadata_count_only = !has_materialized_filters && bind.path_predicates.empty() &&
                                   !bind.entry_selection_active && no_materialized_projection;
     if (global->metadata_count_only)

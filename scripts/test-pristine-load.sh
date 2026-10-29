@@ -5,7 +5,7 @@
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DUCKDB="${ROOT4DUCKDB_INDEPENDENT_DUCKDB:-$PROJECT_DIR/.deps/vanilla-duckdb-1.5.6/duckdb}"
+DUCKDB="${ROOT4DUCKDB_INDEPENDENT_DUCKDB:-$PROJECT_DIR/.deps/vanilla-duckdb-2.0/duckdb}"
 EXT="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
 LOG="${ROOT4DUCKDB_PRISTINE_LOG:-/tmp/root4duckdb-pristine-load.log}"
 
@@ -67,6 +67,11 @@ set -e
 
 # ROOT/Cling may emit a fatal compiler diagnostic while DuckDB exits 0.
 # The SQL result alone is therefore not sufficient for acceptance.
+if grep -Eq "GLIBCXX_[0-9]+(\.[0-9]+)+[^[:cntrl:]]*not found" "$LOG"; then
+  echo '[BLOCKED] The system libstdc++ does not satisfy the ROOT4DuckDB payload symbol requirements' >&2
+  echo '[INFO] This is an ELF runtime portability failure, not a DuckDB 2.0 SQL regression' >&2
+fi
+
 if ! grep -Fxq 'true' "$LOG"; then
   echo '[FAIL] Expected registration_ok=true from all six SQL functions' >&2
   rc=1

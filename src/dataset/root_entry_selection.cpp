@@ -148,10 +148,10 @@ LoadPredicateIntervals(ClientContext& context, const DatasetBindData& bind, cons
     const auto files_relation = CatalogRelationSQL(bind.sources.files, bind.sources.sql_tables);
     const auto baskets_relation = CatalogRelationSQL(bind.sources.baskets, bind.sources.sql_tables);
     std::string snapshot_clause;
-    if (!bind.sources.snapshot_id.empty())
+    if (!predicate.source_snapshot_id.empty())
     {
-        snapshot_clause = " AND f.snapshot_id=" + SqlLiteral(bind.sources.snapshot_id) +
-                          " AND b.snapshot_id=" + SqlLiteral(bind.sources.snapshot_id);
+        snapshot_clause = " AND f.snapshot_id=" + SqlLiteral(predicate.source_snapshot_id) +
+                          " AND b.snapshot_id=" + SqlLiteral(predicate.source_snapshot_id);
     }
     const bool needs_bloom = UsesDoubleBackedValueMetadata(predicate.value_type) &&
                              (predicate.op == PathPredicateOp::EQ || predicate.op == PathPredicateOp::IN);
@@ -163,13 +163,14 @@ LoadPredicateIntervals(ClientContext& context, const DatasetBindData& bind, cons
                      IdListSQL(predicate.schemas, true) + " AND f.schema_id IN " + IdListSQL(predicate.schemas, false) +
                      snapshot_clause + " ORDER BY f.file_id, b.entry_begin";
     Connection connection(*context.db);
-    auto result = connection.SendQuery(sql);
+    auto result = connection.Submit(sql);
     if (result->HasError())
     {
         throw IOException("plan predicate ROOT basket scan: " + result->GetError());
     }
+    QueryResultStream<> stream(std::move(result));
     std::unordered_map<std::string, std::vector<EntryInterval>> intervals;
-    while (auto chunk = result->Fetch())
+    while (auto chunk = stream.Fetch())
     {
         for (idx_t row = 0; row < chunk->size(); ++row)
         {
@@ -189,9 +190,9 @@ LoadPredicateIntervals(ClientContext& context, const DatasetBindData& bind, cons
                 {chunk->GetValue(1, row).GetValue<uint64_t>(), chunk->GetValue(2, row).GetValue<uint64_t>()});
         }
     }
-    if (result->HasError())
+    if (stream.HasError())
     {
-        throw IOException("plan predicate ROOT basket scan: " + result->GetError());
+        throw IOException("plan predicate ROOT basket scan: " + stream.GetError());
     }
     for (auto& entry : intervals)
     {

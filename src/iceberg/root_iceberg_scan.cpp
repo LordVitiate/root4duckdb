@@ -70,7 +70,7 @@ struct CatalogInspectState final : public GlobalTableFunctionState
 };
 
 unique_ptr<FunctionData> CatalogInspectBind(ClientContext&, TableFunctionBindInput& input, vector<LogicalType>& types,
-                                            vector<string>& names)
+                                            vector<Identifier>& names)
 {
     auto data = make_uniq<CatalogInspectBindData>();
     auto state = LoadRootIcebergCatalogState(input.inputs[0].ToString());
@@ -106,7 +106,7 @@ void CatalogInspectScan(ClientContext&, TableFunctionInput& input, DataChunk& ou
         output.SetValue(3, count, Value(row.manifest_list));
         ++count;
     }
-    output.SetCardinality(count);
+    output.SetCardinalityUnsafe(count);
 }
 
 } // namespace
@@ -126,7 +126,15 @@ std::unordered_map<std::string, RootIcebergTableCommit> LoadRootIcebergCatalogSt
     return ReadStateFromCatalog(OpenCatalog(catalog_root));
 }
 
-std::string RootIcebergRelation(const std::string& catalog_root, const std::string& table_name)
+bool RootIcebergTableExists(const std::string& catalog_root, const std::string& table_name)
+{
+    auto catalog = OpenCatalog(catalog_root);
+    return Take(catalog->TableExists(TableIdentifier{Namespace{{"root_index"}}, table_name}),
+                "check Iceberg metadata table " + table_name);
+}
+
+std::string RootIcebergRelation(const std::string& catalog_root, const std::string& table_name,
+                                int64_t iceberg_snapshot_id)
 {
     auto catalog = OpenCatalog(catalog_root);
     const TableIdentifier identifier{Namespace{{"root_index"}}, table_name};
@@ -137,6 +145,10 @@ std::string RootIcebergRelation(const std::string& catalog_root, const std::stri
     }
     auto table = Take(catalog->LoadTable(identifier), "load Iceberg table " + identifier.ToString());
     auto scan_builder = Take(table->NewScan(), "create Iceberg scan for " + identifier.ToString());
+    if (iceberg_snapshot_id != 0)
+    {
+        scan_builder->UseSnapshot(iceberg_snapshot_id);
+    }
     auto scan = Take(scan_builder->Build(), "build Iceberg scan for " + identifier.ToString());
     auto tasks = Take(scan->PlanFiles(), "plan Iceberg files for " + identifier.ToString());
     if (tasks.empty())
@@ -151,6 +163,10 @@ std::string RootIcebergRelation(const std::string& catalog_root, const std::stri
         if (!task || !task->data_file())
         {
             throw IOException("Iceberg scan returned an invalid file task for " + identifier.ToString());
+        }
+        if (!task->delete_files().empty())
+        {
+            throw IOException("ROOT metadata scan cannot ignore Iceberg row-level deletes: " + table_name);
         }
         std::string path = task->data_file()->file_path;
         constexpr std::string_view file_prefix = "file://";
@@ -181,7 +197,7 @@ std::string RootIcebergCommittedSnapshotsRelation(const std::string& catalog_roo
 void RegisterRootIcebergCatalog(ExtensionLoader& loader)
 {
     const TableFunction function("root_iceberg_catalog", {LogicalType::VARCHAR}, CatalogInspectScan, CatalogInspectBind,
-                           CatalogInspectInit);
+                                 CatalogInspectInit);
     loader.RegisterFunction(function);
 }
 

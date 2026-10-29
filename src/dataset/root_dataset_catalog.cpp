@@ -94,20 +94,20 @@ std::vector<PathLevel> LoadAccessPlan(Connection& connection, const std::string&
     EnsureQueryOK(*result, label);
     std::vector<PathLevel> levels;
     levels.reserve(result->RowCount());
-    for (idx_t row = 0; row < result->RowCount(); ++row)
+    for (const auto& row : *result)
     {
         PathLevel level;
-        level.name = result->GetValue(0, row).ToString();
-        level.type = result->GetValue(1, row).ToString();
-        level.offset_in_parent = result->GetValue(2, row).GetValue<int64_t>();
-        level.cumulative_offset = result->GetValue(3, row).GetValue<int64_t>();
-        level.is_pointer = result->GetValue(4, row).GetValue<bool>();
-        level.is_container = result->GetValue(5, row).GetValue<bool>();
-        level.is_primitive = result->GetValue(6, row).GetValue<bool>();
-        level.is_string = result->GetValue(7, row).GetValue<bool>();
-        level.is_fixed_array = result->GetValue(8, row).GetValue<bool>();
-        level.fixed_array_length = result->GetValue(9, row).GetValue<uint64_t>();
-        const auto dimensions = result->GetValue(10, row).ToString();
+        level.name = row.GetBaseValue(0).ToString();
+        level.type = row.GetBaseValue(1).ToString();
+        level.offset_in_parent = row.GetBaseValue(2).GetValue<int64_t>();
+        level.cumulative_offset = row.GetBaseValue(3).GetValue<int64_t>();
+        level.is_pointer = row.GetBaseValue(4).GetValue<bool>();
+        level.is_container = row.GetBaseValue(5).GetValue<bool>();
+        level.is_primitive = row.GetBaseValue(6).GetValue<bool>();
+        level.is_string = row.GetBaseValue(7).GetValue<bool>();
+        level.is_fixed_array = row.GetBaseValue(8).GetValue<bool>();
+        level.fixed_array_length = row.GetBaseValue(9).GetValue<uint64_t>();
+        const auto dimensions = row.GetBaseValue(10).ToString();
         if (!dimensions.empty())
         {
             std::stringstream dimension_stream(dimensions);
@@ -120,7 +120,7 @@ std::vector<PathLevel> LoadAccessPlan(Connection& connection, const std::string&
                 }
             }
         }
-        level.element_size = result->GetValue(11, row).GetValue<uint32_t>();
+        level.element_size = row.GetBaseValue(11).GetValue<uint32_t>();
         levels.push_back(std::move(level));
     }
     return levels;
@@ -128,27 +128,33 @@ std::vector<PathLevel> LoadAccessPlan(Connection& connection, const std::string&
 
 std::vector<SchemaBinding> LoadSchemaBindings(ClientContext& context, const CatalogSources& sources,
                                               const std::string& logical_path, const std::string& schema_label,
-                                              const std::string& access_label)
+                                              const std::string& access_label, const std::string& physical_snapshot)
 {
     Connection connection(*context.db);
     const auto schema_relation = CatalogRelationSQL(sources.schemas, sources.sql_tables);
     const auto access_relation = CatalogRelationSQL(sources.access, sources.sql_tables);
-    auto result =
-        connection.Query("SELECT DISTINCT schema_id, column_id, root_class, root_type, "
-                         "access_plan_id, COALESCE(index_signature, '') AS index_signature FROM " +
-                         schema_relation + " WHERE logical_path=" + SqlLiteral(logical_path) + " ORDER BY schema_id");
+    std::string filter = " WHERE logical_path=" + SqlLiteral(logical_path);
+    if (!sources.path_sources.empty() && !physical_snapshot.empty())
+    {
+        filter += " AND column_id IN (SELECT DISTINCT column_id FROM " +
+                  CatalogRelationSQL(sources.files, sources.sql_tables) +
+                  " WHERE snapshot_id=" + SqlLiteral(physical_snapshot) + ")";
+    }
+    auto result = connection.Query("SELECT DISTINCT schema_id, column_id, root_class, root_type, "
+                                   "access_plan_id, COALESCE(index_signature, '') AS index_signature FROM " +
+                                   schema_relation + filter + " ORDER BY schema_id");
     EnsureQueryOK(*result, schema_label);
     std::vector<SchemaBinding> schemas;
     schemas.reserve(result->RowCount());
-    for (idx_t row = 0; row < result->RowCount(); ++row)
+    for (const auto& row : *result)
     {
         SchemaBinding schema;
-        schema.schema_id = result->GetValue(0, row).ToString();
-        schema.column_id = result->GetValue(1, row).ToString();
-        schema.root_class = result->GetValue(2, row).ToString();
-        schema.root_type = result->GetValue(3, row).ToString();
-        schema.access_plan_id = result->GetValue(4, row).ToString();
-        schema.index_signature = result->GetValue(5, row).ToString();
+        schema.schema_id = row.GetBaseValue(0).ToString();
+        schema.column_id = row.GetBaseValue(1).ToString();
+        schema.root_class = row.GetBaseValue(2).ToString();
+        schema.root_type = row.GetBaseValue(3).ToString();
+        schema.access_plan_id = row.GetBaseValue(4).ToString();
+        schema.index_signature = row.GetBaseValue(5).ToString();
         schema.expected_levels = LoadAccessPlan(connection, access_relation, schema.access_plan_id, access_label);
         schemas.push_back(std::move(schema));
     }
@@ -175,18 +181,59 @@ std::string CatalogRelationSQL(const std::string& source, bool sql_tables)
 }
 
 CatalogSources RootDatasetCatalog::ResolveSources(const std::string& catalog_path,
-                                                  const named_parameter_map_t& parameters) const
+                                                  const named_argument_map_t& parameters) const
 {
     CatalogSources resolved_sources;
     if (IsRootIcebergCatalog(catalog_path))
     {
-        resolved_sources.files = RootIcebergRelation(catalog_path, "files");
-        resolved_sources.schemas = RootIcebergRelation(catalog_path, "schemas");
-        resolved_sources.access = RootIcebergRelation(catalog_path, "access");
-        resolved_sources.baskets = RootIcebergRelation(catalog_path, "baskets");
-        resolved_sources.snapshots = RootIcebergCommittedSnapshotsRelation(catalog_path, ROOT_LAKE_INDEX_VERSION);
-        resolved_sources.commits = "(SELECT root_snapshot_id AS snapshot_id, state, committed_at_ns FROM " +
-                                   RootIcebergRelation(catalog_path, "commits") + ")";
+        Connection connection(*context.db);
+        const auto commits = RootIcebergRelation(catalog_path, "commits");
+        const auto pinned = parameters.find("snapshot_id");
+        std::string root_snapshot;
+        if (pinned != parameters.end())
+        {
+            root_snapshot = pinned->second.ToString();
+        }
+        auto latest = connection.Query(
+            "SELECT root_snapshot_id FROM " + commits + " WHERE state='COMMITTED'" +
+            (root_snapshot.empty() ? std::string() : " AND root_snapshot_id=" + SqlLiteral(root_snapshot)) +
+            " ORDER BY committed_at_ns DESC LIMIT 1");
+        EnsureQueryOK(*latest, "resolve committed Iceberg ROOT index");
+        if (latest->RowCount() != 1)
+        {
+            throw IOException("Requested ROOT Iceberg index generation is not committed");
+        }
+        resolved_sources.snapshot_id = latest->Fetch()->GetValue(0, 0).ToString();
+        const auto snapshots = RootIcebergRelation(catalog_path, "snapshots");
+        auto manifest = connection.Query("SELECT table_name, iceberg_snapshot_id FROM " + snapshots +
+                                         " WHERE root_snapshot_id=" + SqlLiteral(resolved_sources.snapshot_id));
+        EnsureQueryOK(*manifest, "resolve native Iceberg snapshot mapping");
+        std::unordered_map<std::string, int64_t> versions;
+        for (const auto& row : *manifest)
+        {
+            const auto name = row.GetBaseValue(0).ToString();
+            const auto version = row.GetBaseValue(1).GetValue<int64_t>();
+            if (version <= 0 || !versions.emplace(name, version).second)
+            {
+                throw IOException("Invalid Iceberg metadata snapshot mapping: " + name);
+            }
+        }
+        for (const auto& required : {"files", "schemas", "access", "baskets"})
+        {
+            if (!versions.count(required))
+            {
+                throw IOException("Committed ROOT index has incomplete Iceberg table snapshots");
+            }
+        }
+        resolved_sources.files = RootIcebergRelation(catalog_path, "files", versions.at("files"));
+        resolved_sources.schemas = RootIcebergRelation(catalog_path, "schemas", versions.at("schemas"));
+        resolved_sources.access = RootIcebergRelation(catalog_path, "access", versions.at("access"));
+        resolved_sources.baskets = RootIcebergRelation(catalog_path, "baskets", versions.at("baskets"));
+        if (versions.count("path_sources"))
+        {
+            resolved_sources.path_sources =
+                RootIcebergRelation(catalog_path, "path_sources", versions.at("path_sources"));
+        }
         resolved_sources.sql_tables = true;
         return resolved_sources;
     }
@@ -282,7 +329,7 @@ CatalogSources RootDatasetCatalog::ResolveSources(const std::string& catalog_pat
 }
 
 RootDatasetCatalog::RootDatasetCatalog(ClientContext& context_p, const std::string& catalog_path,
-                                       const named_parameter_map_t& parameters)
+                                       const named_argument_map_t& parameters)
     : context(context_p)
 {
     sources = ResolveSources(catalog_path, parameters);
@@ -298,6 +345,40 @@ RootDatasetCatalog::RootDatasetCatalog(ClientContext& context_p, CatalogSources 
 const CatalogSources& RootDatasetCatalog::Sources() const
 {
     return sources;
+}
+
+std::string RootDatasetCatalog::PathSnapshot(const std::string& logical_path) const
+{
+    if (sources.path_sources.empty() || sources.snapshot_id.empty())
+    {
+        return sources.snapshot_id;
+    }
+    Connection connection(*context.db);
+    auto result = connection.Query("SELECT DISTINCT physical_snapshot_id FROM " + sources.path_sources +
+                                   " WHERE root_snapshot_id=" + SqlLiteral(sources.snapshot_id) +
+                                   " AND logical_path=" + SqlLiteral(logical_path));
+    EnsureQueryOK(*result, "resolve indexed ROOT path origin");
+    if (result->RowCount() == 1)
+    {
+        return result->Fetch()->GetValue(0, 0).ToString();
+    }
+    if (result->RowCount() > 1)
+    {
+        throw IOException("Conflicting ROOT path origins: " + logical_path);
+    }
+    auto generation = connection.Query("SELECT count(*) FROM " + sources.path_sources +
+                                       " WHERE root_snapshot_id=" + SqlLiteral(sources.snapshot_id));
+    EnsureQueryOK(*generation, "validate indexed ROOT generation");
+    const auto rows = generation->Fetch();
+    if (!rows || rows->size() != 1)
+    {
+        throw IOException("ROOT path generation lookup returned no result");
+    }
+    if (rows->GetValue(0, 0).GetValue<uint64_t>() != 0)
+    {
+        throw InvalidInputException("ROOT path is absent from selected generation: " + logical_path);
+    }
+    return sources.snapshot_id;
 }
 
 void RootDatasetCatalog::ResolveCommittedSnapshot()
@@ -319,7 +400,7 @@ void RootDatasetCatalog::ResolveCommittedSnapshot()
         {
             throw InvalidInputException("No fully committed ROOT dataset generation in " + sources.commits);
         }
-        sources.snapshot_id = result->GetValue(0, 0).ToString();
+        sources.snapshot_id = result->Fetch()->GetValue(0, 0).ToString();
         return;
     }
     auto result =
@@ -331,13 +412,13 @@ void RootDatasetCatalog::ResolveCommittedSnapshot()
     {
         throw InvalidInputException("No committed ROOT dataset snapshot in " + sources.snapshots);
     }
-    sources.snapshot_id = result->GetValue(0, 0).ToString();
+    sources.snapshot_id = result->Fetch()->GetValue(0, 0).ToString();
 }
 
 DatasetSchemaSet RootDatasetCatalog::LoadSchemas(const std::string& logical_path) const
 {
-    auto schemas =
-        LoadSchemaBindings(context, sources, logical_path, "load ROOT schema metadata", "load ROOT access plan");
+    auto schemas = LoadSchemaBindings(context, sources, logical_path, "load ROOT schema metadata",
+                                      "load ROOT access plan", PathSnapshot(logical_path));
     if (schemas.empty())
     {
         throw InvalidInputException("Logical path is absent from catalog: " + logical_path);
@@ -392,7 +473,7 @@ std::vector<SchemaBinding> RootDatasetCatalog::LoadPathSchemas(const std::string
                                                                std::unordered_map<std::string, idx_t>& lookup) const
 {
     auto schemas = LoadSchemaBindings(context, sources, logical_path, "load predicate ROOT schema metadata",
-                                      "load predicate ROOT access plan");
+                                      "load predicate ROOT access plan", PathSnapshot(logical_path));
     if (schemas.empty())
     {
         throw InvalidInputException("Predicate path is absent from the catalog snapshot: " + logical_path);

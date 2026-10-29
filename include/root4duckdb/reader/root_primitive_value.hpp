@@ -31,7 +31,11 @@ struct RootPrimitiveValue
     int64_t AsSigned() const;
     uint64_t AsUnsigned() const;
     double AsDouble() const;
+    float AsFloat() const;
     bool AsBool() const;
+
+    // Defined in the .cpp file for the eight supported SQL integer types.
+    template <class T> T AsInteger() const;
 };
 
 } // namespace duckdb::rootlake

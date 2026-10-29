@@ -11,6 +11,6 @@ namespace duckdb::rootlake
 {
 uint64_t FixedArrayLength(TStreamerElement* element, std::vector<uint32_t>* dimensions = nullptr);
 bool FixedPrimitiveWidth(TStreamerElement* element, uint32_t& width, std::string& reason);
-}
+} // namespace duckdb::rootlake
 
 #endif

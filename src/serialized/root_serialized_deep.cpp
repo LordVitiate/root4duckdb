@@ -15,8 +15,7 @@ namespace duckdb::rootlake
 bool IsSerializedNestedProjection(SerializedProjectionKind kind)
 {
     return kind == SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR ||
-           kind == SerializedProjectionKind::SELECTED_SUBTREE ||
-           kind == SerializedProjectionKind::NESTED_FIXED_MEMBER;
+           kind == SerializedProjectionKind::SELECTED_SUBTREE || kind == SerializedProjectionKind::NESTED_FIXED_MEMBER;
 }
 
 const char* SerializedProjectionName(SerializedProjectionKind kind)
@@ -70,11 +69,10 @@ bool SerializedReadPlan::Is(SerializedProjectionKind kind) const noexcept
 
 SerializedProjectionKind SerializedReadPlan::Kind() const
 {
-    for (const auto kind :
-         {SerializedProjectionKind::FIXED_MEMBER, SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR,
-          SerializedProjectionKind::SELECTED_SUBTREE, SerializedProjectionKind::LEAF_BRANCH,
-          SerializedProjectionKind::ROOT_SELECTED_SUBTREE, SerializedProjectionKind::COLLECTION_BRANCH,
-          SerializedProjectionKind::NESTED_FIXED_MEMBER})
+    for (const auto kind : {SerializedProjectionKind::FIXED_MEMBER, SerializedProjectionKind::NESTED_PRIMITIVE_VECTOR,
+                            SerializedProjectionKind::SELECTED_SUBTREE, SerializedProjectionKind::LEAF_BRANCH,
+                            SerializedProjectionKind::ROOT_SELECTED_SUBTREE,
+                            SerializedProjectionKind::COLLECTION_BRANCH, SerializedProjectionKind::NESTED_FIXED_MEMBER})
     {
         if (Is(kind))
         {
@@ -462,43 +460,6 @@ bool ConsumeSerializedSelectedMembers(TBufferFile& buffer, const SerializedReadP
 }
 
 bool CollectSerializedSelectedSubtree(const SerializedReadPlan& plan, void* outer_collection_scratch,
-                                      uint64_t max_values_per_entry, std::vector<double>& values,
-                                      std::vector<int32_t>& flat_indices, std::string& failure_reason,
-                                      bool collect_indices)
-{
-    values.clear();
-    flat_indices.clear();
-    try
-    {
-        if (collect_indices)
-        {
-            OffsetValueReader::CollectFlat(outer_collection_scratch, plan.projection_levels, plan.index_depth, values,
-                                           flat_indices);
-        }
-        else
-        {
-            OffsetValueReader::CollectValues(outer_collection_scratch, plan.projection_levels, values);
-        }
-    }
-    catch (const std::exception& ex)
-    {
-        values.clear();
-        flat_indices.clear();
-        failure_reason = std::string("serialized nested object traversal failed: ") + ex.what();
-        return false;
-    }
-    if (values.size() > max_values_per_entry)
-    {
-        values.clear();
-        flat_indices.clear();
-        failure_reason = "serialized nested object value count exceeds configured safety limit";
-        return false;
-    }
-    RootDebug("SERIALIZED.SELECTED_SUBTREE", "path=" + plan.logical_path + " values=" + std::to_string(values.size()));
-    return true;
-}
-
-bool CollectSerializedSelectedSubtree(const SerializedReadPlan& plan, void* outer_collection_scratch,
                                       uint64_t max_values_per_entry, std::vector<RootPrimitiveValue>& values,
                                       std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                       bool collect_indices)
@@ -507,10 +468,13 @@ bool CollectSerializedSelectedSubtree(const SerializedReadPlan& plan, void* oute
     flat_indices.clear();
     try
     {
-        const auto limit = static_cast<int64_t>(
-            std::min<uint64_t>(max_values_per_entry, static_cast<uint64_t>(std::numeric_limits<int64_t>::max())));
-        OffsetValueReader::CollectTypedFlat(outer_collection_scratch, plan.projection_levels, plan.index_depth, limit,
-                                            values, flat_indices);
+        // Collect one sentinel beyond the configured limit. The old early-stop
+        // at exactly 'limit' silently returned a truncated, successful scan.
+        const auto sentinel_limit = static_cast<int64_t>(
+            std::min<uint64_t>(max_values_per_entry, static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 1)) +
+            1);
+        OffsetValueReader::CollectTypedFlat(outer_collection_scratch, plan.projection_levels, plan.index_depth,
+                                            sentinel_limit, values, flat_indices);
         if (!collect_indices)
         {
             flat_indices.clear();

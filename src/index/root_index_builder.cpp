@@ -5,6 +5,7 @@
 #include "root4duckdb/core/root_lake_common.hpp"
 #include "root4duckdb/core/root_file_opener.hpp"
 #include "root4duckdb/reader/root_path_reader.hpp"
+#include "root4duckdb/serialized/root_serialized_basket_cache.hpp"
 #include "root4duckdb/core/root_headers.hpp"
 
 #include <algorithm>
@@ -306,20 +307,17 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
         }
         uint64_t serialized_path_count = 0;
         uint64_t fallback_path_count = 0;
-        std::unordered_map<TBranch*, idx_t> paths_per_branch;
-        for (const auto& path : paths)
-        {
-            ++paths_per_branch[path.reader.PhysicalBranch()];
-        }
+        // Share physical decompression for sibling paths on the same ROOT branch.
+        // Cache lifetime is limited to this worker and this ROOT file.
+        std::unordered_map<TBranch*, std::shared_ptr<SerializedBasketCache>> physical_caches;
         for (auto& path : paths)
         {
-            std::string rejection;
-            if (paths_per_branch[path.reader.PhysicalBranch()] > 1)
+            if (path.reader.SerializedPlan().Supported() && options.root_access.reader_mode != RootReaderMode::OBJECT)
             {
-                rejection = "multiple requested paths share one physical ancestor; universal one-pass read is cheaper";
+                path.reader.AttachSharedBasketCache(physical_caches);
             }
             auto reader_options = options.root_access;
-            const auto started = path.reader.StartSerialized(std::move(reader_options), std::move(rejection));
+            const auto started = path.reader.StartSerialized(std::move(reader_options));
             if (started.SerializedActive())
             {
                 ++serialized_path_count;
@@ -334,20 +332,7 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
         RootEntryReader object_entry(object_reader);
         for (uint64_t entry = 0; entry < total_entries; ++entry)
         {
-            bool need_object = options.root_access.reader_mode == RootReaderMode::OBJECT;
-            for (const auto& path : paths)
-            {
-                if (!path.reader.SerializedActive() || path.reader.ValidationRemaining() > 0)
-                {
-                    need_object = true;
-                    break;
-                }
-            }
             object_entry.Begin(entry);
-            if (need_object)
-            {
-                object_entry.Read();
-            }
             for (auto& path : paths)
             {
                 while (path.active_basket < path.baskets.size() && entry >= path.baskets[path.active_basket].entry_end)
@@ -365,34 +350,39 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
                 }
                 values.clear();
                 indices.clear();
-                if (path.reader.SerializedActive())
+                const auto started = path.reader.BeginNumericEntry(entry, object_entry, 0, values, indices);
+                if (started.fallback_activated)
                 {
-                    const auto read = path.reader.TryReadSerialized(entry, object_entry, values, indices,
-                                                                    path.reader.ValidationRemaining() > 0);
-                    if (read.FallbackActivated())
+                    ++fallback_path_count;
+                }
+                SerializedBasketInfo basket_info;
+                if (path.reader.CurrentBasketInfo(basket_info))
+                {
+                    ApplySerializedBasketMetadata(basket, basket_info);
+                }
+                if (started.route == RootNumericEntryRoute::NONE)
+                {
+                    ++basket.null_count;
+                    continue;
+                }
+                if (started.route == RootNumericEntryRoute::SERIALIZED_VALUES)
+                {
+                    for (const auto& value : values)
                     {
-                        ++fallback_path_count;
-                    }
-                    SerializedBasketInfo basket_info;
-                    if (path.reader.CurrentBasketInfo(basket_info))
-                    {
-                        ApplySerializedBasketMetadata(basket, basket_info);
+                        basket.Add(value, path.statistics_double_safe);
                     }
                 }
-                if (!path.reader.SerializedActive())
+                else
                 {
-                    values.clear();
-                    void* object = object_entry.Read();
-                    if (!object)
+                    while (path.reader.ReadNumericPage(STANDARD_VECTOR_SIZE, values, indices) !=
+                           RootNumericPageSource::NONE)
                     {
-                        ++basket.null_count;
-                        continue;
+                        for (const auto& value : values)
+                        {
+                            basket.Add(value, path.statistics_double_safe);
+                        }
                     }
-                    path.reader.CollectTypedValues(object, values);
-                }
-                for (const auto& value : values)
-                {
-                    basket.Add(value, path.statistics_double_safe);
+                    path.reader.EndNumericPage();
                 }
             }
         }
@@ -500,10 +490,17 @@ RootIndexBuildStatus RootIndexFileBuilder::Build(const std::string& root_path, u
         }
         status.schema_id = JoinStrings(schema_ids, ",");
         status.status = "OK";
+        uint64_t shared_basket_loads = 0;
+        for (const auto& [branch, cache] : physical_caches)
+        {
+            (void)branch;
+            shared_basket_loads += cache->LoadedBaskets();
+        }
         status.message = "indexed " + std::to_string(paths.size()) +
                          " logical paths; serialized=" + std::to_string(serialized_path_count) +
                          ", object_fallback=" + std::to_string(fallback_path_count) +
-                         ", object_reads=" + std::to_string(object_entry.LoadCount());
+                         ", object_reads=" + std::to_string(object_entry.LoadCount()) +
+                         ", shared_basket_loads=" + std::to_string(shared_basket_loads);
     }
     catch (const std::exception& exception)
     {

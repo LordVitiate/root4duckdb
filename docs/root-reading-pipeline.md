@@ -630,6 +630,16 @@ It is appropriate after the relevant file generation and logical relation have p
 
 ---
 
+### Logical relation identity versus physical TBranch identity
+
+The selected semantic `path_prefix` defines **one SQL relation and one row geometry**. For example, `/PaEvent/vecTrack` owns sibling value projections `/PaEvent/vecTrack/chi2tot` and `/PaEvent/vecTrack/nmeas`. These are distinct internal leaf addresses but columns of the **same selected relation**; they share `(entry_id, vecTrack_idx)`. `SelectSemanticPath` restricts immediate selected primitive children to `IndexSignature(child_levels) == target_signature`, and execution verifies sibling indices before row alignment.
+
+A physical `TBranch` is **not** a relation key: it only identifies storage and basket-cache sharing. Sibling columns may live in different physical branches, and two distinct semantic relations may share a physical branch without sharing row identity. The reader must not use `TBranch`, ROOT class name, or raw entry position as a substitute for the selected semantic path and its complete index geometry.
+
+In particular, `/PaEvent/vecTrack` and `/PaEvent/vecVertex` are different relations; nested `/PaEvent/vecTrack/vecTPar` also has a different row grain. Their rows must never be implicitly zipped. Combining distinct relation paths belongs to an explicit query with appropriate keys/physical association semantics, **not** to the physical ROOT reader.
+
+Implemented in the direct-scan plan: `projected_relation_columns` is the complete column set of **one already selected semantic relation**, rather than a map keyed by a ROOT class or branch. `RootScanColumn::root_class_name` identifies the semantic ROOT class, while `primitive_branch_name` is used **only** by primitive-TTree compatibility scans. The physical `SerializedBasketCache` remains keyed by the actual `TBranch*`. Direct execution still checks sibling value/index shapes and handles object fallback; that coordination has not yet been moved completely into a relation-level reader.
+
 ## 13. Multi-column serialized relations
 
 A relation can expose several sibling primitive columns from the same selected object or collection.
@@ -975,6 +985,16 @@ because statistics belong to values, not to an entire heterogeneous object.
 Do not remove internal leaf addressing merely because direct SQL now binds object/collection relations.
 
 ---
+
+
+### One numeric-page contract for indexed ROOT paths
+
+The indexed executor obtains bounded pages through `RootPathReader::ReadNumericPage()`, regardless of whether the active entry is decoded from serialized bytes or a ROOT object. Each page carries exact `RootPrimitiveValue` values, flattened `int32_t` collection coordinates, and a source tag for accurate serialized-page metrics. Conversion to an SQL transport type happens after decoding, not inside the physical ROOT reader.
+
+The cursor supports multiple pages per ROOT entry without silently dropping values. Serialized pages keep their basket payload pinned until the entry finishes. A failure after rows have escaped is an error, not a switch to object reconstruction: replaying the object at that point would duplicate rows. The object cursor uses the same page transport and rejects string values or inconsistent index shapes for numeric indexed relations.
+
+The former serialized-only page API has been removed. The indexed executor now starts each numeric entry through `RootPathReader::BeginNumericEntry()`, which selects between serialized pages, whole-entry serialized values, and the object cursor and reports attempted decoding and fallback activation. This ownership rule prevents two entry-start policies from drifting; it is separate from the still-required direct multi-column relation coordinator. The object decoder remains necessary for compatibility and validation. The 4099-value fixture, strict zero-`GetEntry` paging checks, multi-column relation-equivalence fixture, and index/dataset tests must be executed on a matching ROOT/DuckDB build before these changes are declared validated.
+
 
 ## 22. Common source and open layer
 

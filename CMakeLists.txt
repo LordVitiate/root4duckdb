@@ -56,11 +56,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(root_loadable_extension_smoke EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/test/loadable_extension_smoke.cpp
     )
-    # DuckDB's standalone static library requires the official no-op
-    # extension loader. The smoke host explicitly LOADs the release artifact.
+    # DuckDB 2.0's static archive includes its linked extension registry.
+    # The smoke host explicitly LOADs the release artifact.
     target_link_libraries(root_loadable_extension_smoke PRIVATE
         duckdb_static
-        dummy_static_extension_loader
     )
     target_compile_features(root_loadable_extension_smoke PRIVATE cxx_std_17)
     set_target_properties(root_loadable_extension_smoke PROPERTIES
@@ -103,6 +102,8 @@ if(ROOT4DUCKDB_PAYLOAD_STATIC_LIBSTDCXX)
 endif()
 
 # Resolve circular static archive dependencies inside the payload.
+# DuckDB 2.0 embeds its parser and linked extension registry in duckdb_static;
+# the former duckdb_pg_query and dummy_static_extension_loader targets are gone.
 if(TARGET root_payload_loadable_extension AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(root_payload_loadable_extension
         "-Wl,--start-group"
@@ -113,7 +114,6 @@ if(TARGET root_payload_loadable_extension AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
 
         duckdb_fsst
         duckdb_fmt
-        duckdb_pg_query
         duckdb_re2
         duckdb_miniz
         duckdb_utf8proc
@@ -125,9 +125,6 @@ if(TARGET root_payload_loadable_extension AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
         duckdb_zstd
 
         ${ROOT4DUCKDB_ICEBERG_STATIC_LIBRARIES}
-
-        # Use DuckDB's stub loader to avoid automatic extension initialization.
-        dummy_static_extension_loader
 
         "-Wl,--end-group"
     )

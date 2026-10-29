@@ -6,7 +6,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-DUCKDB_BIN="${ROOT4DUCKDB_INDEPENDENT_DUCKDB:-$PROJECT_DIR/.deps/vanilla-duckdb-1.5.6/duckdb}"
+DUCKDB_BIN="${ROOT4DUCKDB_INDEPENDENT_DUCKDB:-$PROJECT_DIR/.deps/vanilla-duckdb-2.0/duckdb}"
 EXT="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
 WORK_DIR="${ROOT4DUCKDB_INDEPENDENT_TEST_DIR:-$(mktemp -d /tmp/root4duckdb-independent.XXXXXX)}"
 FIXTURE_DIR="$PROJECT_DIR/test/fixtures"
@@ -16,7 +16,13 @@ fail() {
     exit 1
 }
 
-[[ -x "$DUCKDB_BIN" ]] || fail "Independent DuckDB not found: $DUCKDB_BIN"
+[[ -x "$DUCKDB_BIN" ]] || fail "Independent DuckDB 2.0 not found: $DUCKDB_BIN"
+if [[ "$(readlink -f "$DUCKDB_BIN")" == "$(readlink -f "$PROJECT_DIR/build/release/duckdb")" ]]; then
+    fail "Independent test cannot use the ROOT4DuckDB bundled CLI"
+fi
+DUCKDB_HOST_VERSION="$("$DUCKDB_BIN" --version)"
+[[ "$DUCKDB_HOST_VERSION" == *v2.0.* ]] ||
+    fail "Expected a DuckDB 2.0 host, got: $DUCKDB_HOST_VERSION"
 [[ -f "$EXT" ]] || fail "Extension not found: $EXT"
 [[ -f "$PROJECT_DIR/.deps/iceberg-env.sh" ]] || fail "Missing .deps/iceberg-env.sh"
 [[ -f "$PROJECT_DIR/.deps/build-env.sh" ]] || fail "Missing .deps/build-env.sh"
@@ -167,5 +173,5 @@ SQL
 done
 
 echo
-echo '[OK] Real ROOT reads work in independent DuckDB 1.5.6'
+echo '[OK] Real ROOT reads work in independent DuckDB 2.0'
 echo "[INFO] Full test logs and generated fixtures: $WORK_DIR"

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DUCKDB="$PROJECT_DIR/.deps/vanilla-duckdb-1.5.6/duckdb"
+DUCKDB="${ROOT4DUCKDB_INDEPENDENT_DUCKDB:-$PROJECT_DIR/.deps/vanilla-duckdb-2.0/duckdb}"
 EXT="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
 FIXTURES="$PROJECT_DIR/test/fixtures"
 WORK_DIR="${ROOT4DUCKDB_PRISTINE_TEST_DIR:-$(mktemp -d /tmp/root4duckdb-pristine.XXXXXX)}"

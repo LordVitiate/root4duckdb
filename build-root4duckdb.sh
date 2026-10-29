@@ -8,7 +8,7 @@ CLEAN=0
 RUN_TESTS=0
 PACKAGE_RELEASE=0
 ROOT_PREFIX_ARG=""
-DUCKDB_VERSION="${DUCKDB_VERSION:-v1.5.6}"
+DUCKDB_VERSION="${DUCKDB_VERSION:-v2.0.0}"
 
 usage() {
     cat <<'USAGE'
@@ -475,15 +475,54 @@ python3 "$PROJECT_DIR/scripts/validate_project.py"
 "$PROJECT_DIR/scripts/test-serialized-codec.sh"
 check_root_abi
 
-if [[ ! -f "$PROJECT_DIR/duckdb/CMakeLists.txt" ||
-      ! -f "$PROJECT_DIR/extension-ci-tools/makefiles/duckdb_extension.Makefile" ]]; then
-    echo "[1/6] Preparing pinned DuckDB sources"
+# The dependency directories survive Git branch switches. Their mere presence
+# does not mean that the sources match this branch's DuckDB/API version.
+EXPECTED_DUCKDB_COMMIT="d54cbbe3df17e8e5ce68312f483b4155836112aa"
+EXPECTED_CI_TOOLS_COMMIT="b8d325c37e82160886579880707493bd358c0e62"
+
+source_tree_matches_pins() {
+    [[ -f "$PROJECT_DIR/duckdb/CMakeLists.txt" &&
+       -f "$PROJECT_DIR/duckdb/src/include/duckdb/planner/table_filter_set.hpp" &&
+       -f "$PROJECT_DIR/extension-ci-tools/makefiles/duckdb_extension.Makefile" ]] || return 1
+
+    [[ "$("$GIT_BIN" -C "$PROJECT_DIR/duckdb" rev-parse HEAD 2>/dev/null)" == "$EXPECTED_DUCKDB_COMMIT" &&
+       "$("$GIT_BIN" -C "$PROJECT_DIR/extension-ci-tools" rev-parse HEAD 2>/dev/null)" == "$EXPECTED_CI_TOOLS_COMMIT" ]]
+}
+
+SOURCE_TREE_CHANGED=0
+if ! source_tree_matches_pins; then
+    echo "[1/6] Preparing pinned DuckDB sources (missing or mismatched checkout)"
     "$PROJECT_DIR/setup-source-tree.sh"
+    source_tree_matches_pins || {
+        echo "[ERROR] Dependency sources do not match the pinned revisions after setup." >&2
+        exit 1
+    }
+    SOURCE_TREE_CHANGED=1
 else
-    echo "[1/6] Pinned DuckDB sources already present"
+    echo "[1/6] Pinned DuckDB sources already present and verified"
 fi
 
 BUILD_DIR="$PROJECT_DIR/build/release"
+
+# A CMake build directory belongs to one DuckDB source revision. Do not reuse
+# compiled objects or cached API settings after changing pinned dependencies.
+if (( SOURCE_TREE_CHANGED && !CLEAN )); then
+    echo "[INFO] DuckDB dependencies changed; resetting the stale CMake build directory."
+    CLEAN=1
+fi
+
+# An older DuckDB checkout can leave CMAKE_CXX_STANDARD=11 in the cache.
+# DuckDB 2.0 rejects this setting before its own default C++17 policy applies.
+if (( !CLEAN )) && [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+    cached_cxx_standard="$(
+        sed -nE 's/^CMAKE_CXX_STANDARD:[^=]*=([0-9]+)$/\1/p' "$BUILD_DIR/CMakeCache.txt"
+    )"
+    if [[ "$cached_cxx_standard" =~ ^[0-9]+$ ]] && (( cached_cxx_standard < 17 )); then
+        echo "[INFO] Cached C++ standard $cached_cxx_standard is incompatible with DuckDB 2.0."
+        echo "[INFO] Resetting build/release to apply DuckDB's C++17 default."
+        CLEAN=1
+    fi
+fi
 
 if ((CLEAN == 0)) && [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
     cached_root_config="$(

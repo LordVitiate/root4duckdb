@@ -1,7 +1,16 @@
 #include "root4duckdb/core/root_lake_common.hpp"
+#include "root4duckdb/core/root_scan_contract.hpp"
 
 namespace duckdb::rootlake
 {
+
+void ConfigureRootRelationScan(TableFunction& function)
+{
+    function.filter_pushdown = true;
+    function.filter_prune = true;
+    function.projection_pushdown = true;
+    function.order_preservation_type = OrderPreservationType::NO_ORDER;
+}
 
 uint64_t FNV1a64(const void* data, size_t size, uint64_t seed)
 {
@@ -33,7 +42,7 @@ std::string ColumnId(const std::string& schema_id, const std::string& logical_pa
     return Hex64(FNV1a64(logical_path, FNV1a64(schema_id)));
 }
 
-void EnsureQueryOK(MaterializedQueryResult& result, const std::string& label)
+void EnsureQueryOK(QueryResult& result, const std::string& label)
 {
     if (result.HasError())
     {

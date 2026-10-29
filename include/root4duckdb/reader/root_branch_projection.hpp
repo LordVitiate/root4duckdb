@@ -20,9 +20,9 @@ struct BranchProjectionResult
     std::vector<std::string> branches;
 };
 
-BranchProjectionResult ApplyBranchProjection(
-    TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes, uint64_t entry_begin = 0,
-    uint64_t entry_end = std::numeric_limits<uint64_t>::max());
+BranchProjectionResult ApplyBranchProjection(TTree* tree, const std::vector<TBranch*>& input, uint64_t cache_bytes,
+                                             uint64_t entry_begin = 0,
+                                             uint64_t entry_end = std::numeric_limits<uint64_t>::max());
 
 /// Restores all branches and configures the optional tree cache.
 void EnableAllBranches(TTree* tree, uint64_t cache_bytes = 0);

@@ -13,7 +13,6 @@
 #include <sstream>
 #include <utility>
 
-
 namespace duckdb::rootlake
 {
 
@@ -130,6 +129,18 @@ bool RootPathReadResult::FallbackActivated() const noexcept
     return route == RootPathReadRoute::OBJECT_FALLBACK;
 }
 
+struct RootPathReader::ObjectCursorState
+{
+    explicit ObjectCursorState(const std::vector<PathLevel>& resolved_levels) : stable_levels(resolved_levels)
+    {
+    }
+
+    std::vector<PathLevel> stable_levels;
+    OffsetValueCursor cursor;
+    // Preserve the object decoder's page buffers across event/page boundaries.
+    ReadResult numeric_page;
+};
+
 RootPathReader::RootPathReader() = default;
 RootPathReader::~RootPathReader() = default;
 RootPathReader::RootPathReader(RootPathReader&&) noexcept = default;
@@ -138,11 +149,6 @@ RootPathReader& RootPathReader::operator=(RootPathReader&&) noexcept = default;
 bool RootPathReader::SerializedActive() const
 {
     return serialized_active;
-}
-
-bool RootPathReader::FallbackRecorded() const
-{
-    return fallback_recorded;
 }
 
 uint32_t RootPathReader::ValidationRemaining() const
@@ -194,6 +200,17 @@ void RootPathReader::Resolve(TTree* tree_p, TBranch* object_branch, TClass* root
     serialized_plan = BuildSerializedReadPlan(root_class, path, physical_branch);
 }
 
+void RootPathReader::BindObjectPath(std::vector<PathLevel> levels_p)
+{
+    Reset();
+    if (levels_p.empty())
+    {
+        throw InvalidInputException("ROOT object-only path must contain at least one level");
+    }
+    levels = std::move(levels_p);
+    index_depth = rootlake::IndexDepth(levels);
+}
+
 RootPathReaderStartResult RootPathReader::StartSerialized(RootPathReaderOptions options_p, std::string rejection_reason)
 {
     options_p.Validate();
@@ -231,52 +248,56 @@ void RootPathReader::SetSerializedBasketCache(std::shared_ptr<SerializedBasketCa
     serialized_basket_cache = std::move(cache);
 }
 
-RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
-                                                     std::vector<double>& values, std::vector<int32_t>& flat_indices,
-                                                     bool collect_indices)
+void RootPathReader::AttachSharedBasketCache(
+    std::unordered_map<TBranch*, std::shared_ptr<SerializedBasketCache>>& caches)
 {
-    if (!serialized_active)
+    if (!physical_branch)
     {
-        return {RootPathReadRoute::NOT_ATTEMPTED, false};
+        return;
     }
-    std::vector<double> reference_values;
-    std::vector<int32_t> reference_indices;
-    void* reference_object = nullptr;
-    if (validation_remaining > 0)
+    auto& cache = caches[physical_branch];
+    if (!cache)
     {
-        // The oracle owns a separate TFile/TTree so ROOT branch addresses and
-        // associative-container staging cannot affect the projected reader.
-        reference_object = object_entry.ReadFrom(validation_reader);
-        if (reference_object)
-        {
-            OffsetValueReader::CollectFlat(reference_object, levels, index_depth, reference_values, reference_indices);
-        }
+        cache = std::make_shared<SerializedBasketCache>();
+        cache->Bind(physical_branch);
     }
-    std::string failure_reason;
-    const bool decoded = serialized_reader.Decode(entry, values, flat_indices, failure_reason,
-                                                  collect_indices || validation_remaining > 0);
-    if (!decoded)
+    SetSerializedBasketCache(cache);
+}
+
+void RootPathReader::BeginObjectEntry(void* object, int64_t entry_id)
+{
+    if (!object || levels.empty())
     {
-        const bool activated = ActivateFallback(failure_reason);
-        return {activated ? RootPathReadRoute::OBJECT_FALLBACK : RootPathReadRoute::NOT_ATTEMPTED, false};
+        throw InvalidInputException("Cannot start ROOT object cursor without an object and resolved path");
     }
-    if (validation_remaining > 0)
+    if (!object_cursor_state)
     {
-        if (!reference_object || !EqualDecodedValues(values, flat_indices, reference_values, reference_indices))
-        {
-            const auto reason = ValidationMismatch(values, flat_indices, reference_values, reference_indices,
-                                                   [](double value)
-                                                   {
-                                                       std::ostringstream stream;
-                                                       stream << std::setprecision(17) << value;
-                                                       return stream.str();
-                                                   });
-            const bool activated = ActivateFallback(reason);
-            return {activated ? RootPathReadRoute::OBJECT_FALLBACK : RootPathReadRoute::NOT_ATTEMPTED, true};
-        }
-        --validation_remaining;
+        object_cursor_state = std::make_unique<ObjectCursorState>(levels);
     }
-    return {RootPathReadRoute::SERIALIZED, true};
+    object_cursor_state->cursor.Open(object, object_cursor_state->stable_levels, entry_id);
+}
+
+bool RootPathReader::ReadObjectPage(idx_t maximum_rows, ReadResult& result)
+{
+    if (!object_cursor_state)
+    {
+        result.Clear();
+        return false;
+    }
+    return object_cursor_state->cursor.ReadPage(maximum_rows, result);
+}
+
+bool RootPathReader::HasObjectPage() const noexcept
+{
+    return object_cursor_state && object_cursor_state->cursor.HasMore();
+}
+
+void RootPathReader::EndObjectEntry() noexcept
+{
+    if (object_cursor_state)
+    {
+        object_cursor_state->cursor.Reset();
+    }
 }
 
 RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
@@ -348,8 +369,135 @@ RootPathReadResult RootPathReader::TryReadSerialized(uint64_t entry, RootEntryRe
     return {RootPathReadRoute::SERIALIZED, true};
 }
 
+RootPathReadResult RootPathReader::BeginSerializedPage(uint64_t entry)
+{
+    if (!serialized_active || validation_remaining != 0 || !serialized_plan.Is(SerializedProjectionKind::FIXED_MEMBER))
+    {
+        return {RootPathReadRoute::NOT_ATTEMPTED, false};
+    }
+    std::string reason;
+    if (!serialized_reader.BeginPagedEntry(entry, reason))
+    {
+        const bool activated = ActivateFallback(reason);
+        return {activated ? RootPathReadRoute::OBJECT_FALLBACK : RootPathReadRoute::NOT_ATTEMPTED, false};
+    }
+    return {RootPathReadRoute::SERIALIZED, true};
+}
+
+RootNumericEntryStartResult RootPathReader::BeginNumericEntry(uint64_t entry, RootEntryReader& object_entry,
+                                                              int64_t entry_id, std::vector<RootPrimitiveValue>& values,
+                                                              std::vector<int32_t>& flat_indices)
+{
+    if (HasNumericPage())
+    {
+        throw IOException("cannot begin another ROOT entry with unread numeric pages");
+    }
+    EndNumericPage();
+    values.clear();
+    flat_indices.clear();
+    bool fallback_activated = false;
+    if (serialized_active && serialized_plan.Is(SerializedProjectionKind::FIXED_MEMBER) && validation_remaining == 0)
+    {
+        const auto paged = BeginSerializedPage(entry);
+        fallback_activated = paged.FallbackActivated();
+        if (paged.Serialized())
+        {
+            return {RootNumericEntryRoute::SERIALIZED_PAGE, false, fallback_activated};
+        }
+    }
+    bool attempt_decoded = false;
+    if (serialized_active)
+    {
+        const auto read = TryReadSerialized(entry, object_entry, values, flat_indices);
+        fallback_activated = fallback_activated || read.FallbackActivated();
+        attempt_decoded = read.Decoded();
+        if (read.Serialized())
+        {
+            return {RootNumericEntryRoute::SERIALIZED_VALUES, attempt_decoded, fallback_activated};
+        }
+        if (read.FallbackActivated() && object_entry.LoadCount() != 0)
+        {
+            object_entry.Invalidate();
+        }
+    }
+    void* object = object_entry.Read();
+    if (!object)
+    {
+        return {RootNumericEntryRoute::NONE, attempt_decoded, fallback_activated};
+    }
+    BeginObjectEntry(object, entry_id);
+    return {RootNumericEntryRoute::OBJECT_PAGE, attempt_decoded, fallback_activated};
+}
+
+RootNumericPageSource RootPathReader::ReadNumericPage(idx_t rows, std::vector<RootPrimitiveValue>& values,
+                                                      std::vector<int32_t>& flat_indices)
+{
+    values.clear();
+    flat_indices.clear();
+    if (rows == 0)
+    {
+        throw InvalidInputException("ROOT numeric page size must be positive");
+    }
+    if (serialized_reader.HasPage())
+    {
+        std::string reason;
+        if (!serialized_reader.ReadPage(rows, values, flat_indices, reason))
+        {
+            if (!reason.empty())
+            {
+                // Once a page escapes, switching to object decoding could duplicate values.
+                throw IOException("ROOT serialized cursor failed: " + reason);
+            }
+            return RootNumericPageSource::NONE;
+        }
+        return RootNumericPageSource::SERIALIZED;
+    }
+    if (!HasObjectPage())
+    {
+        return RootNumericPageSource::NONE;
+    }
+    auto& page = object_cursor_state->numeric_page;
+    if (!ReadObjectPage(rows, page))
+    {
+        return RootNumericPageSource::NONE;
+    }
+    if (page.is_string_flag.size() != page.size() || page.numbers.size() != page.size() ||
+        page.vector_indices.size() != page.size() ||
+        (index_depth != 0 && page.size() > flat_indices.max_size() / index_depth))
+    {
+        throw IOException("ROOT numeric page has an invalid value or index shape");
+    }
+    flat_indices.reserve(page.size() * index_depth);
+    for (idx_t i = 0; i < page.size(); ++i)
+    {
+        if (page.is_string_flag[i] || page.vector_indices[i].size() != index_depth)
+        {
+            throw IOException("ROOT numeric page does not match its indexed schema");
+        }
+        flat_indices.insert(flat_indices.end(), page.vector_indices[i].begin(), page.vector_indices[i].end());
+    }
+    // Return the decoded page without copying; keep the previous output buffer
+    // in this worker's scratch page for reuse on the next object read.
+    values.swap(page.numbers);
+    return RootNumericPageSource::OBJECT;
+}
+
+bool RootPathReader::HasNumericPage() const noexcept
+{
+    return serialized_reader.HasPage() || HasObjectPage();
+}
+
+void RootPathReader::EndNumericPage() noexcept
+{
+    serialized_reader.EndPagedEntry();
+    EndObjectEntry();
+}
+
 void RootPathReader::Reset()
 {
+    // Non-owning cursor references must die before the owning ROOT context.
+    object_cursor_state.reset();
+    EndNumericPage();
     serialized_reader.Reset();
     serialized_basket_cache.reset();
     validation_reader.Reset();
@@ -367,24 +515,6 @@ void RootPathReader::Reset()
     validation_remaining = 0;
 }
 
-void RootPathReader::CollectValues(void* object, std::vector<double>& values) const
-{
-    OffsetValueReader::CollectValues(object, levels, values);
-}
-
-void RootPathReader::CollectFlat(void* object, std::vector<double>& values, std::vector<int32_t>& flat_indices) const
-{
-    OffsetValueReader::CollectFlat(object, levels, index_depth, values, flat_indices);
-}
-
-void RootPathReader::CollectTypedValues(void* object, std::vector<RootPrimitiveValue>& values) const
-{
-
-    ReadResult result;
-    OffsetValueReader::CollectDirect(object, levels, -1, 0, result);
-    values = std::move(result.numbers);
-}
-
 void RootPathReader::CollectTypedFlat(void* object, std::vector<RootPrimitiveValue>& values,
                                       std::vector<int32_t>& flat_indices) const
 {
@@ -393,6 +523,10 @@ void RootPathReader::CollectTypedFlat(void* object, std::vector<RootPrimitiveVal
     OffsetValueReader::CollectDirect(object, levels, -1, 0, result);
     values = std::move(result.numbers);
     flat_indices.clear();
+    if (index_depth != 0 && result.vector_indices.size() > flat_indices.max_size() / index_depth)
+    {
+        throw IOException("ROOT flattened index capacity exceeds supported size");
+    }
     flat_indices.reserve(result.vector_indices.size() * index_depth);
     for (const auto& indices : result.vector_indices)
     {
@@ -407,11 +541,6 @@ void RootPathReader::CollectTypedFlat(void* object, std::vector<RootPrimitiveVal
             flat_indices.push_back(static_cast<int32_t>(index));
         }
     }
-}
-
-void RootPathReader::CollectDirect(void* object, int64_t max_values, int64_t entry_id, ReadResult& result) const
-{
-    OffsetValueReader::CollectDirect(object, levels, max_values, entry_id, result);
 }
 
 const SerializedReadCounters& RootPathReader::SerializedCounters() const

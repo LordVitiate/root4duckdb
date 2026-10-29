@@ -139,6 +139,50 @@ trap cleanup EXIT INT TERM
 mkdir -p "$STAGE/index" "$STAGE/temp"
 write_status running "worker started"
 
+# A previous failed/SIGKILL chunk was moved to failed/ or left in .staging-*.
+# Recover only its inner, immutable C++ checkpoint directories and only when
+# the production plan fingerprint is unchanged. The resumed indexer checks
+# source hashes, column metadata, digest and Parquet readability again.
+python3 - "$PLAN" "$CHUNK_ID" "$OUTPUT_ROOT" "$STAGE" <<'PY'
+import json,pathlib,sys
+plan_path,chunk_id,output_root,stage=sys.argv[1:]
+root=pathlib.Path(output_root)
+plan=json.load(open(plan_path))
+candidates=sorted(
+    list((root/"failed").glob(chunk_id+"-*"))+
+    list(root.glob(".staging-"+chunk_id+"-*")),
+    key=lambda p:p.name,reverse=True)
+destination=pathlib.Path(stage)/"index"
+for candidate in candidates:
+    if candidate.is_symlink() or not candidate.is_dir() or candidate==pathlib.Path(stage):
+        continue
+    marker=candidate/"chunk.json"
+    if not marker.is_file():
+        continue
+    try:
+        prior=json.loads(marker.read_text())
+        if prior.get("plan_fingerprint")!=plan["fingerprint"]:
+            continue
+        index=candidate/"index"
+        for parent in (index,index/"failed"):
+            if not parent.is_dir():
+                continue
+            for item in sorted(parent.iterdir()):
+                if item.is_symlink() or not item.is_dir():
+                    continue
+                if parent==index and not item.name.startswith(".staging-"):
+                    continue
+                if parent!=index and not (item/"request.json").is_file():
+                    continue
+                target_dir=destination if parent==index else destination/"failed"
+                target_dir.mkdir(parents=True,exist_ok=True)
+                target=target_dir/item.name
+                if not target.exists():
+                    item.rename(target)
+    except (OSError,ValueError) as error:
+        raise SystemExit(f"cannot restore previous chunk checkpoint: {error}")
+PY
+
 python3 - "$PLAN" "$CHUNK_ID" "$STAGE" <<'PY'
 import hashlib,json,pathlib,struct,sys
 plan_path,chunk_id,stage=sys.argv[1:]
@@ -223,7 +267,8 @@ COPY (
   estimated_worker_bytes:=$ESTIMATED_WORKER_BYTES,
   catalog_mode:='external',
   chunk_id:='$CHUNK_SQL', manifest_fingerprint:='$MANIFEST_SQL',
-  dictionary_fingerprint:='$DICT_FP_SQL', overwrite:=true, allow_partial:=false
+  dictionary_fingerprint:='$DICT_FP_SQL', overwrite:=true, allow_partial:=false,
+  resume:=true
  )
 ) TO '$STAGE/status.csv' (HEADER, DELIMITER ',');
 SQL

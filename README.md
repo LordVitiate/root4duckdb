@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/images/Halloween Root4DuckDB Infographic.png" alt="ROOT to SQL" width="100%">
+<img src="assets/images/NewBanner.png" alt="ROOT to SQL" width="100%">
 
 <p>
   <a href="https://github.com/LordVitiate/root4duckdb/releases/latest">
@@ -9,7 +9,7 @@
   <a href="https://deepwiki.com/LordVitiate/root4duckdb/">
     <img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg">
   </a>
-  <img alt="DuckDB dev" src="https://img.shields.io/badge/DuckDB-dev%20v1.5.6-FFF000">
+  <img alt="DuckDB dev" src="https://img.shields.io/badge/DuckDB-dev%20v2.0.0-FFF000">
   <img alt="CERN ROOT" src="https://img.shields.io/badge/CERN%20ROOT-6.40-2c6aa6">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
@@ -17,8 +17,9 @@
 
 </div>
 
-## Latest news 🎃
-- **2026-10-19 — 52.7 billion values from three-level nested ROOT arrays indexed in just 1.5 GiB.** On a **single node** (14vCPU, 8GB RAM), ROOT4DuckDB indexed 3.51 billion track states across 100 ROOT files at **14.3M values/s**. The Iceberg metadata index is **~168× smaller** than the 252 GiB of indexed ROOT baskets. Indexed SQL access took **0.283 s** for a single event — all without converting the underlying ROOT data.
+## Latest news 🔥
+
+- **2026-10-27 — DuckDB 2.0 migration.** The development branch builds against DuckDB 2.0.0 (Cyanoptera). Native integration tests and ten ROOT SQL checks with an independent DuckDB CLI passed. Loading on hosts with older libstdc++ still needs runtime work.
 - **2026-10-09 — Fixes driven by real analysis.** Production ROOT data exposed schema-evolution and projection issues; fixes were checked against the object reader. EOS/FUSE cache range pruning and physical I/O diagnostics were also improved.
 - **2026-10-09 — DuckDB 1.5.6 migration.** The development source tree and build scripts now target DuckDB 1.5.6; published release binaries retain their own version requirements.
 - **2026-08-25 — Relation-level ROOT queries and parallel decoding.** `read_root()` now selects objects and collections as SQL relations, exposes their immediate fields as columns. Both object and serialized readers now parallelize single-file scans, while multi-column serialized reads share basket decoding work across sibling fields. Exact remote [ROOT URIs](https://root.cern/doc/master/classTS3WebFile.html), including `s3://` and `davix://`, use the common ROOT input layer.
@@ -35,7 +36,7 @@ The current binary release requires:
 - DuckDB 1.4.5;
 - a compatible CERN ROOT 6.40 installation.
 
-The `dev` source build instead targets **DuckDB 1.5.6**. Use its pinned build scripts; do not mix extension binaries from different DuckDB versions.
+The development source build targets **DuckDB 2.0.0**. The published binary release above has different compatibility requirements; use the appropriate DuckDB and ROOT runtime.
 
 Download the extension:
 
@@ -114,7 +115,7 @@ ROOT4DuckDB provides one logical SQL layer over that storage:
 
 - primitive and deeply nested ROOT fields;
 - fully split, partially split and unsplit layouts;
-- direct, serialized and universal object readers;
+- one serialized-first path reader with verified deep-layout decoding and an object compatibility backend;
 - automatic correctness fallback;
 - local, remote and parallel multi-file scans;
 - projection and predicate pushdown;

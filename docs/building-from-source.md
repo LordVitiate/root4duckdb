@@ -55,7 +55,7 @@ A ROOT prefix can also be passed directly to the extension build:
 
 The source archive does not need Git submodule metadata.
 
-Prepare the pinned DuckDB and extension tool revisions for this source checkout (DuckDB 1.5.6 on `dev`):
+Prepare the pinned DuckDB and extension tool revisions for this source checkout (DuckDB 2.0.0 on `dev`):
 
 ```bash
 ./setup-source-tree.sh
@@ -161,7 +161,7 @@ For a new source checkout:
 build/release/duckdb
 ```
 
-This binary contains the statically registered ROOT4DuckDB extension.
+This is the bundled DuckDB 2.0 CLI. ROOT4DuckDB is built as a loadable extension and must be loaded explicitly.
 
 ### Loadable extension
 
@@ -169,7 +169,7 @@ This binary contains the statically registered ROOT4DuckDB extension.
 build/release/extension/root/root.duckdb_extension
 ```
 
-This artifact can be loaded into an ABI-compatible DuckDB build:
+This artifact can be loaded into a compatible DuckDB 2.0 process with an appropriate ROOT and C++ runtime:
 
 ```sql
 LOAD './build/release/extension/root/root.duckdb_extension';
@@ -181,7 +181,7 @@ LOAD './build/release/extension/root/root.duckdb_extension';
 .deps/iceberg-cpp/
 ```
 
-The extension and bundled DuckDB executable require these shared libraries at runtime.
+The bundled DuckDB CLI uses shared Iceberg libraries, whereas the loadable extension embeds Iceberg statically and discovers a compatible ROOT runtime at load time.
 
 ## Run
 
@@ -200,7 +200,7 @@ Arguments are forwarded to DuckDB:
 For a non-interactive smoke test:
 
 ```bash
-./run-duckdb.sh -c "
+./run-duckdb.sh -unsigned -cmd "LOAD './build/release/extension/root/root.duckdb_extension';" -c "
     SELECT function_name
     FROM duckdb_functions()
     WHERE function_name IN (
@@ -424,7 +424,7 @@ The same recommendation applies to Iceberg and incremental extension builds.
 
 ## DuckDB Community CI
 
-The official DuckDB distribution workflow is in `.github/workflows/MainDistributionPipeline.yml`. It targets DuckDB 1.5.6 on Linux x86_64 only and is independent of the CERN release-package path.
+The official DuckDB distribution workflow is in `.github/workflows/MainDistributionPipeline.yml`. It targets DuckDB 2.0.0 on Linux x86_64 only and is independent of the CERN release-package path.
 
 When DuckDB's Linux container sets `LINUX_CI_IN_DOCKER=1`, `make release` first runs `scripts/prepare-community-deps.sh`. This installs CERN ROOT 6.40.04 and GCC 14 via conda-forge into `.deps/community-root/`, then builds the pinned Apache Iceberg C++ into `.deps/iceberg-cpp/`. The resulting extension uses the runtime bootstrap and keeps CERN ROOT external.
 

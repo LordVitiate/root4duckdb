@@ -60,6 +60,25 @@ bool DecodeSerializedVectorPayload(const uint8_t* bytes, size_t entry_size, size
                                    std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
                                    std::string& failure_reason, bool collect_indices = true);
 
+/// Bounded byte-backed primitive pages. Source entry must outlive the cursor.
+class SerializedVectorPageCursor final
+{
+  public:
+    bool Open(const uint8_t* bytes, size_t entry_size, size_t payload_offset, uint64_t count,
+              const SerializedEntryLayout& source_layout, std::string& failure_reason);
+    bool ReadPage(size_t maximum_rows, std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
+                  std::string& failure_reason, bool collect_indices = true);
+    [[nodiscard]] bool HasMore() const noexcept;
+    void Reset() noexcept;
+
+  private:
+    const uint8_t* projected = nullptr; // Owned by the pinned physical basket.
+    SerializedEntryLayout layout;
+    SerializedPrimitiveKind kind = SerializedPrimitiveKind::UNKNOWN;
+    uint64_t value_count = 0;
+    uint64_t next_value = 0;
+};
+
 /// Decodes a nested STL primitive member column located by ROOT actions.
 bool DecodeSerializedNestedPrimitiveVectorColumn(const uint8_t* bytes, size_t entry_size, size_t column_offset,
                                                  uint64_t outer_count, const SerializedEntryLayout& layout,

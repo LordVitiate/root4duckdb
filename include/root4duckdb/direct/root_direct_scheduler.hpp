@@ -41,8 +41,7 @@ class RootDirectFileScheduler
     void RecordUnavailable(const RootDirectFileTask& task, uint32_t attempts, uint64_t elapsed_us);
     /// Records a file-level scan failure.
     void RecordFailure(const RootDirectFileTask& task, const std::string& message);
-    void RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us, uint64_t read_calls,
-                        uint64_t read_bytes);
+    void RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us, uint64_t read_calls, uint64_t read_bytes);
     /// Tracks schema reuse across source files.
     void ObserveSchema(const std::string& fingerprint);
     /// Captures time to the first materialized output row.

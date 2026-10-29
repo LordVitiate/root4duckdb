@@ -67,7 +67,7 @@ set(EXTENSION_STATIC_BUILD "${_root4duckdb_saved_extension_static_build}")
 unset(_root4duckdb_saved_extension_static_build)
 
 target_include_directories(${LOADABLE_EXTENSION_NAME} PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
 set_target_properties(${LOADABLE_EXTENSION_NAME} PROPERTIES

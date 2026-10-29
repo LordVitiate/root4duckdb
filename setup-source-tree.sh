@@ -6,10 +6,10 @@ DEPS_DIR="$PROJECT_DIR/.deps"
 BUILD_ENV="$DEPS_DIR/build-env.sh"
 
 DUCKDB_URL="https://github.com/duckdb/duckdb.git"
-DUCKDB_VERSION="v1.5.6"
-DUCKDB_COMMIT="069cc9f9b5be802405797faecc284961b07c70ef"
+DUCKDB_VERSION="v2.0.0"
+DUCKDB_COMMIT="d54cbbe3df17e8e5ce68312f483b4155836112aa"
 CI_TOOLS_URL="https://github.com/duckdb/extension-ci-tools.git"
-CI_TOOLS_COMMIT="ef15a2a7453db5b4f85b7c668a545ae2f1193ff6"
+CI_TOOLS_COMMIT="b8d325c37e82160886579880707493bd358c0e62"
 
 usage() {
     cat <<'USAGE'

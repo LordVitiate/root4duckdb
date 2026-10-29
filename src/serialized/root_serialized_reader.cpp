@@ -38,6 +38,7 @@ SerializedBasketReader& SerializedBasketReader::operator=(SerializedBasketReader
     basket_prepared = other.basket_prepared;
     plan = std::move(other.plan);
     layout = std::move(other.layout);
+    page_cursor = std::move(other.page_cursor);
     current_basket = other.current_basket;
     current_basket_entry_begin = other.current_basket_entry_begin;
     current_basket_entry_end = other.current_basket_entry_end;
@@ -66,6 +67,7 @@ SerializedBasketReader& SerializedBasketReader::operator=(SerializedBasketReader
     other.leaf_make_class = false;
     other.resolved_element_version = -1;
     other.nested_fixed_layout_cache = {};
+    other.page_cursor.Reset();
     other.observed_memberwise_header = 0;
     other.counters = {};
     return *this;
@@ -165,6 +167,7 @@ void SerializedBasketReader::ReleaseBindings() noexcept
 
 void SerializedBasketReader::Reset() noexcept
 {
+    EndPagedEntry();
     ReleaseBindings();
     const bool uses_root_scratch = plan.Is(SerializedProjectionKind::ROOT_SELECTED_SUBTREE) ||
                                    plan.Is(SerializedProjectionKind::COLLECTION_BRANCH);
@@ -222,7 +225,7 @@ bool SerializedBasketReader::EnsureLeafScratch(uint64_t value_count, std::string
     }
     const uint64_t byte_count = std::max<uint64_t>(1, value_count * plan.value_bytes);
     const uint64_t alignment = sizeof(std::max_align_t);
-    const uint64_t word_count = (byte_count + alignment - 1) / alignment;
+    const uint64_t word_count = byte_count / alignment + (byte_count % alignment != 0);
     if (word_count > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
     {
         failure_reason = "primitive physical branch scratch size exceeds host limits";
@@ -319,28 +322,11 @@ bool SerializedBasketReader::EntrySlice(uint64_t entry, const uint8_t*& begin, s
                                  size, failure_reason);
 }
 
-bool SerializedBasketReader::Decode(uint64_t entry, std::vector<double>& values, std::vector<int32_t>& flat_indices,
-                                    std::string& failure_reason, bool collect_indices)
-{
-    std::vector<RootPrimitiveValue> exact_values;
-    const bool decoded = Decode(entry, exact_values, flat_indices, failure_reason, collect_indices);
-    values.clear();
-    if (!decoded)
-    {
-        return false;
-    }
-    values.reserve(exact_values.size());
-    for (const auto& value : exact_values)
-    {
-        values.push_back(value.AsDouble());
-    }
-    return true;
-}
-
 bool SerializedBasketReader::Decode(uint64_t entry, std::vector<RootPrimitiveValue>& values,
                                     std::vector<int32_t>& flat_indices, std::string& failure_reason,
                                     bool collect_indices)
 {
+    EndPagedEntry();
     values.clear();
     flat_indices.clear();
     if (plan.Is(SerializedProjectionKind::LEAF_BRANCH))
@@ -512,11 +498,11 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
                 {
                     RootDebug("SERIALIZED.NESTED_FIXED_OFFSET", "path=" + plan.logical_path);
                 }
+                ++counters.nested_fixed_direct_entries;
                 return true;
             }
             const auto offset_reason = failure_reason;
-            RootDebug("SERIALIZED.NESTED_FIXED_FALLBACK",
-                      "path=" + plan.logical_path + " reason=" + offset_reason);
+            RootDebug("SERIALIZED.NESTED_FIXED_FALLBACK", "path=" + plan.logical_path + " reason=" + offset_reason);
             buffer.SetBufferOffset(nested_column_start);
             cached_action_sequence.reset();
             SerializedReadPlan selected_plan = plan;
@@ -530,8 +516,14 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
                 return false;
             }
             cached_action_sequence.reset();
-            return CollectSerializedSelectedSubtree(selected_plan, outer_collection_scratch, max_values_per_entry,
-                                                   values, flat_indices, failure_reason, collect_indices);
+            const bool collected =
+                CollectSerializedSelectedSubtree(selected_plan, outer_collection_scratch, max_values_per_entry, values,
+                                                 flat_indices, failure_reason, collect_indices);
+            if (collected)
+            {
+                ++counters.nested_fixed_scratch_entries;
+            }
+            return collected;
         }
         const Int_t root_offset = buffer.Length();
         if (root_offset < 0 || static_cast<size_t>(root_offset) > entry_size)
@@ -556,13 +548,10 @@ bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, s
     }
 }
 
-bool SerializedBasketReader::DecodeFixedProjectionEntry(const uint8_t* bytes, size_t entry_size,
-                                                        std::vector<RootPrimitiveValue>& values,
-                                                        std::vector<int32_t>& flat_indices, std::string& failure_reason,
-                                                        bool collect_indices)
+bool SerializedBasketReader::PrepareFixedProjectionEntry(const uint8_t* bytes, size_t entry_size,
+                                                         size_t& payload_offset, uint64_t& count,
+                                                         std::string& failure_reason)
 {
-    values.clear();
-    flat_indices.clear();
     if (!bytes || !entry_size || !plan.outer_container_class || !plan.outer_element_class)
     {
         failure_reason = "serialized fixed projection has no ROOT collection metadata";
@@ -622,9 +611,9 @@ bool SerializedBasketReader::DecodeFixedProjectionEntry(const uint8_t* bytes, si
             failure_reason = "ROOT fixed-projection header moved outside the basket entry";
             return false;
         }
-        return DecodeSerializedVectorPayload(bytes, entry_size, static_cast<size_t>(payload_cursor),
-                                             static_cast<uint32_t>(signed_count), layout, max_values_per_entry, values,
-                                             flat_indices, failure_reason, collect_indices);
+        payload_offset = static_cast<size_t>(payload_cursor);
+        count = static_cast<uint32_t>(signed_count);
+        return true;
     }
     catch (const std::exception& ex)
     {
@@ -636,6 +625,69 @@ bool SerializedBasketReader::DecodeFixedProjectionEntry(const uint8_t* bytes, si
         failure_reason = "ROOT failed while parsing the fixed-projection header";
         return false;
     }
+}
+
+bool SerializedBasketReader::DecodeFixedProjectionEntry(const uint8_t* bytes, size_t entry_size,
+                                                        std::vector<RootPrimitiveValue>& values,
+                                                        std::vector<int32_t>& flat_indices, std::string& reason,
+                                                        bool collect_indices)
+{
+    size_t payload = 0;
+    uint64_t count = 0;
+    if (!PrepareFixedProjectionEntry(bytes, entry_size, payload, count, reason))
+    {
+        return false;
+    }
+    return DecodeSerializedVectorPayload(bytes, entry_size, payload, count, layout, max_values_per_entry, values,
+                                         flat_indices, reason, collect_indices);
+}
+
+bool SerializedBasketReader::BeginPagedEntry(uint64_t entry, std::string& reason)
+{
+    EndPagedEntry();
+    if (!plan.Is(SerializedProjectionKind::FIXED_MEMBER))
+    {
+        reason = "paged serialized decoding requires a fixed-member projection";
+        return false;
+    }
+    const uint8_t* bytes = nullptr;
+    size_t entry_size = 0;
+    if (!EntrySlice(entry, bytes, entry_size, reason))
+    {
+        return false;
+    }
+    size_t payload = 0;
+    uint64_t count = 0;
+    if (!PrepareFixedProjectionEntry(bytes, entry_size, payload, count, reason) ||
+        !page_cursor.Open(bytes, entry_size, payload, count, layout, reason))
+    {
+        EndPagedEntry();
+        return false;
+    }
+    ++counters.entries;
+    counters.serialized_bytes += entry_size;
+    return true;
+}
+
+bool SerializedBasketReader::ReadPage(size_t rows, std::vector<RootPrimitiveValue>& values,
+                                      std::vector<int32_t>& indices, std::string& reason)
+{
+    const bool produced = page_cursor.ReadPage(rows, values, indices, reason);
+    if (produced)
+    {
+        counters.values += values.size();
+    }
+    return produced;
+}
+
+bool SerializedBasketReader::HasPage() const noexcept
+{
+    return page_cursor.HasMore();
+}
+
+void SerializedBasketReader::EndPagedEntry() noexcept
+{
+    page_cursor.Reset();
 }
 
 bool SerializedBasketReader::DecodeRootProjectionEntry(const uint8_t* bytes, size_t entry_size,
@@ -717,27 +769,6 @@ bool SerializedBasketReader::DecodeRootProjectionEntry(const uint8_t* bytes, siz
         failure_reason = "ROOT failed while consuming root-class selected actions";
         return false;
     }
-}
-
-bool SerializedBasketReader::DecodeNestedProjectionEntry(const uint8_t* bytes, size_t entry_size,
-                                                         std::vector<double>& values,
-                                                         std::vector<int32_t>& flat_indices,
-                                                         std::string& failure_reason, bool collect_indices)
-{
-    std::vector<RootPrimitiveValue> exact_values;
-    const bool decoded =
-        DecodeNestedProjectionEntry(bytes, entry_size, exact_values, flat_indices, failure_reason, collect_indices);
-    values.clear();
-    if (!decoded)
-    {
-        return false;
-    }
-    values.reserve(exact_values.size());
-    for (const auto& value : exact_values)
-    {
-        values.push_back(value.AsDouble());
-    }
-    return true;
 }
 
 bool SerializedBasketReader::CurrentBasketInfo(SerializedBasketInfo& info) const

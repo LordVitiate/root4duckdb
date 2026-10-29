@@ -131,37 +131,37 @@ bool RunIndependentDatabases(const TestQueries& queries)
 
     for (int worker = 0; worker < WORKER_COUNT; ++worker)
     {
-        workers.emplace_back([&, worker]()
-                             {
-                                 start.arrive_and_wait();
-                                 duckdb_database database = nullptr;
-                                 duckdb_connection connection = nullptr;
-                                 std::string error;
-                                 if (OpenTestDatabase(database, error) &&
-                                     OpenConnection(database, connection, error) &&
-                                     ExecuteSQL(connection, RootLoadSQL(), false, error))
-                                 {
-                                     for (int iteration = 0; iteration < scans_per_worker; ++iteration)
-                                     {
-                                         if (!ExecuteSQL(connection, queries.scalar, true, error))
-                                         {
-                                             break;
-                                         }
-                                     }
-                                 }
-                                 if (connection)
-                                 {
-                                     duckdb_disconnect(&connection);
-                                 }
-                                 if (database)
-                                 {
-                                     duckdb_close(&database);
-                                 }
-                                 if (!error.empty())
-                                 {
-                                     failures.Report(worker, "independent LOAD", error);
-                                 }
-                             });
+        workers.emplace_back(
+            [&, worker]()
+            {
+                start.arrive_and_wait();
+                duckdb_database database = nullptr;
+                duckdb_connection connection = nullptr;
+                std::string error;
+                if (OpenTestDatabase(database, error) && OpenConnection(database, connection, error) &&
+                    ExecuteSQL(connection, RootLoadSQL(), false, error))
+                {
+                    for (int iteration = 0; iteration < scans_per_worker; ++iteration)
+                    {
+                        if (!ExecuteSQL(connection, queries.scalar, true, error))
+                        {
+                            break;
+                        }
+                    }
+                }
+                if (connection)
+                {
+                    duckdb_disconnect(&connection);
+                }
+                if (database)
+                {
+                    duckdb_close(&database);
+                }
+                if (!error.empty())
+                {
+                    failures.Report(worker, "independent LOAD", error);
+                }
+            });
     }
     for (auto& worker : workers)
     {
@@ -186,40 +186,42 @@ bool RunSharedDatabase(duckdb_database database, const TestQueries& queries, boo
 
     for (int worker = 0; worker < WORKER_COUNT; ++worker)
     {
-        workers.emplace_back([&, worker]()
-                             {
-                                 duckdb_connection connection = nullptr;
-                                 std::string error;
-                                 const bool connected = OpenConnection(database, connection, error);
-                                 start.arrive_and_wait();
-                                 if (connected)
-                                 {
-                                     if (concurrent_index && worker == 0)
-                                     {
-                                         ExecuteSQL(connection, queries.index, true, error);
-                                     }
-                                     else
-                                     {
-                                         for (int iteration = 0; iteration < scans_per_reader; ++iteration)
-                                         {
-                                             const auto& query = iteration % 3 == 0 ? queries.scalar :
-                                                                 iteration % 3 == 1 ? queries.nested : queries.object;
-                                             if (!ExecuteSQL(connection, query, true, error))
-                                             {
-                                                 break;
-                                             }
-                                         }
-                                     }
-                                 }
-                                 if (connection)
-                                 {
-                                     duckdb_disconnect(&connection);
-                                 }
-                                 if (!error.empty())
-                                 {
-                                     failures.Report(worker, label, error);
-                                 }
-                             });
+        workers.emplace_back(
+            [&, worker]()
+            {
+                duckdb_connection connection = nullptr;
+                std::string error;
+                const bool connected = OpenConnection(database, connection, error);
+                start.arrive_and_wait();
+                if (connected)
+                {
+                    if (concurrent_index && worker == 0)
+                    {
+                        ExecuteSQL(connection, queries.index, true, error);
+                    }
+                    else
+                    {
+                        for (int iteration = 0; iteration < scans_per_reader; ++iteration)
+                        {
+                            const auto& query = iteration % 3 == 0   ? queries.scalar
+                                                : iteration % 3 == 1 ? queries.nested
+                                                                     : queries.object;
+                            if (!ExecuteSQL(connection, query, true, error))
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (connection)
+                {
+                    duckdb_disconnect(&connection);
+                }
+                if (!error.empty())
+                {
+                    failures.Report(worker, label, error);
+                }
+            });
     }
     for (auto& worker : workers)
     {
@@ -307,20 +309,19 @@ bool RunMemoryProbe(duckdb_database database, const TestQueries& queries)
     const auto destroyed_delta = destroyed() - initial_destroyed;
     if (created_delta < warmup + batch * 2 || created_delta != destroyed_delta)
     {
-        std::cerr << "ROOT object ownership violation: created=" << created_delta
-                  << ", destroyed=" << destroyed_delta << "\n";
+        std::cerr << "ROOT object ownership violation: created=" << created_delta << ", destroyed=" << destroyed_delta
+                  << "\n";
         return false;
     }
-    std::cout << "[OK] ROOT object lifetime: " << created_delta << " constructed, "
-              << destroyed_delta << " destroyed during 1550 queries\n";
+    std::cout << "[OK] ROOT object lifetime: " << created_delta << " constructed, " << destroyed_delta
+              << " destroyed during 1550 queries\n";
     if (samples[0] && samples[1] && samples[2])
     {
-        std::cout << "[MEMORY] ROOT object-mode VmRSS KiB after 50/800/1550 queries: "
-                  << samples[0] << '/' << samples[1] << '/' << samples[2] << '\n';
+        std::cout << "[MEMORY] ROOT object-mode VmRSS KiB after 50/800/1550 queries: " << samples[0] << '/'
+                  << samples[1] << '/' << samples[2] << '\n';
     }
     return true;
 }
-
 
 struct PhastDigest
 {
@@ -339,8 +340,7 @@ struct PhastCase
     const char* columns;
 };
 
-bool ComputePhastDigest(duckdb_connection connection, const std::string& sql, PhastDigest& digest,
-                        std::string& error)
+bool ComputePhastDigest(duckdb_connection connection, const std::string& sql, PhastDigest& digest, std::string& error)
 {
     duckdb_result result{};
     if (duckdb_query(connection, sql.c_str(), &result) != DuckDBSuccess)
@@ -399,12 +399,10 @@ bool RunPhastConcurrency(int argc, char** argv)
         std::cerr << "last-entry must be a nonnegative integer\n";
         return false;
     }
-    const PhastCase cases[] = {
-        {"/PaSetup", "entry_id, run, ver, experiment"},
-        {"/PaEvent/vecTrack/vecTPar/Par", "entry_id, vecTrack_idx, vecTPar_idx, Par_idx, Par"},
-        {"/PaEvent/vecTrack/vecTPar/Cov", "entry_id, vecTrack_idx, vecTPar_idx, Cov_idx, Cov"},
-        {"/PaEvent/vecVertex", "entry_id, vecVertex_idx, chi2tot, bestprim"}
-    };
+    const PhastCase cases[] = {{"/PaSetup", "entry_id, run, ver, experiment"},
+                               {"/PaEvent/vecTrack/vecTPar/Par", "entry_id, vecTrack_idx, vecTPar_idx, Par_idx, Par"},
+                               {"/PaEvent/vecTrack/vecTPar/Cov", "entry_id, vecTrack_idx, vecTPar_idx, Cov_idx, Cov"},
+                               {"/PaEvent/vecVertex", "entry_id, vecVertex_idx, chi2tot, bestprim"}};
     const std::string modes[] = {"object", "auto", "serialized"};
 
     duckdb_database database = nullptr;
@@ -415,8 +413,8 @@ bool RunPhastConcurrency(int argc, char** argv)
         return false;
     }
     duckdb_connection bootstrap = nullptr;
-    const bool initialized = OpenConnection(database, bootstrap, error) &&
-                             ExecuteSQL(bootstrap, RootLoadSQL(), false, error);
+    const bool initialized =
+        OpenConnection(database, bootstrap, error) && ExecuteSQL(bootstrap, RootLoadSQL(), false, error);
     if (!initialized)
     {
         std::cerr << "PHAST LOAD failed: " << error << '\n';
@@ -439,17 +437,14 @@ bool RunPhastConcurrency(int argc, char** argv)
             {
                 const std::string sql =
                     "SELECT count(*)::UBIGINT, coalesce(bit_xor(hash(" + std::string(test.columns) +
-                    ")), 0)::UBIGINT FROM read_root(" + QuoteSQL(file) +
-                    ", dictionary := " + QuoteSQL(dictionary) +
-                    ", path_prefix := " + QuoteSQL(test.path) +
-                    ", reader_mode := " + QuoteSQL(mode) +
+                    ")), 0)::UBIGINT FROM read_root(" + QuoteSQL(file) + ", dictionary := " + QuoteSQL(dictionary) +
+                    ", path_prefix := " + QuoteSQL(test.path) + ", reader_mode := " + QuoteSQL(mode) +
                     ", raw_validation_entries := 2) WHERE entry_id BETWEEN 0 AND " + upper_entry;
                 PhastDigest baseline{};
                 error.clear();
                 if (!ComputePhastDigest(bootstrap, sql, baseline, error))
                 {
-                    std::cerr << "[PHAST BASELINE FAIL] path=" << test.path
-                              << " mode=" << mode << " " << error << '\n';
+                    std::cerr << "[PHAST BASELINE FAIL] path=" << test.path << " mode=" << mode << " " << error << '\n';
                     success = false;
                     continue;
                 }
@@ -459,15 +454,14 @@ bool RunPhastConcurrency(int argc, char** argv)
                 }
                 if (!(baseline == reference))
                 {
-                    std::cerr << "[PHAST MODE MISMATCH] path=" << test.path
-                              << " mode=" << mode << " rows=" << baseline.rows
-                              << " digest=" << baseline.hash << " expected_rows=" << reference.rows
-                              << " expected_digest=" << reference.hash << '\n';
+                    std::cerr << "[PHAST MODE MISMATCH] path=" << test.path << " mode=" << mode
+                              << " rows=" << baseline.rows << " digest=" << baseline.hash
+                              << " expected_rows=" << reference.rows << " expected_digest=" << reference.hash << '\n';
                     success = false;
                     continue;
                 }
-                std::cout << "[PHAST BASELINE] path=" << test.path << " mode=" << mode
-                          << " rows=" << baseline.rows << " digest=" << baseline.hash << '\n';
+                std::cout << "[PHAST BASELINE] path=" << test.path << " mode=" << mode << " rows=" << baseline.rows
+                          << " digest=" << baseline.hash << '\n';
                 for (const int worker_count : {1, 2, 4, 8})
                 {
                     std::barrier start(worker_count);
@@ -476,37 +470,38 @@ bool RunPhastConcurrency(int argc, char** argv)
                     workers.reserve(static_cast<size_t>(worker_count));
                     for (int worker = 0; worker < worker_count; ++worker)
                     {
-                        workers.emplace_back([&, worker]()
-                        {
-                            duckdb_connection connection = nullptr;
-                            std::string worker_error;
-                            const bool connected = OpenConnection(database, connection, worker_error);
-                            start.arrive_and_wait();
-                            if (connected)
+                        workers.emplace_back(
+                            [&, worker]()
                             {
-                                for (int iteration = 0; iteration < 2; ++iteration)
+                                duckdb_connection connection = nullptr;
+                                std::string worker_error;
+                                const bool connected = OpenConnection(database, connection, worker_error);
+                                start.arrive_and_wait();
+                                if (connected)
                                 {
-                                    PhastDigest observed{};
-                                    if (!ComputePhastDigest(connection, sql, observed, worker_error))
+                                    for (int iteration = 0; iteration < 2; ++iteration)
                                     {
-                                        break;
-                                    }
-                                    if (!(observed == baseline))
-                                    {
-                                        worker_error = "inconsistent rows/digest in concurrent ROOT read";
-                                        break;
+                                        PhastDigest observed{};
+                                        if (!ComputePhastDigest(connection, sql, observed, worker_error))
+                                        {
+                                            break;
+                                        }
+                                        if (!(observed == baseline))
+                                        {
+                                            worker_error = "inconsistent rows/digest in concurrent ROOT read";
+                                            break;
+                                        }
                                     }
                                 }
-                            }
-                            if (connection)
-                            {
-                                duckdb_disconnect(&connection);
-                            }
-                            if (!worker_error.empty())
-                            {
-                                failures.Report(worker, "PHAST read", worker_error);
-                            }
-                        });
+                                if (connection)
+                                {
+                                    duckdb_disconnect(&connection);
+                                }
+                                if (!worker_error.empty())
+                                {
+                                    failures.Report(worker, "PHAST read", worker_error);
+                                }
+                            });
                     }
                     for (auto& worker : workers)
                     {
@@ -518,9 +513,8 @@ bool RunPhastConcurrency(int argc, char** argv)
                     }
                     else
                     {
-                        std::cout << "[PHAST OK] path=" << test.path << " mode=" << mode
-                                  << " workers=" << worker_count << " validated_reads="
-                                  << worker_count * 2 << '\n';
+                        std::cout << "[PHAST OK] path=" << test.path << " mode=" << mode << " workers=" << worker_count
+                                  << " validated_reads=" << worker_count * 2 << '\n';
                     }
                 }
             }
@@ -552,15 +546,15 @@ int main(int argc, char** argv)
     const std::string dictionary = argv[2];
     const std::string index_output_dir = argv[3];
     const std::string options = "'" + file + "', dictionary := '" + dictionary + "'";
-    const TestQueries queries{
-        "SELECT count(*) = 3 AND sum(run) = 303 FROM read_root(" + options + ", path_prefix := '/TestEvent')",
-        "SELECT count(*) = 5 AND abs(sum(u) - 53.0) < 0.00001 FROM read_root(" + options +
-            ", path_prefix := '/TestEvent/vecHit')",
-        "SELECT count(*) = 3 AND sum(run) = 303 FROM read_root(" + options +
-            ", path_prefix := '/TestEvent', reader_mode := 'object')",
-        "SELECT count(*) = 1 AND bool_and(status = 'OK') FROM root_build_index('" + file +
-            "', 'Events', '[\"/TestEvent/run\",\"/TestEvent/vecHit/u\"]', '" + index_output_dir +
-            "', dictionary := '" + dictionary + "', index_threads := 1, allow_partial := false)"};
+    const TestQueries queries{"SELECT count(*) = 3 AND sum(run) = 303 FROM read_root(" + options +
+                                  ", path_prefix := '/TestEvent')",
+                              "SELECT count(*) = 5 AND abs(sum(u) - 53.0) < 0.00001 FROM read_root(" + options +
+                                  ", path_prefix := '/TestEvent/vecHit')",
+                              "SELECT count(*) = 3 AND sum(run) = 303 FROM read_root(" + options +
+                                  ", path_prefix := '/TestEvent', reader_mode := 'object')",
+                              "SELECT count(*) = 1 AND bool_and(status = 'OK') FROM root_build_index('" + file +
+                                  "', 'Events', '[\"/TestEvent/run\",\"/TestEvent/vecHit/u\"]', '" + index_output_dir +
+                                  "', dictionary := '" + dictionary + "', index_threads := 1, allow_partial := false)"};
 
     if (!RunIndependentDatabases(queries))
     {
@@ -575,8 +569,8 @@ int main(int argc, char** argv)
         return 1;
     }
     duckdb_connection bootstrap = nullptr;
-    const bool initialized = OpenConnection(database, bootstrap, error) &&
-                             ExecuteSQL(bootstrap, RootLoadSQL(), false, error);
+    const bool initialized =
+        OpenConnection(database, bootstrap, error) && ExecuteSQL(bootstrap, RootLoadSQL(), false, error);
     if (bootstrap)
     {
         duckdb_disconnect(&bootstrap);

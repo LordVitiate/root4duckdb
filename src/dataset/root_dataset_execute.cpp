@@ -1,6 +1,6 @@
-#include "root4duckdb/dataset/root_dataset_scan_internal.hpp"
+#include "root4duckdb/dataset/root_dataset_pruning.hpp"
 
-#include "root4duckdb/core/root_file_opener.hpp"
+#include <limits>
 
 namespace duckdb::rootlake
 {
@@ -44,102 +44,23 @@ void DatasetScanExecutor::SyncSerializedCounters(DatasetLocalState& local, Datas
     }
     local.reported_serialized_baskets = counters.baskets;
     local.reported_serialized_compressed_bytes = counters.compressed_bytes;
+    if (counters.nested_fixed_direct_entries >= local.reported_nested_fixed_direct)
+    {
+        global.nested_fixed_direct_entries.fetch_add(counters.nested_fixed_direct_entries -
+                                                     local.reported_nested_fixed_direct);
+    }
+    if (counters.nested_fixed_scratch_entries >= local.reported_nested_fixed_scratch)
+    {
+        global.nested_fixed_scratch_entries.fetch_add(counters.nested_fixed_scratch_entries -
+                                                      local.reported_nested_fixed_scratch);
+    }
+    local.reported_nested_fixed_direct = counters.nested_fixed_direct_entries;
+    local.reported_nested_fixed_scratch = counters.nested_fixed_scratch_entries;
     local.reported_serialized_entry_bytes = counters.serialized_bytes;
 }
 
-void DatasetScanExecutor::OpenTaskFile(const DatasetBindData& bind, DatasetGlobalState& global,
-                                       DatasetLocalState& local, const RootBasketTask& task) const
-{
-    if (local.open_uri == task.root_uri && local.open_schema == task.schema_id && local.file)
-    {
-        global.reused_open_files.fetch_add(1);
-        return;
-    }
-    SyncSerializedCounters(local, global);
-    local.path_reader.Reset();
-    local.object_reader.Reset();
-    local.reported_serialized_baskets = 0;
-    local.reported_serialized_compressed_bytes = 0;
-    local.reported_serialized_entry_bytes = 0;
-    auto opened = OpenRootFile(task.root_uri);
-    global.opened_files.fetch_add(1);
-    if (!opened)
-    {
-        throw IOException("Failed to open ROOT file: " + task.root_uri + ": " + opened.error);
-    }
-    local.file = std::move(opened.file);
-    auto schema_it = bind.schema_lookup.find(task.schema_id);
-    if (schema_it == bind.schema_lookup.end())
-    {
-        throw IOException("Unknown schema_id in task: " + task.schema_id);
-    }
-    const auto& schema = bind.schemas[schema_it->second];
-    local.object_reader.Bind(local.file.get(), task.tree_name, schema.root_class,
-                             bind.root_access.dictionary_cleanup_mode);
-    auto parsed = ParsePath(bind.logical_path);
-    auto* root_class = local.object_reader.RootClass();
-    auto* tree = local.object_reader.Tree();
-    auto* object_branch = local.object_reader.ObjectBranch();
-    auto full_levels = PathResolver::Resolve(root_class, parsed.fields);
-    ValidateAccessPlan(schema, full_levels);
-    local.predicate_levels.clear();
-    local.predicate_levels.reserve(bind.path_predicates.size());
-    for (const auto& predicate : bind.path_predicates)
-    {
-        const auto predicate_path = ParsePath(predicate.path);
-        if (predicate_path.root_class != schema.root_class)
-        {
-            throw IOException("Predicate path root class differs from target path root class: " + predicate.path);
-        }
-        auto predicate_levels = PathResolver::Resolve(root_class, predicate_path.fields);
-        const auto predicate_schema_id = SchemaFingerprint(predicate_path.root_class, predicate_levels);
-        const auto predicate_schema_it = predicate.schema_lookup.find(predicate_schema_id);
-        if (predicate_schema_it == predicate.schema_lookup.end())
-        {
-            throw IOException("ROOT file streamer schema is absent from predicate index for " + predicate.path);
-        }
-        ValidateAccessPlan(predicate.schemas[predicate_schema_it->second], predicate_levels);
-        local.predicate_levels.push_back(std::move(predicate_levels));
-    }
-    local.path_reader.Resolve(tree, object_branch, root_class, std::move(parsed), std::move(full_levels));
-    std::string serialized_rejection;
-    if (!bind.path_predicates.empty())
-    {
-        serialized_rejection = "path_predicates require universal object materialization";
-    }
-    bool projection_applied = false;
-    if (bind.path_predicates.empty() && local.path_reader.PhysicalMode() == "ancestor")
-    {
-        const auto projection =
-            ApplyBranchProjection(tree, {local.path_reader.PhysicalBranch()}, bind.root_access.tree_cache_bytes);
-        projection_applied = projection.applied;
-        if (projection_applied)
-        {
-            global.projected_files.fetch_add(1);
-        }
-    }
-    if (!projection_applied)
-    {
-        EnableAllBranches(tree, bind.root_access.tree_cache_bytes);
-    }
-    auto reader_options = bind.root_access;
-    reader_options.enable_all_branches_on_fallback = true;
-    const auto started = local.path_reader.StartSerialized(std::move(reader_options), std::move(serialized_rejection));
-    if (started.FallbackActivated())
-    {
-        global.fallback_files.fetch_add(1);
-    }
-    const auto runtime_index_depth = local.path_reader.IndexDepth();
-    if (runtime_index_depth != bind.index_names.size())
-    {
-        throw IOException("ROOT container depth differs from the catalog output schema for " + bind.logical_path);
-    }
-    local.open_uri = task.root_uri;
-    local.open_schema = task.schema_id;
-}
-
 bool DatasetScanExecutor::PrefetchPhysicalRange(TFile* file, uint64_t offset, uint64_t size,
-                                                 DatasetGlobalState& global) const
+                                                DatasetGlobalState& global) const
 {
     if (!file)
     {
@@ -184,6 +105,7 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
             local.next_task_in_group = global.task_groups[group_index].begin;
             local.next_prefetch_task_in_group = local.next_task_in_group;
             local.task_group_end = global.task_groups[group_index].end;
+            local.file_cache_bytes = global.task_groups[group_index].cache_bytes;
         }
         const auto task_index = local.next_task_in_group++;
         local.current_task = global.tasks[task_index];
@@ -204,6 +126,24 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
             const uint64_t old_end = local.current_task.entry_end;
             local.current_task.entry_begin = wanted_begin - local.current_task.event_base;
             local.current_task.entry_end = wanted_end_exclusive - local.current_task.event_base;
+            global.skipped_entries.fetch_add((local.current_task.entry_begin - old_begin) +
+                                             (old_end - local.current_task.entry_end));
+        }
+        if (global.local_entry_range.known)
+        {
+            const uint64_t old_begin = local.current_task.entry_begin;
+            const uint64_t old_end = local.current_task.entry_end;
+            const uint64_t lower = global.local_entry_range.lower;
+            const uint64_t upper_exclusive = global.local_entry_range.upper == std::numeric_limits<uint64_t>::max()
+                                                 ? old_end
+                                                 : std::min(old_end, global.local_entry_range.upper + 1);
+            local.current_task.entry_begin = std::max(old_begin, lower);
+            local.current_task.entry_end = upper_exclusive;
+            if (local.current_task.entry_begin >= local.current_task.entry_end)
+            {
+                global.skipped_entries.fetch_add(old_end - old_begin);
+                continue;
+            }
             global.skipped_entries.fetch_add((local.current_task.entry_begin - old_begin) +
                                              (old_end - local.current_task.entry_end));
         }
@@ -236,29 +176,40 @@ bool DatasetScanExecutor::ClaimTask(const DatasetBindData& bind, DatasetGlobalSt
         local.values.clear();
         local.value_offset = 0;
         local.has_task = true;
-        if (bind.root_access.tree_cache_bytes)
-        {
-            local.object_reader.Tree()->SetCacheEntryRange(static_cast<Long64_t>(local.current_task.entry_begin),
-                                                           static_cast<Long64_t>(local.current_task.entry_end));
-        }
+        // The ROOT tree cache owns cluster-range state for the lifetime of this file.
+        // Basket-sized range resets here make FillBuffer refill inside an existing cluster.
+        // Pruning is already enforced by the indexed task and entry cursors.
         return true;
     }
 }
 
-bool DatasetScanExecutor::PassesPathPredicates(const DatasetBindData& bind, const DatasetLocalState& local,
-                                               void* object) const
+bool DatasetScanExecutor::PassesPathPredicates(const DatasetBindData& bind, DatasetLocalState& local,
+                                               RootEntryReader& object_entry, uint64_t entry) const
 {
-
-    if (bind.path_predicates.empty())
-    {
-        return true;
-    }
     for (idx_t predicate_index = 0; predicate_index < bind.path_predicates.size(); ++predicate_index)
     {
-        const auto& levels = local.predicate_levels[predicate_index];
-        ReadResult result;
-        OffsetValueReader::CollectDirect(object, levels, -1, 0, result);
-        if (!PathPredicateEventMatches(bind.path_predicates[predicate_index], result.numbers))
+        auto& predicate_reader = local.predicate_readers[predicate_index];
+        std::vector<RootPrimitiveValue> values;
+        std::vector<int32_t> unused_indices;
+        bool serialized = false;
+        if (predicate_reader.SerializedActive())
+        {
+            // Preserve exact signed/unsigned/float types and event-grain any/all semantics.
+            const auto read = predicate_reader.TryReadSerialized(entry, object_entry, values, unused_indices, false);
+            serialized = read.Serialized();
+        }
+        if (!serialized)
+        {
+            void* object = object_entry.Read();
+            if (!object)
+            {
+                return false;
+            }
+            ReadResult result;
+            OffsetValueReader::CollectDirect(object, local.predicate_levels[predicate_index], -1, 0, result);
+            values = std::move(result.numbers);
+        }
+        if (!PathPredicateEventMatches(bind.path_predicates[predicate_index], values))
         {
             return false;
         }
@@ -266,86 +217,114 @@ bool DatasetScanExecutor::PassesPathPredicates(const DatasetBindData& bind, cons
     return true;
 }
 
-bool DatasetScanExecutor::LoadNextEntry(const DatasetBindData& bind, DatasetLocalState& local,
+bool DatasetScanExecutor::LoadNextEntry(ClientContext& context, const DatasetBindData& bind, DatasetLocalState& local,
                                         DatasetGlobalState& global) const
 {
 
     const bool typed_transport = RequiresTypedDatasetValue(bind.value_type);
-    while (local.current_entry < local.current_task.entry_end)
+    // Cursor pages are bounded independently of the number of values in an entry.
+    auto consume_page = [&]() -> bool
     {
-        const auto entry = local.current_entry++;
-        RootEntryReader object_entry(local.object_reader);
-        object_entry.Begin(entry);
-        if (local.path_reader.SerializedActive())
-        {
-            RootPathReadResult read;
-            if (typed_transport)
-            {
-                read = local.path_reader.TryReadSerialized(entry, object_entry, local.typed_values, local.flat_indices);
-            }
-            else
-            {
-                read = local.path_reader.TryReadSerialized(entry, object_entry, local.values, local.flat_indices);
-            }
-            SyncSerializedCounters(local, global);
-            global.get_entry_calls.fetch_add(object_entry.LoadCount());
-            if (read.FallbackActivated())
-            {
-                global.fallback_files.fetch_add(1);
-            }
-            const idx_t decoded_count = typed_transport ? local.typed_values.size() : local.values.size();
-            if (read.Decoded())
-            {
-                global.serialized_entry_calls.fetch_add(1);
-                global.serialized_values.fetch_add(decoded_count);
-            }
-            if (read.Serialized())
-            {
-                global.decoded_values.fetch_add(decoded_count);
-                local.value_offset = 0;
-                local.value_event_fk = local.current_task.event_base + entry;
-                local.value_entry_id = entry;
-                local.value_source_id = local.current_task.file_id;
-                if (decoded_count != 0)
-                {
-                    return true;
-                }
-                continue;
-            }
-            if (read.FallbackActivated() && object_entry.LoadCount())
-            {
-                object_entry.Invalidate();
-            }
-        }
-        const auto prior_loads = object_entry.LoadCount();
-        auto* object = object_entry.Read();
-        global.get_entry_calls.fetch_add(object_entry.LoadCount() - prior_loads);
-        if (!object)
-        {
-            continue;
-        }
-        if (!PassesPathPredicates(bind, local, object))
-        {
-            continue;
-        }
         local.values.clear();
         local.typed_values.clear();
         local.flat_indices.clear();
-        if (typed_transport)
+        const auto source =
+            local.path_reader.ReadNumericPage(STANDARD_VECTOR_SIZE, local.typed_values, local.flat_indices);
+        if (source == RootNumericPageSource::NONE)
         {
-            local.path_reader.CollectTypedFlat(object, local.typed_values, local.flat_indices);
-            global.decoded_values.fetch_add(local.typed_values.size());
+            local.path_reader.EndNumericPage();
+            return false;
         }
-        else
+        const auto decoded = local.typed_values.size();
+        if (!typed_transport)
         {
-            local.path_reader.CollectFlat(object, local.values, local.flat_indices);
-            global.decoded_values.fetch_add(local.values.size());
+            local.values.reserve(decoded);
+            for (const auto& value : local.typed_values)
+            {
+                local.values.push_back(value.AsDouble());
+            }
+            local.typed_values.clear();
         }
+        if (source == RootNumericPageSource::SERIALIZED)
+        {
+            SyncSerializedCounters(local, global);
+            global.serialized_page_calls.fetch_add(1);
+            global.serialized_values.fetch_add(decoded);
+        }
+        global.decoded_values.fetch_add(decoded);
         local.value_offset = 0;
+        return decoded != 0;
+    };
+    if (local.path_reader.HasNumericPage() && consume_page())
+    {
+        return true;
+    }
+    while (local.current_entry < local.current_task.entry_end)
+    {
+        const auto entry = local.current_entry++;
+        if (entry > std::numeric_limits<uint64_t>::max() - local.current_task.event_base)
+        {
+            throw IOException("Indexed ROOT event_fk exceeds UINT64 range");
+        }
+        if (!PassesDatasetEntryFilters(context, local, bind, global, entry))
+        {
+            continue;
+        }
+        RootEntryReader object_entry(local.object_reader);
+        object_entry.Begin(entry);
+        if (!PassesPathPredicates(bind, local, object_entry, entry))
+        {
+            global.get_entry_calls.fetch_add(object_entry.LoadCount());
+            continue;
+        }
+        global.get_entry_calls.fetch_add(object_entry.LoadCount());
+        local.values.clear();
+        const auto prior_loads = object_entry.LoadCount();
+        const auto started =
+            local.path_reader.BeginNumericEntry(entry, object_entry, 0, local.typed_values, local.flat_indices);
+        global.get_entry_calls.fetch_add(object_entry.LoadCount() - prior_loads);
+        SyncSerializedCounters(local, global);
+        if (started.fallback_activated)
+        {
+            global.fallback_files.fetch_add(1);
+        }
+        if (started.attempt_decoded)
+        {
+            global.serialized_entry_calls.fetch_add(1);
+            global.serialized_values.fetch_add(local.typed_values.size());
+        }
+        if (started.route == RootNumericEntryRoute::NONE)
+        {
+            continue;
+        }
         local.value_event_fk = local.current_task.event_base + entry;
         local.value_entry_id = entry;
         local.value_source_id = local.current_task.file_id;
-        if (typed_transport ? !local.typed_values.empty() : !local.values.empty())
+        local.value_offset = 0;
+        if (started.route == RootNumericEntryRoute::SERIALIZED_VALUES)
+        {
+            const idx_t decoded_count = local.typed_values.size();
+            if (!typed_transport)
+            {
+                local.values.reserve(decoded_count);
+                for (const auto& value : local.typed_values)
+                {
+                    local.values.push_back(value.AsDouble());
+                }
+                local.typed_values.clear();
+            }
+            global.decoded_values.fetch_add(decoded_count);
+            if (decoded_count != 0)
+            {
+                return true;
+            }
+            continue;
+        }
+        if (started.route == RootNumericEntryRoute::SERIALIZED_PAGE)
+        {
+            global.serialized_entry_calls.fetch_add(1);
+        }
+        if (consume_page())
         {
             return true;
         }
@@ -358,42 +337,42 @@ void DatasetScanExecutor::SetDoubleAsType(Vector& vector, idx_t row, const Logic
     switch (type.id())
     {
     case LogicalTypeId::BOOLEAN:
-        FlatVector::GetData<bool>(vector)[row] = value != 0;
+        FlatVector::GetDataMutable<bool>(vector)[row] = value != 0;
         break;
     case LogicalTypeId::TINYINT:
-        FlatVector::GetData<int8_t>(vector)[row] = static_cast<int8_t>(value);
+        FlatVector::GetDataMutable<int8_t>(vector)[row] = RootPrimitiveValue::Floating(value).AsInteger<int8_t>();
         break;
     case LogicalTypeId::UTINYINT:
-        FlatVector::GetData<uint8_t>(vector)[row] = static_cast<uint8_t>(value);
+        FlatVector::GetDataMutable<uint8_t>(vector)[row] = RootPrimitiveValue::Floating(value).AsInteger<uint8_t>();
         break;
     case LogicalTypeId::SMALLINT:
-        FlatVector::GetData<int16_t>(vector)[row] = static_cast<int16_t>(value);
+        FlatVector::GetDataMutable<int16_t>(vector)[row] = RootPrimitiveValue::Floating(value).AsInteger<int16_t>();
         break;
     case LogicalTypeId::USMALLINT:
-        FlatVector::GetData<uint16_t>(vector)[row] = static_cast<uint16_t>(value);
+        FlatVector::GetDataMutable<uint16_t>(vector)[row] = RootPrimitiveValue::Floating(value).AsInteger<uint16_t>();
         break;
     case LogicalTypeId::INTEGER:
-        FlatVector::GetData<int32_t>(vector)[row] = static_cast<int32_t>(value);
+        FlatVector::GetDataMutable<int32_t>(vector)[row] = RootPrimitiveValue::Floating(value).AsInteger<int32_t>();
         break;
     case LogicalTypeId::UINTEGER:
-        FlatVector::GetData<uint32_t>(vector)[row] = static_cast<uint32_t>(value);
+        FlatVector::GetDataMutable<uint32_t>(vector)[row] = RootPrimitiveValue::Floating(value).AsInteger<uint32_t>();
         break;
     case LogicalTypeId::BIGINT:
-        FlatVector::GetData<int64_t>(vector)[row] = static_cast<int64_t>(value);
+        FlatVector::GetDataMutable<int64_t>(vector)[row] = RootPrimitiveValue::Floating(value).AsInteger<int64_t>();
         break;
     case LogicalTypeId::UBIGINT:
-        FlatVector::GetData<uint64_t>(vector)[row] = static_cast<uint64_t>(value);
+        FlatVector::GetDataMutable<uint64_t>(vector)[row] = RootPrimitiveValue::Floating(value).AsInteger<uint64_t>();
         break;
     case LogicalTypeId::FLOAT:
-        FlatVector::GetData<float>(vector)[row] = static_cast<float>(value);
+        FlatVector::GetDataMutable<float>(vector)[row] = RootPrimitiveValue::Floating(value).AsFloat();
         break;
     case LogicalTypeId::DOUBLE:
-        FlatVector::GetData<double>(vector)[row] = value;
+        FlatVector::GetDataMutable<double>(vector)[row] = value;
         break;
     default:
         throw NotImplementedException("Unsupported ROOT dataset output type " + type.ToString());
     }
-    FlatVector::Validity(vector).SetValid(row);
+    FlatVector::ValidityMutable(vector).SetValid(row);
 }
 
 void DatasetScanExecutor::SetPrimitiveAsType(Vector& vector, idx_t row, const LogicalType& type,
@@ -403,15 +382,15 @@ void DatasetScanExecutor::SetPrimitiveAsType(Vector& vector, idx_t row, const Lo
     switch (type.id())
     {
     case LogicalTypeId::BIGINT:
-        FlatVector::GetData<int64_t>(vector)[row] = value.AsSigned();
+        FlatVector::GetDataMutable<int64_t>(vector)[row] = value.AsSigned();
         break;
     case LogicalTypeId::UBIGINT:
-        FlatVector::GetData<uint64_t>(vector)[row] = value.AsUnsigned();
+        FlatVector::GetDataMutable<uint64_t>(vector)[row] = value.AsUnsigned();
         break;
     default:
         throw InternalException("Typed dataset writer used for non-64-bit type " + type.ToString());
     }
-    FlatVector::Validity(vector).SetValid(row);
+    FlatVector::ValidityMutable(vector).SetValid(row);
 }
 
 void DatasetScanExecutor::EmitProjectedRow(const DatasetBindData& bind, const DatasetGlobalState& global,
@@ -426,24 +405,24 @@ void DatasetScanExecutor::EmitProjectedRow(const DatasetBindData& bind, const Da
         if (full_col == COLUMN_IDENTIFIER_EMPTY)
         {
             // DuckDB requests a dummy column for COUNT(*); only the chunk cardinality matters.
-            FlatVector::Validity(vector).SetInvalid(output_row);
+            FlatVector::ValidityMutable(vector).SetInvalid(output_row);
         }
         else if (full_col == COLUMN_IDENTIFIER_ROW_ID || full_col == 0)
         {
-            FlatVector::GetData<uint64_t>(vector)[output_row] = event_fk;
-            FlatVector::Validity(vector).SetValid(output_row);
+            FlatVector::GetDataMutable<uint64_t>(vector)[output_row] = event_fk;
+            FlatVector::ValidityMutable(vector).SetValid(output_row);
         }
         else if (full_col >= 1 && static_cast<idx_t>(full_col) < bind.value_column)
         {
             const idx_t index_position = static_cast<idx_t>(full_col) - 1;
             if (index_position < index_count)
             {
-                FlatVector::GetData<int32_t>(vector)[output_row] = indices[index_position];
-                FlatVector::Validity(vector).SetValid(output_row);
+                FlatVector::GetDataMutable<int32_t>(vector)[output_row] = indices[index_position];
+                FlatVector::ValidityMutable(vector).SetValid(output_row);
             }
             else
             {
-                FlatVector::Validity(vector).SetInvalid(output_row);
+                FlatVector::ValidityMutable(vector).SetInvalid(output_row);
             }
         }
         else if (static_cast<idx_t>(full_col) == bind.value_column)
@@ -452,17 +431,17 @@ void DatasetScanExecutor::EmitProjectedRow(const DatasetBindData& bind, const Da
         }
         else if (static_cast<idx_t>(full_col) == bind.source_id_column)
         {
-            FlatVector::GetData<string_t>(vector)[output_row] = StringVector::AddString(vector, source_id);
-            FlatVector::Validity(vector).SetValid(output_row);
+            FlatVector::GetDataMutable<string_t>(vector)[output_row] = StringVector::AddString(vector, source_id);
+            FlatVector::ValidityMutable(vector).SetValid(output_row);
         }
         else if (static_cast<idx_t>(full_col) == bind.entry_id_column)
         {
-            FlatVector::GetData<uint64_t>(vector)[output_row] = entry_id;
-            FlatVector::Validity(vector).SetValid(output_row);
+            FlatVector::GetDataMutable<uint64_t>(vector)[output_row] = entry_id;
+            FlatVector::ValidityMutable(vector).SetValid(output_row);
         }
         else
         {
-            FlatVector::Validity(vector).SetInvalid(output_row);
+            FlatVector::ValidityMutable(vector).SetInvalid(output_row);
         }
     }
 }
@@ -486,24 +465,24 @@ void DatasetScanExecutor::EmitProjectedTypedRow(const DatasetBindData& bind, con
         auto& vector = output.data[output_col];
         if (full_col == COLUMN_IDENTIFIER_EMPTY)
         {
-            FlatVector::Validity(vector).SetInvalid(output_row);
+            FlatVector::ValidityMutable(vector).SetInvalid(output_row);
         }
         else if (full_col == COLUMN_IDENTIFIER_ROW_ID || full_col == 0)
         {
-            FlatVector::GetData<uint64_t>(vector)[output_row] = event_fk;
-            FlatVector::Validity(vector).SetValid(output_row);
+            FlatVector::GetDataMutable<uint64_t>(vector)[output_row] = event_fk;
+            FlatVector::ValidityMutable(vector).SetValid(output_row);
         }
         else if (full_col >= 1 && static_cast<idx_t>(full_col) < bind.value_column)
         {
             const idx_t index_position = static_cast<idx_t>(full_col) - 1;
             if (index_position < index_count)
             {
-                FlatVector::GetData<int32_t>(vector)[output_row] = indices[index_position];
-                FlatVector::Validity(vector).SetValid(output_row);
+                FlatVector::GetDataMutable<int32_t>(vector)[output_row] = indices[index_position];
+                FlatVector::ValidityMutable(vector).SetValid(output_row);
             }
             else
             {
-                FlatVector::Validity(vector).SetInvalid(output_row);
+                FlatVector::ValidityMutable(vector).SetInvalid(output_row);
             }
         }
         else if (static_cast<idx_t>(full_col) == bind.value_column)
@@ -512,17 +491,17 @@ void DatasetScanExecutor::EmitProjectedTypedRow(const DatasetBindData& bind, con
         }
         else if (static_cast<idx_t>(full_col) == bind.source_id_column)
         {
-            FlatVector::GetData<string_t>(vector)[output_row] = StringVector::AddString(vector, source_id);
-            FlatVector::Validity(vector).SetValid(output_row);
+            FlatVector::GetDataMutable<string_t>(vector)[output_row] = StringVector::AddString(vector, source_id);
+            FlatVector::ValidityMutable(vector).SetValid(output_row);
         }
         else if (static_cast<idx_t>(full_col) == bind.entry_id_column)
         {
-            FlatVector::GetData<uint64_t>(vector)[output_row] = entry_id;
-            FlatVector::Validity(vector).SetValid(output_row);
+            FlatVector::GetDataMutable<uint64_t>(vector)[output_row] = entry_id;
+            FlatVector::ValidityMutable(vector).SetValid(output_row);
         }
         else
         {
-            FlatVector::Validity(vector).SetInvalid(output_row);
+            FlatVector::ValidityMutable(vector).SetInvalid(output_row);
         }
     }
 }
@@ -576,13 +555,13 @@ void DatasetScanExecutor::Scan(ClientContext& context, TableFunctionInput& input
                 auto& dummy = output.data[0];
                 for (idx_t row = 0; row < emit_count; ++row)
                 {
-                    FlatVector::Validity(dummy).SetInvalid(row);
+                    FlatVector::ValidityMutable(dummy).SetInvalid(row);
                 }
             }
             output_count = emit_count;
             global.metadata_rows_emitted.fetch_add(emit_count, std::memory_order_relaxed);
         }
-        output.SetCardinality(output_count);
+        output.SetCardinalityUnsafe(output_count);
         return;
     }
     const bool typed_transport = RequiresTypedDatasetValue(bind.value_type);
@@ -598,7 +577,7 @@ void DatasetScanExecutor::Scan(ClientContext& context, TableFunctionInput& input
         const idx_t available = typed_transport ? local.typed_values.size() : local.values.size();
         if (local.value_offset >= available)
         {
-            if (!LoadNextEntry(bind, local, global))
+            if (!LoadNextEntry(context, bind, local, global))
             {
                 local.has_task = false;
                 global.completed_tasks.fetch_add(1);
@@ -621,7 +600,7 @@ void DatasetScanExecutor::Scan(ClientContext& context, TableFunctionInput& input
                 }
                 if (ReserveOutputRows(global, 1) == 0)
                 {
-                    output.SetCardinality(output_count);
+                    output.SetCardinalityUnsafe(output_count);
                     return;
                 }
                 EmitProjectedTypedRow(bind, global, output, output_count++, local.value_event_fk, local.value_source_id,
@@ -637,7 +616,7 @@ void DatasetScanExecutor::Scan(ClientContext& context, TableFunctionInput& input
                 }
                 if (ReserveOutputRows(global, 1) == 0)
                 {
-                    output.SetCardinality(output_count);
+                    output.SetCardinalityUnsafe(output_count);
                     return;
                 }
                 EmitProjectedRow(bind, global, output, output_count++, local.value_event_fk, local.value_source_id,
@@ -645,7 +624,7 @@ void DatasetScanExecutor::Scan(ClientContext& context, TableFunctionInput& input
             }
         }
     }
-    output.SetCardinality(output_count);
+    output.SetCardinalityUnsafe(output_count);
 }
 
 InsertionOrderPreservingMap<string> DatasetScanExplain::Bound(TableFunctionToStringInput& input) const
@@ -671,6 +650,7 @@ InsertionOrderPreservingMap<string> DatasetScanExplain::Bound(TableFunctionToStr
     result["Path Predicate Indexes"] = std::to_string(bind.path_predicates.size());
     result["Explicit Entry Selections"] = std::to_string(bind.entry_selection.size());
     result["Estimated Rows"] = std::to_string(bind.estimated_cardinality);
+    result["ROOT Tree Cache Policy"] = bind.tree_cache_explicit ? "explicit" : "adaptive";
     if (bind.row_limit != std::numeric_limits<uint64_t>::max())
     {
         result["Row Limit"] = std::to_string(bind.row_limit);
@@ -678,7 +658,7 @@ InsertionOrderPreservingMap<string> DatasetScanExplain::Bound(TableFunctionToStr
     return result;
 }
 
-InsertionOrderPreservingMap<string> DatasetScanExplain::Running(TableFunctionDynamicToStringInput& input) const
+InsertionOrderPreservingMap<string> DatasetScanExplain::Running(TableFunctionGetMetricsInput& input) const
 {
     InsertionOrderPreservingMap<string> result;
     if (input.bind_data)
@@ -695,6 +675,7 @@ InsertionOrderPreservingMap<string> DatasetScanExplain::Running(TableFunctionDyn
         }
         result["Path Predicate Indexes"] = std::to_string(bind.path_predicates.size());
         result["Estimated Rows"] = std::to_string(bind.estimated_cardinality);
+        result["ROOT Tree Cache Policy"] = bind.tree_cache_explicit ? "explicit" : "adaptive";
     }
     if (!input.global_state)
     {
@@ -720,14 +701,19 @@ InsertionOrderPreservingMap<string> DatasetScanExplain::Running(TableFunctionDyn
     result["Prefetch Hint Bytes"] = std::to_string(global.prefetch_hint_bytes.load());
     result["GetEntry Calls"] = std::to_string(global.get_entry_calls.load());
     result["Serialized Entry Calls"] = std::to_string(global.serialized_entry_calls.load());
+    result["Serialized Page Calls"] = std::to_string(global.serialized_page_calls.load());
     result["Serialized Values"] = std::to_string(global.serialized_values.load());
     result["Serialized Baskets"] = std::to_string(global.serialized_baskets.load());
     result["Serialized Basket Bytes"] = std::to_string(global.serialized_compressed_bytes.load());
     result["Serialized Entry Bytes"] = std::to_string(global.serialized_entry_bytes.load());
+    result["Nested Fixed Direct Entries"] = std::to_string(global.nested_fixed_direct_entries.load());
+    result["Nested Fixed Scratch Entries"] = std::to_string(global.nested_fixed_scratch_entries.load());
     result["Projected ROOT Files"] = std::to_string(global.projected_files.load());
     result["Object Fallback Files"] = std::to_string(global.fallback_files.load());
     result["Coalesced Read Tasks"] = std::to_string(global.tasks.size());
     result["File-affinity Groups"] = std::to_string(global.task_groups.size());
+    result["ROOT Cache Enabled Files"] = std::to_string(global.tree_cache_enabled_files);
+    result["ROOT Cache Disabled Files"] = std::to_string(global.tree_cache_disabled_files);
     result["Selected Basket Bytes"] = std::to_string(global.planned_compressed_bytes);
     result["Scheduled Range Bytes"] = std::to_string(global.scheduled_read_bytes);
     result["Indexed Values in Tasks"] = std::to_string(global.planned_values);

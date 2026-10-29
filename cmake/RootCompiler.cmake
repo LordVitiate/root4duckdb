@@ -1,7 +1,7 @@
 # Applies one compiler and dependency policy to both DuckDB extension targets.
 function(root4duckdb_configure_target target_name)
     target_include_directories(${target_name} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${ROOT4DUCKDB_ROOT_INCDIR}
         ${ROOT4DUCKDB_NLOHMANN_INCLUDE_DIRS}
     )
@@ -12,7 +12,7 @@ function(root4duckdb_configure_target target_name)
     )
     target_compile_definitions(${target_name} PRIVATE ROOT4DUCKDB_LAKEHOUSE=1)
     target_precompile_headers(${target_name} PRIVATE
-        "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/src/include/root4duckdb/root_pch.hpp>"
+        "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/include/root4duckdb/root_pch.hpp>"
     )
 
     # DuckDB creates extension targets with the plain signature.

@@ -39,6 +39,8 @@ class SerializedBasketCache
                     bool& loaded_new_basket, uint64_t& compressed_bytes, std::string& failure_reason);
     bool CurrentBasketInfo(SerializedBasketInfo& info) const;
     TBranch* Branch() const noexcept;
+    /// Count actual basket loads (cache hits do not advance this counter).
+    uint64_t LoadedBaskets() const noexcept;
 
   private:
     bool LoadBasket(uint64_t entry, bool& loaded_new_basket, uint64_t& compressed_bytes, std::string& failure_reason);
@@ -47,6 +49,7 @@ class SerializedBasketCache
     TBasket* basket = nullptr;
     bool basket_prepared = false;
     int current_basket = -1;
+    uint64_t loaded_baskets = 0;
     uint64_t current_basket_entry_begin = 0;
     uint64_t current_basket_entry_end = 0;
 };

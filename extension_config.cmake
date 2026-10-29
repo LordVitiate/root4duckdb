@@ -13,8 +13,8 @@ if(ROOT4DUCKDB_LOADABLE_ONLY OR ROOT4DUCKDB_RUNTIME_BOOTSTRAP OR
    (DEFINED ENV{ROOT4DUCKDB_RUNTIME_BOOTSTRAP} AND
     NOT "$ENV{ROOT4DUCKDB_RUNTIME_BOOTSTRAP}" STREQUAL "" AND
     NOT "$ENV{ROOT4DUCKDB_RUNTIME_BOOTSTRAP}" STREQUAL "0"))
-    # DuckDB 2.0 removed DONT_LINK; static linking is opt-in there.
-    # For DuckDB 1.x keep it to prevent a duplicate ROOT-linked extension.
+    # DuckDB 2.0 removed DONT_LINK: static linking is now opt-in.
+    # Keep the flag for DuckDB 1.x, where it prevents duplicate ROOT symbols.
     if(DUCKDB_MAJOR_VERSION LESS 2)
         list(APPEND ROOT4DUCKDB_LINK_OPTIONS DONT_LINK)
     endif()

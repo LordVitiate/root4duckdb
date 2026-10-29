@@ -68,6 +68,8 @@ struct BuildIndexBindData final : public TableFunctionData
     std::string dictionary_fingerprint;
     bool overwrite = false;
     bool allow_partial = false;
+    bool resume = false;
+    std::string update_mode = "replace";
     std::string files_table;
     std::string schemas_table;
     std::string access_table;
@@ -118,6 +120,11 @@ class RootIndexPublisher final
     void CommitParquetSnapshot(const BuildIndexBindData& bind, const std::string& dataset_id,
                                BuildIndexGlobalState& state, const fs::path& staging) const;
 };
+
+/// Writes an immutable logical-to-physical ROOT path map for Iceberg generations.
+void PrepareRootIcebergPathSources(ClientContext& context, const BuildIndexBindData& bind,
+                                   const BuildIndexGlobalState& state, const std::string& dataset_id,
+                                   const std::vector<RootIndexFilePlan>& plans, const fs::path& staging);
 
 /// Runs inspect, build, validate, and publish stages in order.
 class RootIndexCoordinator final

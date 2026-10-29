@@ -1,4 +1,5 @@
 #include "root4duckdb/index/root_index_pipeline.hpp"
+#include "duckdb/common/identifier.hpp"
 
 namespace duckdb::rootlake
 {
@@ -29,13 +30,16 @@ void RootIndexResultWriter::Write(TableFunctionInput& input, DataChunk& output) 
         output.SetValue(16, count, Value(state.dictionary_fingerprint));
         ++count;
     }
-    output.SetCardinality(count);
+    output.SetCardinalityUnsafe(count);
 }
 
 unique_ptr<FunctionData> BuildIndexBindCallback(ClientContext&, TableFunctionBindInput& input,
-                                                vector<LogicalType>& return_types, vector<string>& return_names)
+                                                vector<LogicalType>& return_types, vector<Identifier>& return_names)
 {
-    return RootIndexBinder().Bind(input, return_types, return_names);
+    vector<string> names;
+    auto result = RootIndexBinder().Bind(input, return_types, names);
+    return_names = StringsToIdentifiers(names);
+    return result;
 }
 
 unique_ptr<GlobalTableFunctionState> BuildIndexInitCallback(ClientContext& context, TableFunctionInitInput& input)
@@ -50,36 +54,42 @@ void BuildIndexCallback(ClientContext&, TableFunctionInput& input, DataChunk& ou
 
 static TableFunction MakeBuildIndexFunction(const std::string& name)
 {
-    TableFunction function(name,
+    TableFunction function(Identifier(name),
                            {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
                            BuildIndexCallback, BuildIndexBindCallback, BuildIndexInitCallback);
-    function.named_parameters["dictionary"] = LogicalType::VARCHAR;
-    function.named_parameters["dictionary_cleanup"] = LogicalType::VARCHAR;
-    function.named_parameters["reader_mode"] = LogicalType::VARCHAR;
-    function.named_parameters["raw_validation_entries"] = LogicalType::UINTEGER;
-    function.named_parameters["raw_max_entry_bytes"] = LogicalType::UBIGINT;
-    function.named_parameters["raw_max_values_per_entry"] = LogicalType::UBIGINT;
-    function.named_parameters["tree_cache_bytes"] = LogicalType::UBIGINT;
-    function.named_parameters["bloom_bytes"] = LogicalType::UINTEGER;
-    function.named_parameters["bloom_false_positive_rate"] = LogicalType::DOUBLE;
-    function.named_parameters["index_threads"] = LogicalType::UINTEGER;
-    function.named_parameters["max_in_flight_files"] = LogicalType::UINTEGER;
-    function.named_parameters["memory_budget_bytes"] = LogicalType::UBIGINT;
-    function.named_parameters["estimated_worker_bytes"] = LogicalType::UBIGINT;
-    function.named_parameters["metadata_flush_bytes"] = LogicalType::UBIGINT;
-    function.named_parameters["chunk_id"] = LogicalType::VARCHAR;
-    function.named_parameters["manifest_fingerprint"] = LogicalType::VARCHAR;
-    function.named_parameters["dictionary_fingerprint"] = LogicalType::VARCHAR;
-    function.named_parameters["overwrite"] = LogicalType::BOOLEAN;
-    function.named_parameters["allow_partial"] = LogicalType::BOOLEAN;
-    function.named_parameters["catalog_prefix"] = LogicalType::VARCHAR;
-    function.named_parameters["files_table"] = LogicalType::VARCHAR;
-    function.named_parameters["schemas_table"] = LogicalType::VARCHAR;
-    function.named_parameters["access_table"] = LogicalType::VARCHAR;
-    function.named_parameters["baskets_table"] = LogicalType::VARCHAR;
-    function.named_parameters["snapshots_table"] = LogicalType::VARCHAR;
-    function.named_parameters["publish_mode"] = LogicalType::VARCHAR;
-    function.named_parameters["catalog_mode"] = LogicalType::VARCHAR;
+    function.GetSignature().WithTypedKwargs("options",
+                                            [](TypedKwargs& options)
+                                            {
+                                                options.Add("dictionary", LogicalType::VARCHAR);
+                                                options.Add("dictionary_cleanup", LogicalType::VARCHAR);
+                                                options.Add("reader_mode", LogicalType::VARCHAR);
+                                                options.Add("raw_validation_entries", LogicalType::UINTEGER);
+                                                options.Add("raw_max_entry_bytes", LogicalType::UBIGINT);
+                                                options.Add("raw_max_values_per_entry", LogicalType::UBIGINT);
+                                                options.Add("tree_cache_bytes", LogicalType::UBIGINT);
+                                                options.Add("bloom_bytes", LogicalType::UINTEGER);
+                                                options.Add("bloom_false_positive_rate", LogicalType::DOUBLE);
+                                                options.Add("index_threads", LogicalType::UINTEGER);
+                                                options.Add("max_in_flight_files", LogicalType::UINTEGER);
+                                                options.Add("memory_budget_bytes", LogicalType::UBIGINT);
+                                                options.Add("estimated_worker_bytes", LogicalType::UBIGINT);
+                                                options.Add("metadata_flush_bytes", LogicalType::UBIGINT);
+                                                options.Add("chunk_id", LogicalType::VARCHAR);
+                                                options.Add("manifest_fingerprint", LogicalType::VARCHAR);
+                                                options.Add("dictionary_fingerprint", LogicalType::VARCHAR);
+                                                options.Add("overwrite", LogicalType::BOOLEAN);
+                                                options.Add("allow_partial", LogicalType::BOOLEAN);
+                                                options.Add("resume", LogicalType::BOOLEAN);
+                                                options.Add("update_mode", LogicalType::VARCHAR);
+                                                options.Add("catalog_prefix", LogicalType::VARCHAR);
+                                                options.Add("files_table", LogicalType::VARCHAR);
+                                                options.Add("schemas_table", LogicalType::VARCHAR);
+                                                options.Add("access_table", LogicalType::VARCHAR);
+                                                options.Add("baskets_table", LogicalType::VARCHAR);
+                                                options.Add("snapshots_table", LogicalType::VARCHAR);
+                                                options.Add("publish_mode", LogicalType::VARCHAR);
+                                                options.Add("catalog_mode", LogicalType::VARCHAR);
+                                            });
     return function;
 }
 

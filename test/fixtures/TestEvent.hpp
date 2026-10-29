@@ -24,6 +24,14 @@ enum class TestKind : Int_t
     SECONDARY = 1
 };
 
+class TestParam
+{
+  public:
+    Float_t Cov[3] = {0.0F, 0.0F, 0.0F};
+
+    ClassDef(TestParam, 1);
+};
+
 class TestHit
 {
   public:
@@ -34,6 +42,8 @@ class TestHit
     ULong64_t exact_uid = 0;
     Float16_t compressed = 0.0F;      //[0,100,16]
     Double32_t compressed_wide = 0.0; //[0,1000,20]
+    // Nested vector<object>/fixed array for recursive serialized-reader regression.
+    std::vector<TestParam> params;
     // Variable-width member before refs exercises member-wise prefix handling.
     std::vector<Float_t> weights;
     std::vector<Short_t> refs;
@@ -42,7 +52,7 @@ class TestHit
     TestHit() = default;
     explicit TestHit(Double_t value);
 
-    ClassDef(TestHit, 7);
+    ClassDef(TestHit, 8);
 };
 
 class TestGroup

@@ -68,7 +68,7 @@ std::unique_ptr<TFile> OpenDescribeRepresentative(ClientContext& context, const 
 }
 
 unique_ptr<FunctionData> RootDescribeBind(ClientContext& context, TableFunctionBindInput& input,
-                                          vector<LogicalType>& return_types, vector<string>& return_names)
+                                          vector<LogicalType>& return_types, vector<Identifier>& return_names)
 {
     if (input.inputs.size() != 2)
     {
@@ -149,18 +149,19 @@ void RootDescribeFunction(ClientContext&, TableFunctionInput& input, DataChunk& 
     while (global.offset < bind.rows.size() && count < STANDARD_VECTOR_SIZE)
     {
         const auto& row = bind.rows[global.offset++];
-        FlatVector::GetData<string_t>(output.data[0])[count] = StringVector::AddString(output.data[0], row.path);
-        FlatVector::GetData<string_t>(output.data[1])[count] = StringVector::AddString(output.data[1], row.name);
-        FlatVector::GetData<string_t>(output.data[2])[count] = StringVector::AddString(output.data[2], row.kind);
-        FlatVector::GetData<string_t>(output.data[3])[count] = StringVector::AddString(output.data[3], row.root_type);
-        FlatVector::GetData<bool>(output.data[4])[count] = row.is_primitive;
-        FlatVector::GetData<bool>(output.data[5])[count] = row.is_string;
-        FlatVector::GetData<bool>(output.data[6])[count] = row.is_container;
-        FlatVector::GetData<bool>(output.data[7])[count] = row.is_fixed_array;
-        FlatVector::GetData<bool>(output.data[8])[count] = row.is_pointer;
+        FlatVector::GetDataMutable<string_t>(output.data[0])[count] = StringVector::AddString(output.data[0], row.path);
+        FlatVector::GetDataMutable<string_t>(output.data[1])[count] = StringVector::AddString(output.data[1], row.name);
+        FlatVector::GetDataMutable<string_t>(output.data[2])[count] = StringVector::AddString(output.data[2], row.kind);
+        FlatVector::GetDataMutable<string_t>(output.data[3])[count] =
+            StringVector::AddString(output.data[3], row.root_type);
+        FlatVector::GetDataMutable<bool>(output.data[4])[count] = row.is_primitive;
+        FlatVector::GetDataMutable<bool>(output.data[5])[count] = row.is_string;
+        FlatVector::GetDataMutable<bool>(output.data[6])[count] = row.is_container;
+        FlatVector::GetDataMutable<bool>(output.data[7])[count] = row.is_fixed_array;
+        FlatVector::GetDataMutable<bool>(output.data[8])[count] = row.is_pointer;
         ++count;
     }
-    output.SetCardinality(count);
+    output.SetCardinalityUnsafe(count);
 }
 
 } // namespace
@@ -169,7 +170,11 @@ void RegisterRootDescribe(ExtensionLoader& loader)
 {
     TableFunction function("root_describe", {LogicalType::VARCHAR, LogicalType::VARCHAR}, RootDescribeFunction,
                            RootDescribeBind, RootDescribeInit);
-    function.named_parameters["dictionary"] = LogicalType::VARCHAR;
+    function.GetSignature().WithTypedKwargs("options",
+                                            [](TypedKwargs& options)
+                                            {
+                                                options.Add("dictionary", LogicalType::VARCHAR);
+                                            });
     loader.RegisterFunction(function);
 }
 

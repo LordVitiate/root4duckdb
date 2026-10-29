@@ -71,7 +71,12 @@ void RootIndexPublisher::PublishTables(DatabaseInstance& db, const fs::path& sta
                 SqlLiteral(state.manifest_fingerprint) +
                 (state.chunk_id.empty() ? std::string() : " AND chunk_id=" + SqlLiteral(state.chunk_id)));
             EnsureQueryOK(*duplicate, "check duplicate ROOT dataset snapshot");
-            if (duplicate->GetValue(0, 0).GetValue<uint64_t>() != 0)
+            auto duplicate_row = duplicate->Fetch();
+            if (!duplicate_row || duplicate_row->size() != 1)
+            {
+                throw IOException("Duplicate ROOT snapshot query returned no row");
+            }
+            if (duplicate_row->GetValue(0, 0).GetValue<uint64_t>() != 0)
             {
                 throw InvalidInputException("This manifest/chunk generation is already committed");
             }
@@ -81,9 +86,10 @@ void RootIndexPublisher::PublishTables(DatabaseInstance& db, const fs::path& sta
                                        " WHERE dataset_id=" + SqlLiteral(dataset_id) +
                                        " AND state='COMMITTED' ORDER BY created_at_ns DESC LIMIT 1");
         EnsureQueryOK(*parent, "resolve parent ROOT dataset snapshot");
-        if (parent->RowCount())
+        auto parent_row = parent->Fetch();
+        if (parent_row && parent_row->size() > 0)
         {
-            parent_snapshot = parent->GetValue(0, 0).ToString();
+            parent_snapshot = parent_row->GetValue(0, 0).ToString();
         }
         uint64_t created_at_ns = 0;
         try

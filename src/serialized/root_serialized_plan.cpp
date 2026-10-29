@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -311,15 +310,12 @@ bool ConfigureRootProjection(TClass* root_class, const ParsedPath& path, const s
 bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<PathLevel>& levels,
                                     TClass* outer_element_class, SerializedReadPlan& plan)
 {
-    const char* enabled = std::getenv("ROOT4DUCKDB_NESTED_FIXED_OFFSET");
-    if (!enabled || std::string(enabled) != "1")
-    {
-        return false;
-    }
+    // Nested fixed-array projection is part of the serialized-first default.
+    // The planner still rejects unsupported shapes and the decoder verifies
+    // each frame before accepting its byte offsets.
     const auto reject = [&](const std::string& reason)
     {
-        RootDebug("SERIALIZED.NESTED_FIXED_PLAN_REJECT",
-                  "path=" + plan.logical_path + " reason=" + reason);
+        RootDebug("SERIALIZED.NESTED_FIXED_PLAN_REJECT", "path=" + plan.logical_path + " reason=" + reason);
         return false;
     };
     if (path.fields.size() != 3 || levels.size() != 3)
@@ -327,15 +323,13 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
         return reject("requires exactly three persistent path levels");
     }
     if (!outer_element_class || !levels[0].klass || !levels[1].is_container ||
-        !IsContiguousVectorType(levels[1].type) || levels[1].is_pointer ||
-        !levels[1].klass || !levels[1].element_class)
+        !IsContiguousVectorType(levels[1].type) || levels[1].is_pointer || !levels[1].klass || !levels[1].element_class)
     {
         return reject("nested field must be an inline vector of objects (type=" + levels[1].type +
                       ", is_container=" + std::to_string(levels[1].is_container) +
                       ", has_value_class=" + std::to_string(levels[1].element_class != nullptr) + ")");
     }
-    if (!levels[2].is_primitive || !levels[2].is_fixed_array ||
-        levels[2].is_pointer || levels[2].is_container)
+    if (!levels[2].is_primitive || !levels[2].is_fixed_array || levels[2].is_pointer || levels[2].is_container)
     {
         return reject("terminal field must be a fixed primitive array (type=" + levels[2].type +
                       ", is_primitive=" + std::to_string(levels[2].is_primitive) +
@@ -402,8 +396,8 @@ bool ConfigureNestedFixedProjection(const ParsedPath& path, const std::vector<Pa
     }
     std::vector<uint32_t> dimensions;
     const auto array_length = FixedArrayLength(target, &dimensions);
-    const auto type = PrimitiveBaseType(StreamerPrimitiveType(target->GetType(),
-                                                              target->GetTypeName() ? target->GetTypeName() : ""));
+    const auto type =
+        PrimitiveBaseType(StreamerPrimitiveType(target->GetType(), target->GetTypeName() ? target->GetTypeName() : ""));
     const auto value_width = PrimitiveTypeSize(type);
     if (!array_length || !value_width || array_length > std::numeric_limits<uint64_t>::max() / value_width ||
         target_width != array_length * value_width ||

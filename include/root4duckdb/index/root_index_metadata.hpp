@@ -129,7 +129,8 @@ class RootIndexMetadataWriter
     RootIndexMetadataWriter& operator=(const RootIndexMetadataWriter&) = delete;
 
     /// Appends one file's typed metadata rows.
-    void Append(const RootFileIndexMetadata& metadata);
+    void Append(const RootFileIndexMetadata& metadata, const std::string& file_path, const std::string& file_id,
+                const std::string& schema_id, uint64_t entries, uint64_t flattened_values, uint64_t baskets);
     /// Flushes remaining rows and closes the writer.
     void Finish();
 

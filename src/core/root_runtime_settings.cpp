@@ -13,7 +13,7 @@ namespace duckdb::rootlake
 static idx_t ReadUnsignedSetting(ClientContext& context, const string& name, idx_t fallback)
 {
     Value value;
-    if (context.TryGetCurrentSetting(name, value))
+    if (context.TryGetCurrentSetting(Identifier(name), value))
     {
         return value.GetValue<idx_t>();
     }
@@ -23,7 +23,7 @@ static idx_t ReadUnsignedSetting(ClientContext& context, const string& name, idx
 static idx_t ReadMemorySetting(ClientContext& context, const string& name, idx_t fallback)
 {
     Value value;
-    if (!context.TryGetCurrentSetting(name, value))
+    if (!context.TryGetCurrentSetting(Identifier(name), value))
     {
         return fallback;
     }
@@ -32,7 +32,7 @@ static idx_t ReadMemorySetting(ClientContext& context, const string& name, idx_t
     {
         return fallback;
     }
-    return DBConfig::ParseMemoryLimit(text);
+    return DBConfig::ParseMemoryLimitOrMaximum(text);
 }
 
 RootRuntimeSettings RootRuntimeSettings::From(ClientContext& context, idx_t file_count, idx_t basket_count_hint,

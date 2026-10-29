@@ -6,7 +6,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_ENV="$PROJECT_DIR/.deps/build-env.sh"
-DUCKDB_BIN="${ROOT4DUCKDB_INDEPENDENT_DUCKDB:-$PROJECT_DIR/.deps/vanilla-duckdb-1.5.6/duckdb}"
+DUCKDB_BIN="${ROOT4DUCKDB_INDEPENDENT_DUCKDB:-$PROJECT_DIR/.deps/vanilla-duckdb-2.0/duckdb}"
 
 fail() {
     printf '[FAIL] %s\n' "$*" >&2

@@ -127,8 +127,8 @@ void RootDirectFileScheduler::RecordFailure(const RootDirectFileTask& task, cons
     failures_.push_back(task.path + ": " + message);
 }
 
-void RootDirectFileScheduler::RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us,
-                                             uint64_t read_calls, uint64_t read_bytes)
+void RootDirectFileScheduler::RecordComplete(const RootDirectFileTask& task, uint64_t elapsed_us, uint64_t read_calls,
+                                             uint64_t read_bytes)
 {
     completed_files_.fetch_add(1);
     physical_read_calls_.fetch_add(read_calls);

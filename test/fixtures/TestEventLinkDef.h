@@ -4,6 +4,7 @@
 #pragma link off all functions;
 #pragma link C++ class TestBase + ;
 #pragma link C++ enum TestKind;
+#pragma link C++ class TestParam + ;
 #pragma link C++ class TestHit + ;
 #pragma link C++ class TestGroup + ;
 #pragma link C++ class TestLayer + ;
@@ -11,6 +12,7 @@
 #pragma link C++ class TestCustom - ;
 #pragma link C++ class std::vector < Float_t> + ;
 #pragma link C++ class std::vector < Short_t> + ;
+#pragma link C++ class std::vector < TestParam> + ;
 #pragma link C++ class std::vector < TestHit> + ;
 #pragma link C++ class std::vector < TestGroup> + ;
 #pragma link C++ class std::vector < TestLayer> + ;

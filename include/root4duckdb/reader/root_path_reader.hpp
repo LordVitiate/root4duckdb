@@ -4,9 +4,11 @@
 #include "root4duckdb/reader/root_semantic_reader.hpp"
 #include "root4duckdb/serialized/root_serialized_reader.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace duckdb::rootlake
@@ -64,6 +66,30 @@ struct RootPathReadResult
     [[nodiscard]] bool FallbackActivated() const noexcept;
 };
 
+/// Origin of a numeric page returned by the common path reader.
+enum class RootNumericPageSource : uint8_t
+{
+    NONE = 0,
+    SERIALIZED = 1,
+    OBJECT = 2
+};
+
+/// A single entry-start decision for the indexed numeric dataset reader.
+enum class RootNumericEntryRoute : uint8_t
+{
+    NONE = 0,
+    SERIALIZED_VALUES = 1,
+    SERIALIZED_PAGE = 2,
+    OBJECT_PAGE = 3
+};
+
+struct RootNumericEntryStartResult
+{
+    RootNumericEntryRoute route = RootNumericEntryRoute::NONE;
+    bool attempt_decoded = false;
+    bool fallback_activated = false;
+};
+
 class RootPathReader
 {
   public:
@@ -81,30 +107,35 @@ class RootPathReader
     /// @{
     void Resolve(TTree* tree_p, TBranch* object_branch, TClass* root_class, ParsedPath path_p,
                  std::vector<PathLevel> levels_p);
+    /// Adopt an already validated semantic path for compatibility traversal.
+    /// Direct scans can reuse this reader without re-planning serialized access.
+    void BindObjectPath(std::vector<PathLevel> levels_p);
     RootPathReaderStartResult StartSerialized(RootPathReaderOptions options_p, std::string rejection_reason = {});
     void SetSerializedBasketCache(std::shared_ptr<SerializedBasketCache> cache);
-    RootPathReadResult TryReadSerialized(uint64_t entry, RootEntryReader& object_entry, std::vector<double>& values,
-                                         std::vector<int32_t>& flat_indices, bool collect_indices = true);
+    // Reuse the physical basket cache across paths within one ROOT worker/file.
+    void AttachSharedBasketCache(std::unordered_map<TBranch*, std::shared_ptr<SerializedBasketCache>>& caches);
+    /// Page-oriented compatibility traversal owned by the resolved path.
+    void BeginObjectEntry(void* object, int64_t entry_id);
+    bool ReadObjectPage(idx_t maximum_rows, ReadResult& result);
+    [[nodiscard]] bool HasObjectPage() const noexcept;
+    void EndObjectEntry() noexcept;
     RootPathReadResult TryReadSerialized(uint64_t entry, RootEntryReader& object_entry,
                                          std::vector<RootPrimitiveValue>& values, std::vector<int32_t>& flat_indices,
                                          bool collect_indices = true);
+    /// Choose serialized pages, serialized values, or object pages once per entry.
+    RootNumericEntryStartResult BeginNumericEntry(uint64_t entry, RootEntryReader& object_entry, int64_t entry_id,
+                                                  std::vector<RootPrimitiveValue>& values,
+                                                  std::vector<int32_t>& flat_indices);
+    RootNumericPageSource ReadNumericPage(idx_t rows, std::vector<RootPrimitiveValue>& values,
+                                          std::vector<int32_t>& flat_indices);
+    [[nodiscard]] bool HasNumericPage() const noexcept;
+    void EndNumericPage() noexcept;
     void Reset();
-    /// @}
-
-    /// @name Universal object fallback
-    /// @{
-    void CollectValues(void* object, std::vector<double>& values) const;
-    void CollectFlat(void* object, std::vector<double>& values, std::vector<int32_t>& flat_indices) const;
-    void CollectTypedValues(void* object, std::vector<RootPrimitiveValue>& values) const;
-    void CollectTypedFlat(void* object, std::vector<RootPrimitiveValue>& values,
-                          std::vector<int32_t>& flat_indices) const;
-    void CollectDirect(void* object, int64_t max_values, int64_t entry_id, ReadResult& result) const;
     /// @}
 
     /// @name Reader state
     /// @{
     bool SerializedActive() const;
-    bool FallbackRecorded() const;
     uint32_t ValidationRemaining() const;
     idx_t IndexDepth() const;
     const ParsedPath& Path() const;
@@ -117,8 +148,12 @@ class RootPathReader
     /// @}
 
   private:
+    void CollectTypedFlat(void* object, std::vector<RootPrimitiveValue>& values,
+                          std::vector<int32_t>& flat_indices) const;
+    struct ObjectCursorState;
     bool BindIsolatedValidationReader(std::string& failure_reason);
     bool ActivateFallback(const std::string& reason);
+    RootPathReadResult BeginSerializedPage(uint64_t entry);
 
     TTree* tree = nullptr;
     ParsedPath path;
@@ -131,6 +166,8 @@ class RootPathReader
     std::shared_ptr<SerializedBasketCache> serialized_basket_cache;
     SerializedBasketReader serialized_reader;
     std::unique_ptr<TFile> validation_file;
+    // A heap-held state preserves cursor level references across move operations.
+    std::unique_ptr<ObjectCursorState> object_cursor_state;
     RootObjectReader validation_reader;
     bool serialized_active = false;
     bool fallback_recorded = false;

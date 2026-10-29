@@ -71,11 +71,6 @@ bool RootScanBindData::IsBrowseMode() const noexcept
     return std::holds_alternative<RootBrowseScanMode>(scan_mode);
 }
 
-bool RootScanBindData::IsDirectBranchMode() const noexcept
-{
-    return std::holds_alternative<RootDirectBranchScanMode>(scan_mode);
-}
-
 bool RootScanBindData::IsPrimitiveTreeMode() const noexcept
 {
     return std::holds_alternative<RootPrimitiveTreeScanMode>(scan_mode);
@@ -96,11 +91,6 @@ const RootBrowseScanMode* RootScanBindData::BrowseMode() const noexcept
     return std::get_if<RootBrowseScanMode>(&scan_mode);
 }
 
-const RootDirectBranchScanMode* RootScanBindData::DirectBranchMode() const noexcept
-{
-    return std::get_if<RootDirectBranchScanMode>(&scan_mode);
-}
-
 const RootHistogramScanMode* RootScanBindData::HistogramMode() const noexcept
 {
     return std::get_if<RootHistogramScanMode>(&scan_mode);
@@ -114,11 +104,6 @@ void RootScanBindData::SelectSemanticMode()
 void RootScanBindData::SelectBrowseMode(std::vector<std::string> children)
 {
     scan_mode.emplace<RootBrowseScanMode>(RootBrowseScanMode{std::move(children)});
-}
-
-void RootScanBindData::SelectDirectBranchMode(RootPrimitiveBranch branch)
-{
-    scan_mode.emplace<RootDirectBranchScanMode>(RootDirectBranchScanMode{std::move(branch)});
 }
 
 void RootScanBindData::SelectPrimitiveTreeMode()
@@ -165,9 +150,26 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
     global_state->force_single_thread = bind_data.IsHistogramMode();
     if (input.filters)
     {
+        if (input.filters->HasMultiColumnFilters())
+        {
+            throw NotImplementedException("ROOT4DuckDB does not yet support DuckDB 2.0 multi-column filter pushdown");
+        }
         global_state->filters = input.filters->Copy();
     }
     global_state->scan_column_ids = input.column_ids;
+    if (global_state->filters)
+    {
+        rootlake::PartitionRootRowFilters(
+            *global_state->filters, global_state->scan_column_ids,
+            [&](idx_t column_id)
+            {
+                return column_id == COLUMN_IDENTIFIER_ROW_ID || column_id == bind_data.source_id_column ||
+                       column_id == bind_data.source_path_column ||
+                       (column_id < bind_data.columns.size() && bind_data.columns[column_id].name == "entry_id" &&
+                        bind_data.columns[column_id].levels.empty());
+            },
+            global_state->entry_filters, global_state->element_filters);
+    }
     if (input.projection_ids.empty())
     {
         global_state->output_column_ids = input.column_ids;
@@ -213,16 +215,16 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
     }
     if (!bind_data.IsBrowseMode() && !bind_data.IsHistogramMode() && global_state->filters)
     {
-        for (const auto& entry : global_state->filters->filters)
+        for (const auto& entry : *global_state->filters)
         {
-            if (entry.first >= global_state->scan_column_ids.size())
+            if (entry.GetIndex().GetIndex() >= global_state->scan_column_ids.size())
             {
                 continue;
             }
-            const auto full_column = global_state->scan_column_ids[entry.first];
+            const auto full_column = global_state->scan_column_ids[entry.GetIndex().GetIndex()];
             if (full_column == bind_data.source_id_column && bind_data.IsMultiFile())
             {
-                const auto source_range = rootlake::ExtractRootUnsignedRange(*entry.second);
+                const auto source_range = rootlake::ExtractRootUnsignedRange(entry.Filter());
                 if (!source_range.known)
                 {
                     continue;
@@ -243,7 +245,7 @@ unique_ptr<GlobalTableFunctionState> RootScanStateFactory::CreateGlobal(ClientCo
             {
                 continue;
             }
-            const auto range = rootlake::ExtractRootUnsignedRange(*entry.second);
+            const auto range = rootlake::ExtractRootUnsignedRange(entry.Filter());
             if (!range.known)
             {
                 continue;
@@ -353,26 +355,27 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
                 continue;
             }
             const auto& column = bind_data.columns[column_index];
-            if (column.branch_name.empty())
+            if (column.primitive_branch_name.empty())
             {
                 continue;
             }
-            auto* branch = tree->GetBranch(column.branch_name.c_str());
+            auto* branch = tree->GetBranch(column.primitive_branch_name.c_str());
             if (!branch)
             {
-                throw IOException("ROOT schema mismatch in " + file_path + ": primitive branch '" + column.branch_name +
-                                  "' is absent");
+                throw IOException("ROOT schema mismatch in " + file_path + ": primitive branch '" +
+                                  column.primitive_branch_name + "' is absent");
             }
             auto* leaf = branch->GetLeaf(branch->GetName());
             if (!leaf)
             {
-                throw IOException("ROOT schema mismatch in " + file_path + ": primitive leaf '" + column.branch_name +
-                                  "' is absent");
+                throw IOException("ROOT schema mismatch in " + file_path + ": primitive leaf '" +
+                                  column.primitive_branch_name + "' is absent");
             }
             if (std::string(leaf->GetTypeName()) != column.root_type)
             {
-                throw IOException("ROOT schema mismatch in " + file_path + ": primitive branch '" + column.branch_name +
-                                  "' changed type from " + column.root_type + " to " + leaf->GetTypeName());
+                throw IOException("ROOT schema mismatch in " + file_path + ": primitive branch '" +
+                                  column.primitive_branch_name + "' changed type from " + column.root_type + " to " +
+                                  leaf->GetTypeName());
             }
             local_state->primitive_tree_branches[column_index] = branch;
             local_state->primitive_tree_leaves[column_index] = leaf;
@@ -384,9 +387,8 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         }
         else
         {
-            const auto projection =
-                rootlake::ApplyBranchProjection(tree, projected_branches, bind_data.root_access.tree_cache_bytes,
-                                               cache_entry_begin, cache_entry_end);
+            const auto projection = rootlake::ApplyBranchProjection(
+                tree, projected_branches, bind_data.root_access.tree_cache_bytes, cache_entry_begin, cache_entry_end);
             if (!projection.applied)
             {
                 rootlake::EnableAllBranches(tree, bind_data.root_access.tree_cache_bytes);
@@ -410,70 +412,16 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
             fingerprint << "primitive-tree:" << bind_data.tree_name;
             for (const auto& column : bind_data.columns)
             {
-                if (!column.branch_name.empty())
+                if (!column.primitive_branch_name.empty())
                 {
-                    fingerprint << "|" << column.branch_name << ":" << column.root_type;
+                    fingerprint << "|" << column.primitive_branch_name << ":" << column.root_type;
                 }
             }
             gstate.file_scheduler->ObserveSchema(fingerprint.str());
         }
         return;
     }
-    if (bind_data.IsDirectBranchMode())
-    {
-        const auto* direct_mode = bind_data.DirectBranchMode();
-        if (!direct_mode)
-        {
-            throw InternalException("read_root direct branch mode has no branch plan");
-        }
-        const auto& direct_branch_info = direct_mode->branch;
-        const auto open_result = local_state->root_file.Open(file_path, bind_data.tree_name, open_mutex);
-        if (gstate.file_scheduler)
-        {
-            gstate.file_scheduler->RecordOpen(local_state->file_task, open_result.attempts, open_result.elapsed_us);
-        }
-        auto* tree = local_state->root_file.GetTTree();
-        if (tree)
-        {
-            local_state->direct_branch = tree->GetBranch(direct_branch_info.name.c_str());
-            if (local_state->direct_branch)
-            {
-                local_state->direct_leaf = local_state->direct_branch->GetLeaf(local_state->direct_branch->GetName());
-                std::vector<TBranch*> projected_branches{local_state->direct_branch};
-                if (local_state->direct_leaf && local_state->direct_leaf->GetLeafCount() &&
-                    local_state->direct_leaf->GetLeafCount()->GetBranch())
-                {
-                    projected_branches.push_back(local_state->direct_leaf->GetLeafCount()->GetBranch());
-                }
-                const auto projection =
-                    rootlake::ApplyBranchProjection(tree, projected_branches, bind_data.root_access.tree_cache_bytes,
-                                               cache_entry_begin, cache_entry_end);
-                if (!projection.applied)
-                {
-                    rootlake::EnableAllBranches(tree, bind_data.root_access.tree_cache_bytes);
-                }
-            }
-        }
-        if (!local_state->direct_branch || !local_state->direct_leaf)
-        {
-            throw IOException("ROOT schema mismatch in " + file_path + ": primitive branch '" +
-                              direct_branch_info.name + "' is absent");
-        }
-        if (gstate.file_scheduler)
-        {
-            const auto entries = static_cast<uint64_t>(std::max<Long64_t>(0, tree->GetEntries()));
-            local_state->local_current_row =
-                gstate.entry_range_impossible ? entries : std::min(entries, gstate.entry_lower);
-            local_state->local_end_row = entries;
-            if (gstate.entry_upper != std::numeric_limits<uint64_t>::max())
-            {
-                local_state->local_end_row = std::min(entries, gstate.entry_upper + 1);
-            }
-            local_state->file_active = true;
-            gstate.file_scheduler->ObserveSchema("primitive:" + direct_branch_info.type_name);
-        }
-        return;
-    }
+
     const auto open_result = local_state->root_file.Open(file_path, bind_data.tree_name, open_mutex);
     if (gstate.file_scheduler)
     {
@@ -492,18 +440,18 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
             continue;
         }
         const auto& col = bind_data.columns[col_idx];
-        if (!col.branch_name.empty())
+        if (!col.root_class_name.empty())
         {
-            unique_root_classes.insert(col.branch_name);
+            unique_root_classes.insert(col.root_class_name);
         }
     }
     if (unique_root_classes.empty())
     {
         for (const auto& col : bind_data.columns)
         {
-            if (!col.branch_name.empty())
+            if (!col.root_class_name.empty())
             {
-                unique_root_classes.insert(col.branch_name);
+                unique_root_classes.insert(col.root_class_name);
             }
         }
     }
@@ -523,6 +471,8 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
             }
         }
     }
+    local_state->path_readers.clear();
+    local_state->path_readers.resize(bind_data.columns.size());
     std::vector<idx_t> serialized_candidates;
     for (const auto col_idx : gstate.scan_column_ids)
     {
@@ -563,7 +513,7 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
     for (const auto col_idx : serialized_candidates)
     {
         const auto& col = bind_data.columns[col_idx];
-        auto reader_it = local_state->root_readers.find(col.branch_name);
+        auto reader_it = local_state->root_readers.find(col.root_class_name);
         if (reader_it == local_state->root_readers.end())
         {
             all_candidates_projectable = false;
@@ -577,6 +527,7 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         }
         RootSerializedColumnState state;
         state.column_id = col_idx;
+        auto& path_reader = local_state->path_readers[col_idx];
         auto& object_reader = reader_it->second;
         if (!projection_tree)
         {
@@ -587,28 +538,28 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
             all_candidates_projectable = false;
         }
         auto parsed = rootlake::ParsePath(col.logical_path);
-        state.path_reader.Resolve(object_reader.Tree(), object_reader.ObjectBranch(), object_reader.RootClass(),
-                                  std::move(parsed), col.levels);
-        if (auto* physical_branch = state.path_reader.PhysicalBranch())
+        path_reader.Resolve(object_reader.Tree(), object_reader.ObjectBranch(), object_reader.RootClass(),
+                            std::move(parsed), col.levels);
+        path_reader.AttachSharedBasketCache(serialized_basket_caches);
+        if (path_reader.PhysicalMode() == "ancestor")
         {
-            auto cache_it = serialized_basket_caches.find(physical_branch);
-            if (cache_it == serialized_basket_caches.end())
-            {
-                auto cache = std::make_shared<rootlake::SerializedBasketCache>();
-                cache->Bind(physical_branch);
-                cache_it = serialized_basket_caches.emplace(physical_branch, std::move(cache)).first;
-            }
-            state.path_reader.SetSerializedBasketCache(cache_it->second);
-        }
-        if (state.path_reader.PhysicalMode() == "ancestor")
-        {
-            projected_branches.push_back(state.path_reader.PhysicalBranch());
+            projected_branches.push_back(path_reader.PhysicalBranch());
         }
         else
         {
             all_candidates_projectable = false;
         }
         local_state->serialized_columns.emplace_back(std::move(state));
+    }
+    // Materialize already-resolved object paths once, even when the column
+    // cannot use serialized access. Cursor ownership still stays in RootPathReader.
+    for (const auto column_id : local_state->projected_relation_columns)
+    {
+        auto& path_reader = local_state->path_readers[column_id];
+        if (path_reader.Levels().empty())
+        {
+            path_reader.BindObjectPath(bind_data.columns[column_id].levels);
+        }
     }
     if (!local_state->serialized_columns.empty())
     {
@@ -629,7 +580,7 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         reader_options.enable_all_branches_on_fallback = true;
         for (auto& state : local_state->serialized_columns)
         {
-            state.path_reader.StartSerialized(reader_options);
+            local_state->path_readers[state.column_id].StartSerialized(reader_options);
         }
     }
     for (const auto& col : bind_data.columns)
@@ -659,7 +610,8 @@ void RootScanFileManager::Open(const RootScanBindData& bind_data, RootScanGlobal
         std::string fingerprint;
         for (const auto& state : local_state->serialized_columns)
         {
-            const auto& column_fingerprint = state.path_reader.SerializedPlan().schema_fingerprint;
+            const auto& column_fingerprint =
+                local_state->path_readers[state.column_id].SerializedPlan().schema_fingerprint;
             if (column_fingerprint.empty())
             {
                 continue;
@@ -693,7 +645,14 @@ unique_ptr<LocalTableFunctionState> RootScanStateFactory::CreateLocal(TableFunct
         const auto& column = bind_data.columns[column_index];
         if (!column.levels.empty() && !column.is_virtual_index && column.name != "entry_id")
         {
-            local_state->projected_branch_columns[column.branch_name].push_back(column_index);
+            if (!local_state->projected_relation_columns.empty() &&
+                column.root_class_name !=
+                    bind_data.columns[local_state->projected_relation_columns.front()].root_class_name)
+            {
+                throw InternalException(
+                    "one semantic ROOT relation cannot contain columns from different root classes");
+            }
+            local_state->projected_relation_columns.push_back(column_index);
         }
     }
     if (!bind_data.IsEmptyMode() && !bind_data.IsBrowseMode() && !bind_data.IsHistogramMode() &&

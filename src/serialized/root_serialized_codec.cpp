@@ -2,6 +2,7 @@
 
 #include "root4duckdb/serialized/root_serialized_codec_utils.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -202,6 +203,132 @@ bool DecodeVectorPayload(const uint8_t* bytes, size_t entry_size, size_t payload
         }
     }
     return true;
+}
+
+bool SerializedVectorPageCursor::Open(const uint8_t* bytes, size_t entry_size, size_t payload_offset, uint64_t count,
+                                      const SerializedEntryLayout& source_layout, std::string& reason)
+{
+    Reset();
+    reason.clear();
+    if (!bytes || payload_offset > entry_size || !source_layout.fixed_array_length || !source_layout.value_bytes)
+    {
+        reason = "serialized cursor has an invalid entry or primitive width";
+        return false;
+    }
+    const auto rank = source_layout.fixed_array_length > 1
+                          ? (source_layout.array_dimensions.empty() ? 1 : source_layout.array_dimensions.size())
+                          : 0;
+    SerializedPrimitiveKind checked_kind;
+    if (!ValidatePrimitiveLayout(source_layout, 1 + rank, checked_kind, reason))
+    {
+        return false;
+    }
+    uint64_t product = 1;
+    for (const auto dimension : source_layout.array_dimensions)
+    {
+        if (!dimension || dimension > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
+            product > std::numeric_limits<uint64_t>::max() / dimension)
+        {
+            reason = "serialized cursor has invalid array dimensions";
+            return false;
+        }
+        product *= dimension;
+    }
+    if ((!source_layout.array_dimensions.empty() && product != source_layout.fixed_array_length) ||
+        (source_layout.array_dimensions.empty() &&
+         source_layout.fixed_array_length > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())))
+    {
+        reason = "serialized cursor array dimensions exceed supported indices";
+        return false;
+    }
+    if (count > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) ||
+        count > std::numeric_limits<uint64_t>::max() / source_layout.fixed_array_length ||
+        (source_layout.bytes_before_value_per_element &&
+         count > std::numeric_limits<uint64_t>::max() / source_layout.bytes_before_value_per_element))
+    {
+        reason = "serialized cursor element count or prefix overflows";
+        return false;
+    }
+    const auto total = count * source_layout.fixed_array_length;
+    const auto prefix = count * source_layout.bytes_before_value_per_element;
+    if (total > std::numeric_limits<uint64_t>::max() / source_layout.value_bytes ||
+        prefix > entry_size - payload_offset)
+    {
+        reason = "serialized cursor projected byte count overflows";
+        return false;
+    }
+    if (total * source_layout.value_bytes > entry_size - payload_offset - prefix)
+    {
+        reason = "serialized cursor payload exceeds its entry frame";
+        return false;
+    }
+    projected = bytes + payload_offset + static_cast<size_t>(prefix);
+    layout = source_layout;
+    kind = checked_kind;
+    value_count = total;
+    return true;
+}
+
+bool SerializedVectorPageCursor::ReadPage(size_t maximum_rows, std::vector<RootPrimitiveValue>& values,
+                                          std::vector<int32_t>& flat_indices, std::string& reason, bool collect_indices)
+{
+    values.clear();
+    flat_indices.clear();
+    reason.clear();
+    if (!HasMore() || !maximum_rows)
+    {
+        return false;
+    }
+    // STANDARD_VECTOR_SIZE = 2048; reject accidental entry-sized page requests.
+    const auto rows =
+        static_cast<size_t>(std::min<uint64_t>(value_count - next_value, std::min<size_t>(maximum_rows, 2048)));
+    if (collect_indices && rows > flat_indices.max_size() / layout.index_depth)
+    {
+        reason = "serialized cursor index page exceeds vector capacity";
+        return false;
+    }
+    values.reserve(rows);
+    if (collect_indices)
+    {
+        flat_indices.reserve(rows * layout.index_depth);
+    }
+    for (size_t i = 0; i < rows; ++i)
+    {
+        const auto flat = next_value + i;
+        RootPrimitiveValue value;
+        if (!serialized_codec::DecodePrimitive(projected + flat * layout.value_bytes, kind, value))
+        {
+            values.clear();
+            flat_indices.clear();
+            reason = "serialized cursor primitive decode failed";
+            return false;
+        }
+        values.push_back(value);
+        if (collect_indices)
+        {
+            flat_indices.push_back(static_cast<int32_t>(flat / layout.fixed_array_length));
+            if (layout.fixed_array_length > 1)
+            {
+                PushArrayCoordinates(flat % layout.fixed_array_length, layout.array_dimensions, flat_indices);
+            }
+        }
+    }
+    next_value += rows;
+    return true;
+}
+
+bool SerializedVectorPageCursor::HasMore() const noexcept
+{
+    return projected && next_value < value_count;
+}
+
+void SerializedVectorPageCursor::Reset() noexcept
+{
+    projected = nullptr;
+    layout = {};
+    kind = SerializedPrimitiveKind::UNKNOWN;
+    value_count = 0;
+    next_value = 0;
 }
 
 template <class VALUE>

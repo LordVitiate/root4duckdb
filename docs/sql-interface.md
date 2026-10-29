@@ -317,6 +317,17 @@ Histogram predicates and projections are evaluated through the same DuckDB table
 
 > **Use `read_root(...)` for direct files, globs, schema exploration, histogram access and reader validation. Use `read_root_dataset(...)` when persistent metadata-driven pruning is required.**
 
+### Adaptive ROOT caching in `read_root_dataset()`
+
+Indexed scans automatically select ROOT TTreeCache behavior **per input file** using the physical basket and entry ranges in the scan plan. The default avoids broad ROOT read-ahead for sparse, filtered, predicate-selected or row-limited scans. It retains the existing ROOT cache for complete sequential scans that cover every basket and entry in a file. This does not change the default cache policy of direct `read_root()` or index construction.
+
+An explicitly supplied `tree_cache_bytes` always overrides automatic admission, including `tree_cache_bytes := 0` to disable the cache. The default ROOT cache size for admitted complete-file scans is 64 MiB. No dataset index rewrite is required to enable the new scan policy.
+
+`EXPLAIN ANALYZE` exposes `ROOT Tree Cache Policy` (`adaptive` or `explicit`), `ROOT Cache Enabled Files` and `ROOT Cache Disabled Files`. These report **planned per-file cache decisions**, not physical EOS reads or a guarantee that read-ahead improves every workload. Compare wall time and CPU utilization on the target dataset when tuning explicit settings.
+
+For sparse selections on remote ROOT files, the indexed default avoids the excessive read-ahead previously observed with an unconditional 64 MiB TTreeCache. Explicit cache values remain useful for controlled A/B benchmarks.
+
+
 ---
 
 ## `root_build_index(...)`
@@ -361,6 +372,8 @@ root_build_index(
 | `metadata_flush_bytes` | runtime setting | Controls bounded metadata flushing |
 | `overwrite` | `false` | Allows replacement of an existing local snapshot |
 | `allow_partial` | `false` | Allows publication when some input files fail |
+| `resume` | `false` | Restores verified checkpoints and resumes incomplete local, external or SQLite/Iceberg indexing |
+| `update_mode` | `replace` | `extend` adds only missing ROOT logical paths to an existing SQLite/Iceberg index; `replace` creates a new independent generation |
 | `catalog_mode` | `local` | Selects `local`, `sqlite`, `external` or `tables` publication |
 | `publish_mode` | `none` | Selects `none`, `append` or `replace` for explicit metadata tables |
 | `chunk_id` | — | Identifies one production indexing chunk |
@@ -370,6 +383,22 @@ root_build_index(
 \* `output_dir` may be empty only with `catalog_mode := 'tables'`.
 
 Multiple logical paths may be indexed in one call when they belong to the same top-level ROOT class. The top-level object is loaded once per entry and reused for all requested paths.
+
+### Extending an Iceberg ROOT index
+
+Use the same file manifest, order, tree and dictionary as the committed index. The extension validates source identities and indexes only the additional logical paths. Existing metadata files are reused without re-scanning old paths. The active generation exposes both sets of paths and previous generations remain selectable by `snapshot_id`.
+
+```sql
+SELECT * FROM root_build_dataset_index(
+    '@same_files.txt', 'PaEvent',
+    '["/PaEvent/vecHit/time", "/PaEvent/vecHit/sigt"]',
+    '/eos/path/to/existing/catalog',
+    dictionary := '/eos/path/to/libPhast.so',
+    catalog_mode := 'sqlite', update_mode := 'extend', resume := true
+);
+```
+
+A duplicate path, changed file manifest, incompatible dictionary or changed ROOT file is rejected rather than silently merged. A failed or interrupted publication retains the previously committed generation. Readers select the native Iceberg snapshot for each metadata table from the committed ROOT generation; the ROOT path map identifies older physical index generations where required.
 
 ### Catalog modes
 

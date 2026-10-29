@@ -31,15 +31,31 @@ bool DescribeSemanticPath(TClass* root_class, const ParsedPath& path, const std:
 bool SelectSemanticPath(TClass* root_class, const ParsedPath& path, const std::string& raw_path,
                         SemanticPathSelection& selection);
 
+/// Resumable bounded traversal of one materialized ROOT entry.
+/// The caller owns the object and resolved levels; neither may change until Reset().
+/// All cursor state is worker-local (CERT EXP54-CPP, CTR50-CPP, CON52-CPP).
+class OffsetValueCursor final
+{
+  public:
+    void Open(void* root_object, const std::vector<PathLevel>& levels, int64_t entry_id);
+    /// Returns true when the page contains rows. Empty means traversal exhausted.
+    bool ReadPage(idx_t maximum_rows, ReadResult& result);
+    [[nodiscard]] bool HasMore() const noexcept;
+    void Reset() noexcept;
+
+  private:
+    void* root_object_ = nullptr; // Non-owning; parent ROOT reader outlives the cursor.
+    const std::vector<PathLevel>* levels_ = nullptr;
+    std::vector<int32_t> resume_indices_;
+    int64_t entry_id_ = 0;
+    bool previous_emitted_ = false;
+    bool complete_ = true;
+};
+
 /// Traverses materialized ROOT objects using resolved offsets.
 class OffsetValueReader
 {
   public:
-    /// Collects numeric values without index columns.
-    static void CollectValues(void* root_object, const std::vector<PathLevel>& levels, std::vector<double>& out);
-    /// Collects numeric values and flattened indices.
-    static void CollectFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
-                            std::vector<double>& values, std::vector<int32_t>& flat_indices);
     /// Collects exact primitive values and flat indices without creating per-value rows.
     static void CollectTypedFlat(void* root_object, const std::vector<PathLevel>& levels, idx_t index_depth,
                                  int64_t max_values, std::vector<RootPrimitiveValue>& values,

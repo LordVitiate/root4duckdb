@@ -126,6 +126,14 @@ foreach(_r4d_iceberg_source IN LISTS ROOT4DUCKDB_ICEBERG_SOURCES)
         PROPERTY SKIP_PRECOMPILE_HEADERS ON
     )
 
+    # These translation units require C++23 for Apache Iceberg but do not
+    # use C++ modules. Prevent CMake 3.28+ from generating module-scan
+    # commands that fail with the GCC toolchain in DuckDB Community CI.
+    set_property(
+        SOURCE "${_r4d_iceberg_source}"
+        PROPERTY CXX_SCAN_FOR_MODULES OFF
+    )
+
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_property(
             SOURCE "${_r4d_iceberg_source}"

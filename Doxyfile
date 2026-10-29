@@ -9,13 +9,13 @@ OUTPUT_LANGUAGE        = English
 OUTPUT_TEXT_DIRECTION  = None
 ALLOW_UNICODE_NAMES    = YES
 
-INPUT                   = src/include/root4duckdb src
+INPUT                   = include/root4duckdb src
 FILE_PATTERNS           = *.hpp *.cpp
 RECURSIVE               = YES
 EXCLUDE_PATTERNS        = */build/* */duckdb/* */extension-ci-tools/* */.deps/*
 EXCLUDE_SYMLINKS        = YES
 STRIP_FROM_PATH         = .
-STRIP_FROM_INC_PATH     = src/include
+STRIP_FROM_INC_PATH     = include
 
 EXTRACT_ALL             = YES
 EXTRACT_PRIVATE         = YES
@@ -51,7 +51,7 @@ WARN_AS_ERROR           = NO
 ENABLE_PREPROCESSING    = YES
 MACRO_EXPANSION         = YES
 SEARCH_INCLUDES         = YES
-INCLUDE_PATH            = src/include
+INCLUDE_PATH            = include
 CLANG_ASSISTED_PARSING  = NO
 
 SOURCE_BROWSER          = YES

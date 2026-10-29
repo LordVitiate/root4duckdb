@@ -1,7 +1,21 @@
 #include "root4duckdb/reader/root_semantic_types.hpp"
 
+#include <cstring>
+
 namespace duckdb::rootlake
 {
+
+namespace
+{
+
+template <class T> T LoadRootPrimitive(const void* pointer) noexcept
+{
+    T value{};
+    std::memcpy(&value, pointer, sizeof(value));
+    return value;
+}
+
+} // namespace
 
 RootPrimitiveValue RootPrimitiveValue::FromPointer(void* pointer, const std::string& raw_type)
 {
@@ -12,55 +26,55 @@ RootPrimitiveValue RootPrimitiveValue::FromPointer(void* pointer, const std::str
     const auto type = PrimitiveBaseType(raw_type);
     if (type == "Bool_t" || type == "bool" || type == "O")
     {
-        return Unsigned(*reinterpret_cast<bool*>(pointer) ? 1 : 0);
+        return Unsigned(LoadRootPrimitive<uint8_t>(pointer) != 0 ? 1 : 0);
     }
     if (type == "Char_t" || type == "char" || type == "b")
     {
-        return Signed(*reinterpret_cast<int8_t*>(pointer));
+        return Signed(LoadRootPrimitive<int8_t>(pointer));
     }
     if (type == "UChar_t" || type == "unsigned char" || type == "B")
     {
-        return Unsigned(*reinterpret_cast<uint8_t*>(pointer));
+        return Unsigned(LoadRootPrimitive<uint8_t>(pointer));
     }
     if (type == "Short_t" || type == "short" || type == "S")
     {
-        return Signed(*reinterpret_cast<int16_t*>(pointer));
+        return Signed(LoadRootPrimitive<int16_t>(pointer));
     }
     if (type == "UShort_t" || type == "unsigned short" || type == "s")
     {
-        return Unsigned(*reinterpret_cast<uint16_t*>(pointer));
+        return Unsigned(LoadRootPrimitive<uint16_t>(pointer));
     }
     if (type == "Int_t" || type == "int" || type == "I")
     {
-        return Signed(*reinterpret_cast<int32_t*>(pointer));
+        return Signed(LoadRootPrimitive<int32_t>(pointer));
     }
     if (type == "UInt_t" || type == "unsigned int" || type == "i")
     {
-        return Unsigned(*reinterpret_cast<uint32_t*>(pointer));
+        return Unsigned(LoadRootPrimitive<uint32_t>(pointer));
     }
     if (type == "Long_t" || type == "long")
     {
-        return Signed(static_cast<int64_t>(*reinterpret_cast<long*>(pointer)));
+        return Signed(static_cast<int64_t>(LoadRootPrimitive<long>(pointer)));
     }
     if (type == "ULong_t" || type == "unsigned long")
     {
-        return Unsigned(static_cast<uint64_t>(*reinterpret_cast<unsigned long*>(pointer)));
+        return Unsigned(static_cast<uint64_t>(LoadRootPrimitive<unsigned long>(pointer)));
     }
     if (type == "Long64_t" || type == "long long" || type == "L")
     {
-        return Signed(*reinterpret_cast<int64_t*>(pointer));
+        return Signed(LoadRootPrimitive<int64_t>(pointer));
     }
     if (type == "ULong64_t" || type == "unsigned long long" || type == "l")
     {
-        return Unsigned(*reinterpret_cast<uint64_t*>(pointer));
+        return Unsigned(LoadRootPrimitive<uint64_t>(pointer));
     }
     if (type == "Float_t" || type == "float" || type == "F")
     {
-        return Floating(*reinterpret_cast<float*>(pointer));
+        return Floating(LoadRootPrimitive<float>(pointer));
     }
     if (type == "Double_t" || type == "double" || type == "D")
     {
-        return Floating(*reinterpret_cast<double*>(pointer));
+        return Floating(LoadRootPrimitive<double>(pointer));
     }
     throw NotImplementedException("Unsupported primitive ROOT type: " + raw_type);
 }
@@ -73,11 +87,11 @@ RootPrimitiveValue RootPrimitiveValue::FromDouble(double value, const std::strin
     case LogicalTypeId::UTINYINT:
     case LogicalTypeId::USMALLINT:
     case LogicalTypeId::UINTEGER:
-        return Unsigned(static_cast<uint64_t>(value));
+        return Unsigned(Floating(value).AsUnsigned());
     case LogicalTypeId::TINYINT:
     case LogicalTypeId::SMALLINT:
     case LogicalTypeId::INTEGER:
-        return Signed(static_cast<int64_t>(value));
+        return Signed(Floating(value).AsSigned());
     case LogicalTypeId::FLOAT:
     case LogicalTypeId::DOUBLE:
         return Floating(value);

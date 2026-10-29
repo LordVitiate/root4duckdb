@@ -3,76 +3,43 @@
 namespace duckdb::rootlake
 {
 
-optional_ptr<TableFilter> FilterForFullColumn(const DatasetGlobalState& global, column_t full_column)
+optional_ptr<const TableFilter> FilterForFullColumn(const DatasetGlobalState& global, column_t full_column)
 {
     if (!global.filters)
     {
         return nullptr;
     }
-    for (const auto& entry : global.filters->filters)
+    for (const auto& entry : *global.filters)
     {
-        const auto scan_position = entry.first;
-        if (scan_position >= global.scan_column_ids.size())
+        const auto scan_position = entry.GetIndex().GetIndex();
+        if (scan_position < global.scan_column_ids.size() && global.scan_column_ids[scan_position] == full_column)
         {
-            continue;
-        }
-        if (global.scan_column_ids[scan_position] == full_column)
-        {
-            return entry.second.get();
+            return &entry.Filter();
         }
     }
     return nullptr;
 }
 
-bool PassesFilters(ClientContext& context, DatasetLocalState& local, const DatasetBindData& bind,
-                   const DatasetGlobalState& global, uint64_t event_fk, double numeric_value, const int32_t* indices,
-                   idx_t index_count)
+bool PassesDatasetEntryFilters(ClientContext& context, DatasetLocalState& local, const DatasetBindData& bind,
+                               const DatasetGlobalState& global, uint64_t entry_id)
 {
-    if (!global.filters)
-    {
-        return true;
-    }
-    for (const auto& entry : global.filters->filters)
-    {
-        const auto scan_position = entry.first;
-        if (scan_position >= global.scan_column_ids.size())
-        {
-            continue;
-        }
-        const column_t column = global.scan_column_ids[scan_position];
-        RootScalarActual actual;
-        if (column == 0)
-        {
-            actual = RootScalarActual::Event(event_fk);
-        }
-        else if (column >= 1 && static_cast<idx_t>(column) < bind.value_column)
-        {
-            const idx_t index_position = static_cast<idx_t>(column) - 1;
-            actual = RootScalarActual::Index(
-                index_position < index_count ? std::optional<int32_t>(indices[index_position]) : std::nullopt);
-        }
-        else if (static_cast<idx_t>(column) == bind.value_column)
-        {
-            actual = RootScalarActual::Numeric(bind.value_type, numeric_value);
-        }
-        else if (static_cast<idx_t>(column) == bind.source_id_column)
-        {
-            actual = RootScalarActual::String(local.value_source_id);
-        }
-        else if (static_cast<idx_t>(column) == bind.entry_id_column)
-        {
-            actual = RootScalarActual::Event(local.value_entry_id);
-        }
-        else
-        {
-            actual = RootScalarActual::Null(LogicalType::SQLNULL);
-        }
-        if (!local.filter_evaluator.Evaluate(context, *entry.second, actual))
-        {
-            return false;
-        }
-    }
-    return true;
+    return EvaluateRootRowFilters(context, local.filter_evaluator, global.entry_filters,
+                                  [&](idx_t column) -> RootScalarActual
+                                  {
+                                      if (column == 0)
+                                      {
+                                          return RootScalarActual::Event(local.current_task.event_base + entry_id);
+                                      }
+                                      if (column == bind.entry_id_column)
+                                      {
+                                          return RootScalarActual::Event(entry_id);
+                                      }
+                                      if (column == bind.source_id_column)
+                                      {
+                                          return RootScalarActual::String(local.current_task.file_id);
+                                      }
+                                      return RootScalarActual::Null(LogicalType::SQLNULL);
+                                  });
 }
 
 static RootScalarActual DatasetPrimitiveActual(const LogicalType& type, const RootPrimitiveValue& value)
@@ -89,56 +56,58 @@ static RootScalarActual DatasetPrimitiveActual(const LogicalType& type, const Ro
     return RootScalarActual::Null(type);
 }
 
+static RootScalarActual DatasetRowActual(const DatasetBindData& bind, const DatasetLocalState& local, idx_t column,
+                                         uint64_t event_fk, double value, const RootPrimitiveValue* typed_value,
+                                         const int32_t* indices, idx_t index_count)
+{
+    if (column == 0)
+    {
+        return RootScalarActual::Event(event_fk);
+    }
+    if (column >= 1 && column < bind.value_column)
+    {
+        const idx_t position = column - 1;
+        return RootScalarActual::Index(position < index_count ? std::optional<int32_t>(indices[position])
+                                                              : std::nullopt);
+    }
+    if (column == bind.value_column)
+    {
+        return typed_value ? DatasetPrimitiveActual(bind.value_type, *typed_value)
+                           : RootScalarActual::Numeric(bind.value_type, value);
+    }
+    if (column == bind.source_id_column)
+    {
+        return RootScalarActual::String(local.value_source_id);
+    }
+    if (column == bind.entry_id_column)
+    {
+        return RootScalarActual::Event(local.value_entry_id);
+    }
+    return RootScalarActual::Null(LogicalType::SQLNULL);
+}
+
+bool PassesFilters(ClientContext& context, DatasetLocalState& local, const DatasetBindData& bind,
+                   const DatasetGlobalState& global, uint64_t event_fk, double numeric_value, const int32_t* indices,
+                   idx_t index_count)
+{
+    return EvaluateRootRowFilters(context, local.filter_evaluator, global.element_filters,
+                                  [&](idx_t column)
+                                  {
+                                      return DatasetRowActual(bind, local, column, event_fk, numeric_value, nullptr,
+                                                              indices, index_count);
+                                  });
+}
+
 bool PassesTypedFilters(ClientContext& context, DatasetLocalState& local, const DatasetBindData& bind,
                         const DatasetGlobalState& global, uint64_t event_fk, const RootPrimitiveValue& numeric_value,
                         const int32_t* indices, idx_t index_count)
 {
-
-    if (!global.filters)
-    {
-        return true;
-    }
-    for (const auto& entry : global.filters->filters)
-    {
-        const auto scan_position = entry.first;
-        if (scan_position >= global.scan_column_ids.size())
-        {
-            continue;
-        }
-        const column_t column = global.scan_column_ids[scan_position];
-        RootScalarActual actual;
-        if (column == 0)
-        {
-            actual = RootScalarActual::Event(event_fk);
-        }
-        else if (column >= 1 && static_cast<idx_t>(column) < bind.value_column)
-        {
-            const idx_t index_position = static_cast<idx_t>(column) - 1;
-            actual = RootScalarActual::Index(
-                index_position < index_count ? std::optional<int32_t>(indices[index_position]) : std::nullopt);
-        }
-        else if (static_cast<idx_t>(column) == bind.value_column)
-        {
-            actual = DatasetPrimitiveActual(bind.value_type, numeric_value);
-        }
-        else if (static_cast<idx_t>(column) == bind.source_id_column)
-        {
-            actual = RootScalarActual::String(local.value_source_id);
-        }
-        else if (static_cast<idx_t>(column) == bind.entry_id_column)
-        {
-            actual = RootScalarActual::Event(local.value_entry_id);
-        }
-        else
-        {
-            actual = RootScalarActual::Null(LogicalType::SQLNULL);
-        }
-        if (!local.filter_evaluator.Evaluate(context, *entry.second, actual))
-        {
-            return false;
-        }
-    }
-    return true;
+    return EvaluateRootRowFilters(context, local.filter_evaluator, global.element_filters,
+                                  [&](idx_t column)
+                                  {
+                                      return DatasetRowActual(bind, local, column, event_fk, 0, &numeric_value, indices,
+                                                              index_count);
+                                  });
 }
 
 } // namespace duckdb::rootlake

@@ -93,7 +93,7 @@ void RootScanBinder::BindDirectPrimitives(RootScanBindData& bind_data, const std
         RootScanColumn col;
         col.name = flat_name;
         col.logical_path = full_path;
-        col.branch_name = parsed.root_class;
+        col.root_class_name = parsed.root_class;
         col.root_type = leaf.type;
         col.is_string = leaf.is_string;
         col.levels = std::move(levels);
@@ -126,7 +126,7 @@ void RootScanBinder::BindDirectPrimitives(RootScanBindData& bind_data, const std
         RootScanColumn index_column;
         index_column.name = index_name;
         index_column.is_virtual_index = true;
-        index_column.branch_name = root_class_name;
+        index_column.root_class_name = root_class_name;
         bind_data.columns.emplace_back(std::move(index_column));
         return_names.emplace_back(index_name);
         return_types.emplace_back(LogicalType(LogicalTypeId::INTEGER));
@@ -164,7 +164,7 @@ void RootScanBinder::BindEmptyResult(RootScanBindData& bind_data, const std::str
             RootScanColumn idx_col;
             idx_col.name = idx_name;
             idx_col.is_virtual_index = true;
-            idx_col.branch_name = rootlake::ParsePathPrefix(path_prefix).root_class;
+            idx_col.root_class_name = rootlake::ParsePathPrefix(path_prefix).root_class;
             bind_data.columns.emplace_back(std::move(idx_col));
             return_names.emplace_back(idx_name);
             return_types.emplace_back(LogicalType(LogicalTypeId::INTEGER));
@@ -529,7 +529,7 @@ void RootScanBinder::BindPrimitiveCompatibility(RootScanBindData& bind_data, TFi
             {
                 RootScanColumn column;
                 column.name = branch.name;
-                column.branch_name = branch.name;
+                column.primitive_branch_name = branch.name;
                 column.root_type = branch.type_name;
                 bind_data.columns.push_back(std::move(column));
                 return_names.emplace_back(branch.name);

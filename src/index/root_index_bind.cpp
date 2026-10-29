@@ -132,6 +132,16 @@ unique_ptr<FunctionData> RootIndexBinder::Bind(TableFunctionBindInput& input, ve
     {
         result->allow_partial = it->second.GetValue<bool>();
     }
+    it = input.named_parameters.find("resume");
+    if (it != input.named_parameters.end())
+    {
+        result->resume = it->second.GetValue<bool>();
+    }
+    it = input.named_parameters.find("update_mode");
+    if (it != input.named_parameters.end())
+    {
+        result->update_mode = it->second.ToString();
+    }
     it = input.named_parameters.find("catalog_prefix");
     if (it != input.named_parameters.end())
     {
@@ -216,6 +226,22 @@ unique_ptr<FunctionData> RootIndexBinder::Bind(TableFunctionBindInput& input, ve
         result->catalog_mode != "tables")
     {
         throw InvalidInputException("catalog_mode must be one of: local, external, sqlite, tables");
+    }
+    if (result->update_mode != "replace" && result->update_mode != "extend")
+    {
+        throw InvalidInputException("update_mode must be replace or extend");
+    }
+    if (result->update_mode == "extend" && result->catalog_mode != "sqlite")
+    {
+        throw InvalidInputException("ROOT path extension requires catalog_mode=sqlite");
+    }
+    if (result->update_mode == "extend" && result->allow_partial)
+    {
+        throw InvalidInputException("ROOT path extension requires allow_partial=false");
+    }
+    if (result->resume && result->catalog_mode == "tables")
+    {
+        throw InvalidInputException("resume is not available for SQL-table publication");
     }
     if (result->catalog_mode == "tables" && !all_publish_tables)
     {

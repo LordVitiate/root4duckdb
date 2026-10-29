@@ -81,8 +81,7 @@ int main(int argc, char** argv)
     duckdb_destroy_config(&config);
     if (status != DuckDBSuccess)
     {
-        std::cerr << "[ERROR] Cannot open DuckDB: "
-                  << (open_error ? open_error : "unknown error") << '\n';
+        std::cerr << "[ERROR] Cannot open DuckDB: " << (open_error ? open_error : "unknown error") << '\n';
     }
     if (open_error)
     {
@@ -118,10 +117,10 @@ int main(int argc, char** argv)
             'root_dataset_stats',
             'root_iceberg_catalog'
         )
-    )SQL", &functions.value) != DuckDBSuccess)
+    )SQL",
+                     &functions.value) != DuckDBSuccess)
     {
-        std::cerr << "[ERROR] Cannot inspect extension functions: "
-                  << duckdb_result_error(&functions.value) << '\n';
+        std::cerr << "[ERROR] Cannot inspect extension functions: " << duckdb_result_error(&functions.value) << '\n';
         return 1;
     }
 

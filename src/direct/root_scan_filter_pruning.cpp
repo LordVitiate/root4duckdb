@@ -1,11 +1,9 @@
 #include "root4duckdb/direct/root_scan_internal.hpp"
 
-#include "duckdb/planner/expression/bound_between_expression.hpp"
-#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include <charconv>
@@ -30,10 +28,16 @@ template <class T> column_t RootPruningPrimaryColumnId(const T& value)
 
 const Expression* RootPruningStripConstantCasts(const Expression* expression)
 {
-    while (expression && expression->expression_class == ExpressionClass::BOUND_CAST)
+    while (expression && expression->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION &&
+           expression->GetExpressionType() == ExpressionType::OPERATOR_CAST)
     {
-        const auto& cast = expression->Cast<BoundCastExpression>();
-        expression = cast.child.get();
+        const auto& args = expression->Cast<BoundFunctionExpression>().GetChildren();
+        if (args.size() != 1 || args[0]->GetReturnType() != expression->GetReturnType())
+        {
+            // Casting can change the comparison; omit the pruning hint rather than guess.
+            return nullptr;
+        }
+        expression = args[0].get();
     }
     return expression;
 }
@@ -41,16 +45,16 @@ const Expression* RootPruningStripConstantCasts(const Expression* expression)
 bool RootPruningIsEntryId(const LogicalGet& get, const Expression* expression)
 {
     // Strip constant casts only; casts on entry_id may change comparison semantics.
-    if (!expression || expression->expression_class != ExpressionClass::BOUND_COLUMN_REF)
+    if (!expression || expression->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF)
     {
         return false;
     }
     const auto& ref = expression->Cast<BoundColumnRefExpression>();
-    if (ref.binding.table_index != get.table_index)
+    if (ref.Binding().table_index != get.table_index)
     {
         return false;
     }
-    const idx_t projected_column = ref.binding.column_index;
+    const idx_t projected_column = ref.Binding().column_index;
     const auto& column_ids = get.GetColumnIds();
     if (projected_column >= column_ids.size())
     {
@@ -69,16 +73,16 @@ struct RootPruningInteger
 bool RootPruningParseInteger(const Expression* expression, RootPruningInteger& value)
 {
     expression = RootPruningStripConstantCasts(expression);
-    if (!expression || expression->expression_class != ExpressionClass::BOUND_CONSTANT)
+    if (!expression || expression->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT)
     {
         return false;
     }
     const auto& constant = expression->Cast<BoundConstantExpression>();
-    if (constant.value.IsNull())
+    if (constant.GetValue().IsNull())
     {
         return false;
     }
-    const std::string text = constant.value.ToString();
+    const std::string text = constant.GetValue().ToString();
     if (text.empty())
     {
         return false;
@@ -184,23 +188,6 @@ RootPruningInterval RootPruningFromComparison(ExpressionType type, const RootPru
     return result;
 }
 
-ExpressionType RootPruningReverseComparison(ExpressionType type)
-{
-    switch (type)
-    {
-    case ExpressionType::COMPARE_LESSTHAN:
-        return ExpressionType::COMPARE_GREATERTHAN;
-    case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-        return ExpressionType::COMPARE_GREATERTHANOREQUALTO;
-    case ExpressionType::COMPARE_GREATERTHAN:
-        return ExpressionType::COMPARE_LESSTHAN;
-    case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-        return ExpressionType::COMPARE_LESSTHANOREQUALTO;
-    default:
-        return type;
-    }
-}
-
 RootPruningInterval RootPruningIntersect(const RootPruningInterval& left, const RootPruningInterval& right)
 {
     if (!left.known)
@@ -249,17 +236,22 @@ RootPruningInterval RootPruningUnionHull(const RootPruningInterval& left, const 
 
 RootPruningInterval RootPruningExtract(const LogicalGet& get, const Expression& expression);
 
-RootPruningInterval RootPruningComparison(const LogicalGet& get, const BoundComparisonExpression& comparison)
+RootPruningInterval RootPruningComparison(const LogicalGet& get, const BoundFunctionExpression& comparison)
 {
-    const Expression* column = comparison.left.get();
-    const Expression* constant = comparison.right.get();
-    ExpressionType type = comparison.GetExpressionType();
+    const auto& args = comparison.GetChildren();
+    if (args.size() != 2)
+    {
+        return RootPruningUnknown();
+    }
+    const Expression* column = args[0].get();
+    const Expression* constant = args[1].get();
+    auto type = comparison.GetExpressionType();
     RootPruningInteger parsed;
     if (!RootPruningIsEntryId(get, column) || !RootPruningParseInteger(constant, parsed))
     {
-        column = comparison.right.get();
-        constant = comparison.left.get();
-        type = RootPruningReverseComparison(type);
+        column = args[1].get();
+        constant = args[0].get();
+        type = rootlake::RootReverseComparison(type);
         if (!RootPruningIsEntryId(get, column) || !RootPruningParseInteger(constant, parsed))
         {
             return RootPruningUnknown();
@@ -268,35 +260,40 @@ RootPruningInterval RootPruningComparison(const LogicalGet& get, const BoundComp
     return RootPruningFromComparison(type, parsed);
 }
 
-RootPruningInterval RootPruningBetween(const LogicalGet& get, const BoundBetweenExpression& between)
+RootPruningInterval RootPruningBetween(const LogicalGet& get, const BoundFunctionExpression& between)
 {
-    if (!RootPruningIsEntryId(get, between.input.get()))
+    const auto& args = between.GetChildren();
+    if (args.size() != 3 || !RootPruningIsEntryId(get, args[0].get()))
     {
         return RootPruningUnknown();
     }
     RootPruningInteger lower;
     RootPruningInteger upper;
-    if (!RootPruningParseInteger(between.lower.get(), lower) || !RootPruningParseInteger(between.upper.get(), upper))
+    if (!RootPruningParseInteger(args[1].get(), lower) || !RootPruningParseInteger(args[2].get(), upper))
     {
         return RootPruningUnknown();
     }
-    auto result = RootPruningFromComparison(between.lower_inclusive ? ExpressionType::COMPARE_GREATERTHANOREQUALTO
-                                                                    : ExpressionType::COMPARE_GREATERTHAN,
-                                            lower);
-    const auto upper_interval = RootPruningFromComparison(
-        between.upper_inclusive ? ExpressionType::COMPARE_LESSTHANOREQUALTO : ExpressionType::COMPARE_LESSTHAN, upper);
-    return RootPruningIntersect(result, upper_interval);
+    // Inclusive bounds are safe for both inclusive and exclusive BETWEEN variants.
+    const auto first = RootPruningFromComparison(ExpressionType::COMPARE_GREATERTHANOREQUALTO, lower);
+    const auto last = RootPruningFromComparison(ExpressionType::COMPARE_LESSTHANOREQUALTO, upper);
+    return RootPruningIntersect(first, last);
 }
 
 RootPruningInterval RootPruningExtract(const LogicalGet& get, const Expression& expression)
 {
-    switch (expression.expression_class)
+    if (expression.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION)
     {
-    case ExpressionClass::BOUND_COMPARISON:
-        return RootPruningComparison(get, expression.Cast<BoundComparisonExpression>());
-    case ExpressionClass::BOUND_BETWEEN:
-        return RootPruningBetween(get, expression.Cast<BoundBetweenExpression>());
-    case ExpressionClass::BOUND_CONJUNCTION:
+        const auto& function = expression.Cast<BoundFunctionExpression>();
+        if (rootlake::RootIsComparison(expression.GetExpressionType()))
+        {
+            return RootPruningComparison(get, function);
+        }
+        if (expression.GetExpressionType() == ExpressionType::COMPARE_BETWEEN)
+        {
+            return RootPruningBetween(get, function);
+        }
+    }
+    if (expression.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION)
     {
         const auto& conjunction = expression.Cast<BoundConjunctionExpression>();
         const auto type = conjunction.GetExpressionType();
@@ -306,7 +303,7 @@ RootPruningInterval RootPruningExtract(const LogicalGet& get, const Expression& 
         }
         RootPruningInterval result;
         bool first = true;
-        for (const auto& child : conjunction.children)
+        for (const auto& child : conjunction.GetChildren())
         {
             if (!child)
             {
@@ -324,9 +321,7 @@ RootPruningInterval RootPruningExtract(const LogicalGet& get, const Expression& 
         }
         return first ? RootPruningUnknown() : result;
     }
-    default:
-        return RootPruningUnknown();
-    }
+    return RootPruningUnknown();
 }
 
 } // namespace

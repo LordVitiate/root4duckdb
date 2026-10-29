@@ -3,6 +3,7 @@
 #include "TFile.h"
 #include "TTree.h"
 
+#include <array>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -33,6 +34,8 @@ static void WriteFixture(const fs::path& path, Int_t run_base, const std::vector
     Int_t event_index = 0;
     for (const auto& values : events)
     {
+        constexpr std::array<size_t, 4> cursor_sizes = {99, 100, 101, 4099};
+        const size_t cursor_size = run_base == 600 ? cursor_sizes.at(static_cast<size_t>(event_index)) : 0;
         event->run = run_base + event_index;
         event->flags = static_cast<UChar_t>(event_index % 3);
         event->signed_code = static_cast<Char_t>(event_index - 1);
@@ -61,6 +64,14 @@ static void WriteFixture(const fs::path& path, Int_t run_base, const std::vector
         event->setCode = {event_index, event_index + 10};
         event->header = {static_cast<UInt_t>(event->run), static_cast<UInt_t>(event_index),
                          static_cast<UInt_t>(1000 + event_index)};
+        if (cursor_size)
+        {
+            event->header.resize(cursor_size);
+            for (size_t i = 0; i < cursor_size; ++i)
+            {
+                event->header[i] = static_cast<UInt_t>(i);
+            }
+        }
         event->nestedPairs = {{{static_cast<Double_t>(event_index) + 1.5, 100 + event_index},
                                {static_cast<Double_t>(event_index) + 2.5, 200 + event_index}},
                               {{static_cast<Double_t>(event_index) + 3.5, 300 + event_index}}};
@@ -87,6 +98,10 @@ static void WriteFixture(const fs::path& path, Int_t run_base, const std::vector
         {
             event->vecHit.emplace_back(value);
             auto& hit = event->vecHit.back();
+            hit.params.emplace_back();
+            hit.params.back().Cov[0] = static_cast<Float_t>(value);
+            hit.params.back().Cov[1] = static_cast<Float_t>(value + 1.0);
+            hit.params.back().Cov[2] = static_cast<Float_t>(value + 2.0);
             hit.kind = (hit_index % 2) == 0 ? TestKind::PRIMARY : TestKind::SECONDARY;
             hit.exact_id = static_cast<Long64_t>(9007199254740993LL + static_cast<Long64_t>(hit_index));
             hit.exact_uid = static_cast<ULong64_t>(9007199254741993ULL + static_cast<ULong64_t>(hit_index));
@@ -106,6 +121,16 @@ static void WriteFixture(const fs::path& path, Int_t run_base, const std::vector
                 }
             }
             ++hit_index;
+        }
+        if (cursor_size)
+        {
+            event->vecHit.emplace_back(0.0);
+            auto& weights = event->vecHit.back().weights;
+            weights.resize(cursor_size);
+            for (size_t i = 0; i < cursor_size; ++i)
+            {
+                weights[i] = static_cast<Float_t>(i);
+            }
         }
         tree.Fill();
     }
@@ -133,6 +158,16 @@ int main(int argc, char** argv)
         // split_level=1 keeps TestHit fields inside the persistent vecHit ancestor
         // branch. This reproduces Phast layouts where no physical leaf exists for u/uv.
         WriteFixture(output / "ancestor.root", 500, {{1.0, 2.0}, {3.0}}, 1);
+        // Exercise 99/100/101-element boundaries and multi-DataChunk cursor resume.
+        WriteFixture(output / "cursor.root", 600, {{}, {}, {}, {}}, 1);
+        // One 4099-element unsplit persistent member exercises real serialized
+        // page resume across two complete DuckDB chunks and a three-value tail.
+        std::vector<double> page_values(4099);
+        for (size_t i = 0; i < page_values.size(); ++i)
+        {
+            page_values[i] = static_cast<double>(i);
+        }
+        WriteFixture(output / "serialized_page.root", 700, {page_values}, 1);
     }
     catch (const std::exception& ex)
     {

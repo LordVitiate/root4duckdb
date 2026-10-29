@@ -31,20 +31,22 @@ def _required_files() -> tuple[str, ...]:
         ".clang-tidy",
         "VERSION",
         "CMakeLists.txt",
+        "scripts/architecture-inventory.py",
+        "scripts/cpp-style.sh",
         "cmake/RootCompiler.cmake",
         "cmake/RootDependencies.cmake",
         "cmake/RootIceberg.cmake",
         "src/CMakeLists.txt",
-        "src/include/root4duckdb/root4duckdb.hpp",
-        "src/include/root4duckdb/root_pch.hpp",
-        "src/include/root4duckdb/core/core.hpp",
-        "src/include/root4duckdb/reader/reader.hpp",
-        "src/include/root4duckdb/reader/root_semantic_reader.hpp",
-        "src/include/root4duckdb/direct/root_scan_internal.hpp",
-        "src/include/root4duckdb/dataset/root_dataset_scan_internal.hpp",
-        "src/include/root4duckdb/index/root_index_pipeline.hpp",
-        "src/include/root4duckdb/histogram/root_histogram_internal.hpp",
-        "src/include/root4duckdb/serialized/root_serialized_codec_utils.hpp",
+        "include/root4duckdb/root4duckdb.hpp",
+        "include/root4duckdb/root_pch.hpp",
+        "include/root4duckdb/core/core.hpp",
+        "include/root4duckdb/reader/reader.hpp",
+        "include/root4duckdb/reader/root_semantic_reader.hpp",
+        "include/root4duckdb/direct/root_scan_internal.hpp",
+        "include/root4duckdb/dataset/root_dataset_scan_internal.hpp",
+        "include/root4duckdb/index/root_index_pipeline.hpp",
+        "include/root4duckdb/histogram/root_histogram_internal.hpp",
+        "include/root4duckdb/serialized/root_serialized_codec_utils.hpp",
         "scripts/lib/sql.sh",
         "scripts/production/pipeline_io.py",
         "scripts/production/plan_chunks.py",
@@ -65,9 +67,9 @@ def _check_obsolete_files(validator: ProjectValidator) -> None:
         "src/root_iceberg_catalog.cpp",
         "src/root_semantic_reader.cpp",
         "src/root_serialized_branch_resolver.cpp",
-        "src/include/root_serialized_branch_resolver.hpp",
-        "src/include/root_serialized_codec_internal.hpp",
-        "src/include/root_meta.hpp",
+        "include/root_serialized_branch_resolver.hpp",
+        "include/root_serialized_codec_internal.hpp",
+        "include/root_meta.hpp",
         "src/root_meta_generator.cpp",
         "cmake/RootSources.cmake",
         ".gitmodules",
@@ -108,9 +110,13 @@ def _check_cmake_sources(validator: ProjectValidator) -> None:
     for module in ("core", "reader", "serialized", "direct", "index", "dataset", "histogram", "iceberg"):
         if not (validator.root / "src" / module / "CMakeLists.txt").is_file():
             validator.errors.append(f"module CMake unit is missing: src/{module}/CMakeLists.txt")
-    include_root = validator.root / "src/include/root4duckdb"
+    include_root = validator.root / "include/root4duckdb"
+    if (validator.root / "src/include").exists():
+        validator.errors.append("obsolete src/include directory remains after header relocation")
     for header in (validator.root / "src").rglob("*.hpp"):
-        if include_root not in header.parents and header != validator.root / "src/include/root_extension.hpp":
+        validator.errors.append(f"declaration header remains under src: {header.relative_to(validator.root)}")
+    for header in (validator.root / "include").rglob("*.hpp"):
+        if include_root not in header.parents and header != validator.root / "include/root_extension.hpp":
             validator.errors.append(f"header is outside the module include tree: {header.relative_to(validator.root)}")
 
     compiler = validator.read("cmake/RootCompiler.cmake")
@@ -188,7 +194,7 @@ def _check_iceberg_build(validator: ProjectValidator) -> None:
 
 def _check_headers(validator: ProjectValidator) -> None:
     """Validate umbrella ownership and the ROOT include boundary."""
-    common = validator.read("src/include/root4duckdb/core/root_lake_common.hpp")
+    common = validator.read("include/root4duckdb/core/root_lake_common.hpp")
     if f"ROOT_LAKE_INDEX_VERSION = {INDEX_VERSION}" not in common:
         validator.errors.append(f"common reader index version is not {INDEX_VERSION}")
     validator.reject_tokens("root_lake_common.hpp", common, (
@@ -199,7 +205,7 @@ def _check_headers(validator: ProjectValidator) -> None:
         "class RootObjectContext",
     ))
 
-    root_headers = validator.read("src/include/root4duckdb/core/root_headers.hpp")
+    root_headers = validator.read("include/root4duckdb/core/root_headers.hpp")
     validator.require_tokens("ROOT include boundary", root_headers, (
         '#include "Rtypes.h"',
         '#include "TBufferFile.h"',
@@ -209,7 +215,7 @@ def _check_headers(validator: ProjectValidator) -> None:
         '#include "TVirtualCollectionProxy.h"',
         "#undef BIT",
     ))
-    validator.require_tokens("public umbrella", validator.read("src/include/root4duckdb/root4duckdb.hpp"), (
+    validator.require_tokens("public umbrella", validator.read("include/root4duckdb/root4duckdb.hpp"), (
         '#include "root4duckdb/core/core.hpp"',
         '#include "root4duckdb/histogram/histogram.hpp"',
         '#include "root4duckdb/reader/reader.hpp"',

@@ -3,48 +3,104 @@
 namespace duckdb
 {
 
+namespace
+{
+
+struct CachedIndexSource
+{
+    idx_t column;
+    size_t position;
+};
+
+std::string WithoutIndexSuffix(std::string name)
+{
+    if (name.size() > 4 && name.substr(name.size() - 4) == "_idx")
+    {
+        name.resize(name.size() - 4);
+    }
+    return name;
+}
+
+// Resolve index names once per cached result page, not once per output row.
+std::optional<CachedIndexSource> FindCachedIndexSource(const RootScanBindData& bind_data,
+                                                       const RootScanLocalState& lstate, idx_t column_id,
+                                                       std::optional<size_t> row)
+{
+    if (column_id >= bind_data.columns.size())
+    {
+        return std::nullopt;
+    }
+    const auto& column = bind_data.columns[column_id];
+    const auto name = WithoutIndexSuffix(column.name);
+    for (idx_t candidate_id = 0; candidate_id < bind_data.columns.size(); ++candidate_id)
+    {
+        const auto& candidate = bind_data.columns[candidate_id];
+        if (candidate.is_virtual_index || candidate.levels.empty() ||
+            candidate.root_class_name != column.root_class_name || candidate_id >= lstate.cached_results.size())
+        {
+            continue;
+        }
+        const auto& result = lstate.cached_results[candidate_id];
+        if (result.empty() || (row && (*row >= result.size() || *row >= result.vector_indices.size())))
+        {
+            continue;
+        }
+        for (size_t pos = 0; pos < result.vector_names.size(); ++pos)
+        {
+            if (WithoutIndexSuffix(result.vector_names[pos]) == name &&
+                (!row || pos < result.vector_indices[*row].size()))
+            {
+                return CachedIndexSource{candidate_id, pos};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
 bool RootScanExecutor::WriteNumericValue(Vector& vector, idx_t row, const rootlake::RootPrimitiveValue& value) const
 {
     switch (vector.GetType().id())
     {
     case LogicalTypeId::TINYINT:
-        FlatVector::GetData<int8_t>(vector)[row] = static_cast<int8_t>(value.AsSigned());
+        FlatVector::GetDataMutable<int8_t>(vector)[row] = value.AsInteger<int8_t>();
         break;
     case LogicalTypeId::UTINYINT:
-        FlatVector::GetData<uint8_t>(vector)[row] = static_cast<uint8_t>(value.AsUnsigned());
+        FlatVector::GetDataMutable<uint8_t>(vector)[row] = value.AsInteger<uint8_t>();
         break;
     case LogicalTypeId::SMALLINT:
-        FlatVector::GetData<int16_t>(vector)[row] = static_cast<int16_t>(value.AsSigned());
+        FlatVector::GetDataMutable<int16_t>(vector)[row] = value.AsInteger<int16_t>();
         break;
     case LogicalTypeId::USMALLINT:
-        FlatVector::GetData<uint16_t>(vector)[row] = static_cast<uint16_t>(value.AsUnsigned());
+        FlatVector::GetDataMutable<uint16_t>(vector)[row] = value.AsInteger<uint16_t>();
         break;
     case LogicalTypeId::INTEGER:
-        FlatVector::GetData<int32_t>(vector)[row] = static_cast<int32_t>(value.AsSigned());
+        FlatVector::GetDataMutable<int32_t>(vector)[row] = value.AsInteger<int32_t>();
         break;
     case LogicalTypeId::UINTEGER:
-        FlatVector::GetData<uint32_t>(vector)[row] = static_cast<uint32_t>(value.AsUnsigned());
+        FlatVector::GetDataMutable<uint32_t>(vector)[row] = value.AsInteger<uint32_t>();
         break;
     case LogicalTypeId::BIGINT:
-        FlatVector::GetData<int64_t>(vector)[row] = value.AsSigned();
+        FlatVector::GetDataMutable<int64_t>(vector)[row] = value.AsSigned();
         break;
     case LogicalTypeId::UBIGINT:
-        FlatVector::GetData<uint64_t>(vector)[row] = value.AsUnsigned();
+        FlatVector::GetDataMutable<uint64_t>(vector)[row] = value.AsUnsigned();
         break;
     case LogicalTypeId::FLOAT:
-        FlatVector::GetData<float>(vector)[row] = static_cast<float>(value.AsDouble());
+        FlatVector::GetDataMutable<float>(vector)[row] = value.AsFloat();
         break;
     case LogicalTypeId::DOUBLE:
-        FlatVector::GetData<double>(vector)[row] = value.AsDouble();
+        FlatVector::GetDataMutable<double>(vector)[row] = value.AsDouble();
         break;
     case LogicalTypeId::BOOLEAN:
-        FlatVector::GetData<bool>(vector)[row] = value.AsBool();
+        FlatVector::GetDataMutable<bool>(vector)[row] = value.AsBool();
         break;
     default:
-        FlatVector::Validity(vector).SetInvalid(row);
+        FlatVector::ValidityMutable(vector).SetInvalid(row);
         return false;
     }
-    FlatVector::Validity(vector).SetValid(row);
+    FlatVector::ValidityMutable(vector).SetValid(row);
     return true;
 }
 
@@ -52,43 +108,27 @@ std::optional<int32_t> RootScanExecutor::ResolveCachedIndexValue(const RootScanB
                                                                  const RootScanLocalState& lstate, idx_t col_idx,
                                                                  size_t elem_idx) const
 {
-    if (col_idx >= bind_data.columns.size())
+    if (col_idx < lstate.cached_index_sources.size() && lstate.cached_index_sources[col_idx])
+    {
+        const auto [source_column, source_position] = *lstate.cached_index_sources[col_idx];
+        if (source_column < lstate.cached_results.size())
+        {
+            const auto& result = lstate.cached_results[source_column];
+            if (elem_idx < result.size() && elem_idx < result.vector_indices.size() &&
+                source_position < result.vector_indices[elem_idx].size())
+            {
+                return result.vector_indices[elem_idx][source_position];
+            }
+        }
+    }
+    // Sparse/mismatched sibling pages may require a different valid source
+    // for this row. Preserve the original per-row search in that rare case.
+    const auto fallback = FindCachedIndexSource(bind_data, lstate, col_idx, elem_idx);
+    if (!fallback)
     {
         return std::nullopt;
     }
-    const auto& col = bind_data.columns[col_idx];
-    std::string search = col.name;
-    if (search.size() > 4 && search.substr(search.size() - 4) == "_idx")
-    {
-        search.resize(search.size() - 4);
-    }
-    for (idx_t candidate_index = 0; candidate_index < bind_data.columns.size(); ++candidate_index)
-    {
-        const auto& candidate = bind_data.columns[candidate_index];
-        if (candidate.is_virtual_index || candidate.levels.empty() || candidate.branch_name != col.branch_name ||
-            candidate_index >= lstate.cached_results.size())
-        {
-            continue;
-        }
-        const auto& result = lstate.cached_results[candidate_index];
-        if (elem_idx >= result.size() || elem_idx >= result.vector_indices.size())
-        {
-            continue;
-        }
-        for (size_t name_index = 0; name_index < result.vector_names.size(); ++name_index)
-        {
-            std::string name = result.vector_names[name_index];
-            if (name.size() > 4 && name.substr(name.size() - 4) == "_idx")
-            {
-                name.resize(name.size() - 4);
-            }
-            if (name == search && name_index < result.vector_indices[elem_idx].size())
-            {
-                return static_cast<int32_t>(result.vector_indices[elem_idx][name_index]);
-            }
-        }
-    }
-    return std::nullopt;
+    return lstate.cached_results[fallback->column].vector_indices[elem_idx][fallback->position];
 }
 
 rootlake::RootScalarActual RootScanExecutor::CachedScalar(const RootScanBindData& bind_data,
@@ -139,25 +179,14 @@ rootlake::RootScalarActual RootScanExecutor::CachedScalar(const RootScanBindData
 
 bool RootScanExecutor::PassesCachedFilters(ClientContext& context, const RootScanBindData& bind_data,
                                            const RootScanGlobalState& gstate, RootScanLocalState& lstate,
-                                           uint64_t entry, size_t elem_idx) const
+                                           uint64_t entry, size_t elem_idx, bool entry_only) const
 {
-    if (!gstate.filters)
-    {
-        return true;
-    }
-    for (const auto& filter : gstate.filters->filters)
-    {
-        if (filter.first >= gstate.scan_column_ids.size())
-        {
-            continue;
-        }
-        const auto actual = CachedScalar(bind_data, lstate, gstate.scan_column_ids[filter.first], entry, elem_idx);
-        if (!lstate.filter_evaluator.Evaluate(context, *filter.second, actual))
-        {
-            return false;
-        }
-    }
-    return true;
+    const auto& bindings = entry_only ? gstate.entry_filters : gstate.element_filters;
+    return rootlake::EvaluateRootRowFilters(context, lstate.filter_evaluator, bindings,
+                                            [&](idx_t column_id)
+                                            {
+                                                return CachedScalar(bind_data, lstate, column_id, entry, elem_idx);
+                                            });
 }
 
 bool RootScanExecutor::PassesPrimitiveTreeFilters(ClientContext& context, const RootScanBindData& bind_data,
@@ -168,13 +197,13 @@ bool RootScanExecutor::PassesPrimitiveTreeFilters(ClientContext& context, const 
     {
         return true;
     }
-    for (const auto& filter : gstate.filters->filters)
+    for (const auto& filter : *gstate.filters)
     {
-        if (filter.first >= gstate.scan_column_ids.size())
+        if (filter.GetIndex().GetIndex() >= gstate.scan_column_ids.size())
         {
             continue;
         }
-        const auto column_index = gstate.scan_column_ids[filter.first];
+        const auto column_index = gstate.scan_column_ids[filter.GetIndex().GetIndex()];
         auto actual = rootlake::RootScalarActual::Null(LogicalType::SQLNULL);
         if (column_index == 0 || column_index == COLUMN_IDENTIFIER_ROW_ID)
         {
@@ -211,7 +240,7 @@ bool RootScanExecutor::PassesPrimitiveTreeFilters(ClientContext& context, const 
                 }
             }
         }
-        if (!lstate.filter_evaluator.Evaluate(context, *filter.second, actual))
+        if (!lstate.filter_evaluator.Evaluate(context, filter.Filter(), actual))
         {
             return false;
         }
@@ -226,7 +255,7 @@ void RootScanExecutor::ProcessPrimitiveTree(ClientContext& context, const RootSc
     auto* tree = lstate.root_file.GetTTree();
     if (!tree)
     {
-        output.SetCardinality(0);
+        output.SetCardinalityUnsafe(0);
         return;
     }
     idx_t output_count = 0;
@@ -248,8 +277,8 @@ void RootScanExecutor::ProcessPrimitiveTree(ClientContext& context, const RootSc
         {
             if (tree->GetEntry(static_cast<Long64_t>(entry)) < 0)
             {
-                throw IOException("ROOT TTree::GetEntry failed in " + lstate.file_task.path +
-                                  " at entry " + std::to_string(entry));
+                throw IOException("ROOT TTree::GetEntry failed in " + lstate.file_task.path + " at entry " +
+                                  std::to_string(entry));
             }
         }
         if (!PassesPrimitiveTreeFilters(context, bind_data, gstate, lstate, entry))
@@ -262,33 +291,33 @@ void RootScanExecutor::ProcessPrimitiveTree(ClientContext& context, const RootSc
             auto& vector = output.data[output_index];
             if (column_index == 0 || column_index == COLUMN_IDENTIFIER_ROW_ID)
             {
-                FlatVector::GetData<int64_t>(vector)[output_count] = static_cast<int64_t>(entry);
-                FlatVector::Validity(vector).SetValid(output_count);
+                FlatVector::GetDataMutable<int64_t>(vector)[output_count] = static_cast<int64_t>(entry);
+                FlatVector::ValidityMutable(vector).SetValid(output_count);
                 continue;
             }
             if (column_index == bind_data.source_id_column)
             {
-                FlatVector::GetData<uint64_t>(vector)[output_count] = lstate.file_task.source_id;
-                FlatVector::Validity(vector).SetValid(output_count);
+                FlatVector::GetDataMutable<uint64_t>(vector)[output_count] = lstate.file_task.source_id;
+                FlatVector::ValidityMutable(vector).SetValid(output_count);
                 continue;
             }
             if (column_index == bind_data.source_path_column)
             {
-                FlatVector::GetData<string_t>(vector)[output_count] =
+                FlatVector::GetDataMutable<string_t>(vector)[output_count] =
                     StringVector::AddString(vector, lstate.file_task.path);
-                FlatVector::Validity(vector).SetValid(output_count);
+                FlatVector::ValidityMutable(vector).SetValid(output_count);
                 continue;
             }
             if (column_index >= bind_data.columns.size() || column_index >= lstate.primitive_tree_leaves.size())
             {
-                FlatVector::Validity(vector).SetInvalid(output_count);
+                FlatVector::ValidityMutable(vector).SetInvalid(output_count);
                 continue;
             }
             auto* leaf = lstate.primitive_tree_leaves[column_index];
             const auto& column = bind_data.columns[column_index];
             if (!leaf || !leaf->GetValuePointer())
             {
-                FlatVector::Validity(vector).SetInvalid(output_count);
+                FlatVector::ValidityMutable(vector).SetInvalid(output_count);
                 continue;
             }
             const auto value = rootlake::RootPrimitiveValue ::FromPointer(leaf->GetValuePointer(), column.root_type);
@@ -296,139 +325,7 @@ void RootScanExecutor::ProcessPrimitiveTree(ClientContext& context, const RootSc
         }
         ++output_count;
     }
-    output.SetCardinality(output_count);
-}
-
-bool RootScanExecutor::PassesDirectBranchFilters(ClientContext& context, const RootScanBindData& bind_data,
-                                                 const RootScanGlobalState& gstate, RootScanLocalState& lstate,
-                                                 uint64_t entry, const rootlake::RootPrimitiveValue& value) const
-{
-    if (!gstate.filters)
-    {
-        return true;
-    }
-    const auto* direct_mode = bind_data.DirectBranchMode();
-    if (!direct_mode)
-    {
-        throw InternalException("read_root direct branch filter has no branch plan");
-    }
-    const auto value_type = rootlake::RootTypeToScanLogicalType(direct_mode->branch.type_name, false, true);
-    for (const auto& filter : gstate.filters->filters)
-    {
-        if (filter.first >= gstate.scan_column_ids.size())
-        {
-            continue;
-        }
-        const auto column = gstate.scan_column_ids[filter.first];
-        auto actual = rootlake::RootScalarActual::Null(LogicalType::SQLNULL);
-        if (column == 0 || column == COLUMN_IDENTIFIER_ROW_ID)
-        {
-            actual = rootlake::RootScalarActual::Signed(static_cast<int64_t>(entry));
-        }
-        else if (column == 1)
-        {
-            actual = PrimitiveScalarActual(value_type, value);
-        }
-        else if (column == bind_data.source_id_column)
-        {
-            actual = rootlake::RootScalarActual::Event(lstate.file_task.source_id);
-        }
-        else if (column == bind_data.source_path_column)
-        {
-            actual = rootlake::RootScalarActual::String(lstate.file_task.path);
-        }
-        else
-        {
-            actual = rootlake::RootScalarActual::Null(LogicalType::SQLNULL);
-        }
-        if (!lstate.filter_evaluator.Evaluate(context, *filter.second, actual))
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-void RootScanExecutor::ProcessDirectBranch(ClientContext& context, const RootScanBindData& bind_data,
-                                           RootScanGlobalState& gstate, RootScanLocalState& lstate,
-                                           DataChunk& output) const
-{
-    const auto* direct_mode = bind_data.DirectBranchMode();
-    if (!direct_mode)
-    {
-        throw InternalException("read_root direct branch execution has no branch plan");
-    }
-    if (!lstate.direct_branch || !lstate.direct_leaf)
-    {
-        output.SetCardinality(0);
-        return;
-    }
-    idx_t out_count = 0;
-    while (out_count < STANDARD_VECTOR_SIZE)
-    {
-        if (lstate.local_current_row >= lstate.local_end_row)
-        {
-            if (gstate.file_scheduler)
-            {
-                break;
-            }
-            if (!ClaimEntryBatch(gstate, lstate))
-            {
-                break;
-            }
-        }
-        const auto entry = lstate.local_current_row;
-        // Bare primitive-branch compatibility only.  Even here the entry is loaded
-        // through TTree so no physical branch becomes an alternative semantic reader.
-        auto* direct_tree = lstate.root_file.GetTTree();
-        if (!direct_tree)
-        {
-            throw InternalException("ROOT TTree is unavailable for direct branch scan");
-        }
-        if (direct_tree->GetEntry(static_cast<Long64_t>(entry)) < 0)
-        {
-            throw IOException("ROOT TTree::GetEntry failed in " + lstate.file_task.path +
-                              " at entry " + std::to_string(entry));
-        }
-        const auto val = rootlake::RootPrimitiveValue::FromPointer(lstate.direct_leaf->GetValuePointer(),
-                                                                   direct_mode->branch.type_name);
-        ++lstate.local_current_row;
-        if (!PassesDirectBranchFilters(context, bind_data, gstate, lstate, entry, val))
-        {
-            continue;
-        }
-        for (idx_t output_index = 0; output_index < gstate.output_column_ids.size(); ++output_index)
-        {
-            const auto column = gstate.output_column_ids[output_index];
-            auto& vector = output.data[output_index];
-            if (column == 0 || column == COLUMN_IDENTIFIER_ROW_ID)
-            {
-                FlatVector::GetData<int64_t>(vector)[out_count] = static_cast<int64_t>(entry);
-                FlatVector::Validity(vector).SetValid(out_count);
-            }
-            else if (column == 1)
-            {
-                WriteNumericValue(vector, out_count, val);
-            }
-            else if (column == bind_data.source_id_column)
-            {
-                FlatVector::GetData<uint64_t>(vector)[out_count] = lstate.file_task.source_id;
-                FlatVector::Validity(vector).SetValid(out_count);
-            }
-            else if (column == bind_data.source_path_column)
-            {
-                FlatVector::GetData<string_t>(vector)[out_count] =
-                    StringVector::AddString(vector, lstate.file_task.path);
-                FlatVector::Validity(vector).SetValid(out_count);
-            }
-            else
-            {
-                FlatVector::Validity(vector).SetInvalid(out_count);
-            }
-        }
-        out_count++;
-    }
-    output.SetCardinality(out_count);
+    output.SetCardinalityUnsafe(output_count);
 }
 
 void RootScanExecutor::ProcessCachedEntry(ClientContext& context, const RootScanBindData& bind_data,
@@ -448,12 +345,43 @@ void RootScanExecutor::ProcessCachedEntry(ClientContext& context, const RootScan
     {
         max_elements = 1;
     }
+    // Bind virtual-index sources once per decoded page, not once per SQL chunk.
+    if (lstate.cached_index_sources.empty())
+    {
+        lstate.cached_index_sources.resize(bind_data.columns.size());
+        // Resolve each virtual index at most once per decoded page; both projected
+        // columns and element-level filters use the same exact structural source.
+        const auto resolve_index = [&](idx_t column_id)
+        {
+            if (column_id >= bind_data.columns.size() || !bind_data.columns[column_id].is_virtual_index ||
+                lstate.cached_index_sources[column_id])
+            {
+                return;
+            }
+            const auto source = FindCachedIndexSource(bind_data, lstate, column_id, std::nullopt);
+            if (source)
+            {
+                lstate.cached_index_sources[column_id] = std::make_pair(source->column, source->position);
+            }
+        };
+        for (const auto column_id : gstate.output_column_ids)
+        {
+            resolve_index(column_id);
+        }
+        for (const auto& binding : gstate.element_filters)
+        {
+            resolve_index(binding.column_id);
+        }
+    }
+    // Metadata-only filters are invariant for the entire ROOT event/page.
+    const bool entry_filters_pass = PassesCachedFilters(context, bind_data, gstate, lstate, entry, 0, true);
     const size_t start_elem = lstate.current_elem_idx;
     size_t next_elem = start_elem;
     for (size_t elem_idx = start_elem; elem_idx < max_elements && out_count < STANDARD_VECTOR_SIZE; ++elem_idx)
     {
         next_elem = elem_idx + 1;
-        if (!PassesCachedFilters(context, bind_data, gstate, lstate, entry, elem_idx))
+        if (!entry_filters_pass || (!gstate.element_filters.empty() &&
+                                    !PassesCachedFilters(context, bind_data, gstate, lstate, entry, elem_idx, false)))
         {
             continue;
         }
@@ -463,116 +391,72 @@ void RootScanExecutor::ProcessCachedEntry(ClientContext& context, const RootScan
             auto& vec = output.data[out_idx];
             if (col_idx == COLUMN_IDENTIFIER_ROW_ID)
             {
-                FlatVector::GetData<int64_t>(vec)[out_count] = static_cast<int64_t>(entry);
-                FlatVector::Validity(vec).SetValid(out_count);
+                FlatVector::GetDataMutable<int64_t>(vec)[out_count] = static_cast<int64_t>(entry);
+                FlatVector::ValidityMutable(vec).SetValid(out_count);
                 continue;
             }
             if (col_idx >= bind_data.columns.size())
             {
-                FlatVector::Validity(vec).SetInvalid(out_count);
+                FlatVector::ValidityMutable(vec).SetInvalid(out_count);
                 continue;
             }
             const auto& col = bind_data.columns[col_idx];
             if (col.name == "entry_id" && col.levels.empty())
             {
-                FlatVector::GetData<int64_t>(vec)[out_count] = static_cast<int64_t>(entry);
-                FlatVector::Validity(vec).SetValid(out_count);
+                FlatVector::GetDataMutable<int64_t>(vec)[out_count] = static_cast<int64_t>(entry);
+                FlatVector::ValidityMutable(vec).SetValid(out_count);
                 continue;
             }
             if (col_idx == bind_data.source_id_column)
             {
-                FlatVector::GetData<uint64_t>(vec)[out_count] = lstate.file_task.source_id;
-                FlatVector::Validity(vec).SetValid(out_count);
+                FlatVector::GetDataMutable<uint64_t>(vec)[out_count] = lstate.file_task.source_id;
+                FlatVector::ValidityMutable(vec).SetValid(out_count);
                 continue;
             }
             if (col_idx == bind_data.source_path_column)
             {
-                FlatVector::GetData<string_t>(vec)[out_count] = StringVector::AddString(vec, lstate.file_task.path);
-                FlatVector::Validity(vec).SetValid(out_count);
+                FlatVector::GetDataMutable<string_t>(vec)[out_count] =
+                    StringVector::AddString(vec, lstate.file_task.path);
+                FlatVector::ValidityMutable(vec).SetValid(out_count);
                 continue;
             }
             if (col.is_virtual_index)
             {
-                std::string search = col.name;
-                if (search.size() > 4 && search.substr(search.size() - 4) == "_idx")
-                {
-                    search = search.substr(0, search.size() - 4);
-                }
-                idx_t ref_col_idx = static_cast<idx_t>(-1);
-                int idx_pos = -1;
-                for (idx_t cand = 0; cand < bind_data.columns.size(); ++cand)
-                {
-                    const auto& candidate = bind_data.columns[cand];
-                    if (candidate.is_virtual_index || candidate.levels.empty() ||
-                        candidate.branch_name != col.branch_name || cand >= lstate.cached_results.size())
-                    {
-                        continue;
-                    }
-                    const auto& candidate_res = lstate.cached_results[cand];
-                    if (candidate_res.empty())
-                    {
-                        continue;
-                    }
-                    for (size_t name_idx = 0; name_idx < candidate_res.vector_names.size(); ++name_idx)
-                    {
-                        std::string vn = candidate_res.vector_names[name_idx];
-                        if (vn.size() > 4 && vn.substr(vn.size() - 4) == "_idx")
-                        {
-                            vn = vn.substr(0, vn.size() - 4);
-                        }
-                        if (vn == search)
-                        {
-                            ref_col_idx = cand;
-                            idx_pos = static_cast<int>(name_idx);
-                            break;
-                        }
-                    }
-                    if (ref_col_idx != static_cast<idx_t>(-1))
-                    {
-                        break;
-                    }
-                }
-                if (ref_col_idx == static_cast<idx_t>(-1) || idx_pos < 0)
+                const auto index = ResolveCachedIndexValue(bind_data, lstate, col_idx, elem_idx);
+                if (!index)
                 {
                     RootDebug("INDEX.NO_REFERENCE",
-                              "column=" + col.name + " branch=" + col.branch_name +
+                              "column=" + col.name + " root_class=" + col.root_class_name +
                                   " projected_columns=" + std::to_string(gstate.output_column_ids.size()));
-                    FlatVector::Validity(vec).SetInvalid(out_count);
+                    FlatVector::ValidityMutable(vec).SetInvalid(out_count);
                     continue;
                 }
-                const auto& ref_res = lstate.cached_results[ref_col_idx];
-                if (elem_idx >= ref_res.size() || elem_idx >= ref_res.vector_indices.size() ||
-                    static_cast<size_t>(idx_pos) >= ref_res.vector_indices[elem_idx].size())
-                {
-                    FlatVector::Validity(vec).SetInvalid(out_count);
-                    continue;
-                }
-                FlatVector::GetData<int32_t>(vec)[out_count] =
-                    ref_res.vector_indices[elem_idx][static_cast<size_t>(idx_pos)];
-                FlatVector::Validity(vec).SetValid(out_count);
+                FlatVector::GetDataMutable<int32_t>(vec)[out_count] = *index;
+                FlatVector::ValidityMutable(vec).SetValid(out_count);
                 continue;
             }
             if (col_idx >= lstate.cached_results.size())
             {
-                FlatVector::Validity(vec).SetInvalid(out_count);
+                FlatVector::ValidityMutable(vec).SetInvalid(out_count);
                 continue;
             }
             const auto& res = lstate.cached_results[col_idx];
             if (elem_idx >= res.size())
             {
-                FlatVector::Validity(vec).SetInvalid(out_count);
+                FlatVector::ValidityMutable(vec).SetInvalid(out_count);
                 continue;
             }
             if (res.is_string_flag[elem_idx])
             {
                 if (vec.GetType().id() == LogicalTypeId::VARCHAR)
                 {
-                    FlatVector::GetData<string_t>(vec)[out_count] = StringVector::AddString(vec, res.strings[elem_idx]);
-                    FlatVector::Validity(vec).SetValid(out_count);
+                    FlatVector::GetDataMutable<string_t>(vec)[out_count] =
+                        StringVector::AddString(vec, res.strings[elem_idx]);
+                    FlatVector::ValidityMutable(vec).SetValid(out_count);
                 }
                 else
                 {
-                    FlatVector::Validity(vec).SetInvalid(out_count);
+                    FlatVector::ValidityMutable(vec).SetInvalid(out_count);
                 }
             }
             else
@@ -591,7 +475,16 @@ void RootScanExecutor::ProcessCachedEntry(ClientContext& context, const RootScan
     {
         lstate.has_cached_entry = false;
         lstate.cached_results.clear();
-        lstate.local_current_row++;
+        lstate.cached_index_sources.clear();
+        if (!lstate.cursor_entry_active)
+        {
+            lstate.local_current_row++;
+        }
+        else if (!lstate.cursor_has_more)
+        {
+            EndEntryCursors(lstate);
+            lstate.local_current_row++;
+        }
     }
 }
 

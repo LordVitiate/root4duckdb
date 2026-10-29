@@ -9,23 +9,28 @@ void RootScanFileManager::Reset(RootScanGlobalState& gstate, RootScanLocalState&
     {
         const auto elapsed = std::chrono::steady_clock::now() - local_state.file_started;
         auto* file = local_state.root_file.GetTFile();
-        const uint64_t read_calls =
-            file ? static_cast<uint64_t>(std::max<Long64_t>(0, file->GetReadCalls())) : 0;
-        const uint64_t read_bytes =
-            file ? static_cast<uint64_t>(std::max<Long64_t>(0, file->GetBytesRead())) : 0;
+        const uint64_t read_calls = file ? static_cast<uint64_t>(std::max<Long64_t>(0, file->GetReadCalls())) : 0;
+        const uint64_t read_bytes = file ? static_cast<uint64_t>(std::max<Long64_t>(0, file->GetBytesRead())) : 0;
         gstate.file_scheduler->RecordComplete(
             local_state.file_task,
-            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()),
-            read_calls, read_bytes);
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()), read_calls,
+            read_bytes);
     }
     local_state.serialized_columns.clear();
+    // Release cursor state before the ROOT objects and file they reference.
+    local_state.path_readers.clear();
+    local_state.cursor_entry_active = false;
+    local_state.cursor_has_more = false;
+    local_state.numeric_page_column = DConstants::INVALID_INDEX;
+    local_state.multi_numeric_page_state_indices.clear();
+    local_state.multi_numeric_page_emitted = false;
+    local_state.multi_numeric_shape_mismatch = false;
     local_state.cached_results.clear();
+    local_state.cached_index_sources.clear();
     local_state.has_cached_entry = false;
     local_state.current_entry = std::numeric_limits<uint64_t>::max();
     local_state.current_elem_idx = 0;
     local_state.root_readers.clear();
-    local_state.direct_branch = nullptr;
-    local_state.direct_leaf = nullptr;
     local_state.primitive_tree_branches.clear();
     local_state.primitive_tree_leaves.clear();
     local_state.primitive_tree_requires_read = false;
@@ -85,8 +90,7 @@ bool RootScanFileManager::EnsureReady(const RootScanBindData& bind_data, RootSca
         {
             gstate.file_scheduler->RecordFailure(local_state.file_task, exception.what());
             Reset(gstate, local_state, false);
-            throw IOException("Required ROOT input failed: " + local_state.file_task.path + ": " +
-                              exception.what());
+            throw IOException("Required ROOT input failed: " + local_state.file_task.path + ": " + exception.what());
         }
         catch (...)
         {

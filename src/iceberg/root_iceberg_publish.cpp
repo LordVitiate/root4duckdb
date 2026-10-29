@@ -1,4 +1,5 @@
 #include "root4duckdb/iceberg/root_iceberg_internal.hpp"
+#include "root4duckdb/index/root_index_pipeline_utils.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
@@ -9,12 +10,14 @@
 #include "iceberg/schema_field.h"
 #include "iceberg/sort_order.h"
 #include "iceberg/table.h"
+#include "iceberg/table_scan.h"
 #include "iceberg/type.h"
 #include "iceberg/update/fast_append.h"
 
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <sstream>
@@ -135,11 +138,11 @@ InferredSchema InferParquetSchema(ClientContext& context, const std::string& par
     std::vector<SchemaField> fields;
     nlohmann::json mapping = nlohmann::json::array();
     fields.reserve(result->RowCount());
-    for (idx_t row = 0; row < result->RowCount(); ++row)
+    for (const auto& row : *result)
     {
-        const auto name = result->GetValue(0, row).ToString();
-        const auto type = result->GetValue(1, row).ToString();
-        const int32_t field_id = static_cast<int32_t>(row + 1);
+        const auto name = row.GetBaseValue(0).ToString();
+        const auto type = row.GetBaseValue(1).ToString();
+        const int32_t field_id = static_cast<int32_t>(fields.size() + 1);
         fields.push_back(SchemaField::MakeOptional(field_id, name, DuckTypeToIceberg(type)));
         mapping.push_back({{"field-id", field_id}, {"names", nlohmann::json::array({name})}});
     }
@@ -160,7 +163,12 @@ uint64_t ParquetRowCount(ClientContext& context, const std::string& parquet_path
     {
         throw IOException("count Parquet metadata part: " + result->GetError());
     }
-    return result->GetValue(0, 0).GetValue<uint64_t>();
+    auto chunk = result->Fetch();
+    if (!chunk || chunk->size() != 1)
+    {
+        throw IOException("Parquet row count query returned no row: " + parquet_path);
+    }
+    return chunk->GetValue(0, 0).GetValue<uint64_t>();
 }
 
 std::shared_ptr<Table> GetOrCreateTable(const std::shared_ptr<SqlCatalog>& catalog, const TableIdentifier& identifier,
@@ -204,12 +212,64 @@ RootIcebergTableCommit AppendParquet(ClientContext& context, const std::shared_p
     EnsureDirectory(data_path);
     const auto destination = data_path / (root_snapshot_id + "-" + fs::path(source_parquet).filename().string());
     std::error_code error;
-    fs::copy_file(source_parquet, destination, fs::copy_options::overwrite_existing, error);
-    if (error)
+    const auto source_hash = FileContentFingerprint(source_parquet);
+    if (fs::exists(destination))
     {
-        throw IOException("Copy Iceberg data file: " + error.message());
+        if (FileContentFingerprint(destination.string()) != source_hash)
+        {
+            throw IOException("Existing immutable Iceberg data file differs from staged content: " +
+                              destination.string());
+        }
+    }
+    else
+    {
+        const fs::path pending = destination.string() + ".pending";
+        fs::remove(pending, error);
+        if (error)
+        {
+            throw IOException("Remove abandoned Iceberg pending copy: " + error.message());
+        }
+        fs::copy_file(source_parquet, pending, fs::copy_options::none, error);
+        if (error)
+        {
+            throw IOException("Copy Iceberg data file to staging: " + error.message());
+        }
+        if (FileContentFingerprint(pending.string()) != source_hash)
+        {
+            throw IOException("Iceberg staged data file checksum mismatch: " + pending.string());
+        }
+        fs::rename(pending, destination);
     }
     auto table = GetOrCreateTable(catalog, identifier, inferred, FileUri(table_path.string()));
+    auto make_commit = [&](uint64_t rows)
+    {
+        auto snapshot = Take(table->current_snapshot(), "load current snapshot for " + identifier.ToString());
+        RootIcebergTableCommit out;
+        out.table_name = table_name;
+        out.iceberg_snapshot_id = snapshot->snapshot_id;
+        out.metadata_location = std::string(table->metadata_file_location());
+        out.manifest_list = snapshot->manifest_list;
+        out.record_count = rows;
+        return out;
+    };
+    const auto uri = FileUri(destination.string());
+    if (table->current_snapshot())
+    {
+        auto scan_builder = Take(table->NewScan(), "scan existing Iceberg files for " + identifier.ToString());
+        auto scan = Take(scan_builder->Build(), "build existing Iceberg scan for " + identifier.ToString());
+        for (const auto& task : Take(scan->PlanFiles(), "plan existing Iceberg files for " + identifier.ToString()))
+        {
+            if (task && task->data_file() && task->data_file()->file_path == uri)
+            {
+                const auto& existing = *task->data_file();
+                if (existing.file_size_in_bytes != static_cast<int64_t>(fs::file_size(destination)))
+                {
+                    throw IOException("Committed Iceberg data file size changed: " + destination.string());
+                }
+                return make_commit(static_cast<uint64_t>(existing.record_count));
+            }
+        }
+    }
     auto append = Take(table->NewFastAppend(), "create FastAppend for " + identifier.ToString());
     auto data_file = std::make_shared<DataFile>();
     data_file->file_path = FileUri(destination.string());
@@ -222,20 +282,35 @@ RootIcebergTableCommit AppendParquet(ClientContext& context, const std::shared_p
     Ensure(append->CheckErrors(), "append Iceberg data file for " + identifier.ToString());
     Ensure(append->Commit(), "commit FastAppend for " + identifier.ToString());
     Ensure(table->Refresh(), "refresh Iceberg table " + identifier.ToString());
-    auto snapshot = Take(table->current_snapshot(), "load current snapshot for " + identifier.ToString());
-    RootIcebergTableCommit out;
-    out.table_name = table_name;
-    out.iceberg_snapshot_id = snapshot->snapshot_id;
-    out.metadata_location = std::string(table->metadata_file_location());
-    out.manifest_list = snapshot->manifest_list;
-    out.record_count = static_cast<uint64_t>(data_file->record_count);
-    return out;
+    return make_commit(static_cast<uint64_t>(data_file->record_count));
 }
 
 void WriteSnapshotsParquet(ClientContext& context, const std::string& path, const std::string& root_snapshot_id,
                            const std::vector<RootIcebergTableCommit>& tables)
 {
     Connection connection(*context.db);
+    if (fs::is_regular_file(path))
+    {
+        auto saved =
+            connection.Query("SELECT table_name, iceberg_snapshot_id FROM read_parquet(" + SqlLiteral(path) + ")");
+        if (!saved || saved->HasError() || saved->RowCount() != tables.size())
+        {
+            throw IOException("Invalid resumed Iceberg snapshots metadata");
+        }
+        std::unordered_map<std::string, int64_t> mapping;
+        for (const auto& row : *saved)
+        {
+            mapping.emplace(row.GetBaseValue(0).ToString(), row.GetBaseValue(1).GetValue<int64_t>());
+        }
+        for (const auto& table : tables)
+        {
+            if (!mapping.count(table.table_name) || mapping.at(table.table_name) != table.iceberg_snapshot_id)
+            {
+                throw IOException("Iceberg snapshot origin changed during resume");
+            }
+        }
+        return;
+    }
     std::ostringstream values;
     for (idx_t i = 0; i < tables.size(); ++i)
     {
@@ -248,22 +323,55 @@ void WriteSnapshotsParquet(ClientContext& context, const std::string& path, cons
                << table.iceberg_snapshot_id << ',' << SqlLiteral(table.metadata_location) << ','
                << SqlLiteral(table.manifest_list) << ',' << table.record_count << ')';
     }
+    const auto pending = path + ".pending";
+    std::error_code clear_error;
+    fs::remove(pending, clear_error);
+    if (clear_error)
+    {
+        throw IOException("Cannot remove interrupted Iceberg metadata part");
+    }
     const auto sql = "COPY (SELECT col0::VARCHAR AS root_snapshot_id, col1::VARCHAR AS table_name, "
                      "col2::BIGINT AS iceberg_snapshot_id, col3::VARCHAR AS metadata_location, "
                      "col4::VARCHAR AS manifest_list, col5::UBIGINT AS record_count "
                      "FROM (VALUES " +
-                     values.str() + ")) TO " + SqlLiteral(path) + " (FORMAT PARQUET, COMPRESSION ZSTD)";
+                     values.str() + ")) TO " + SqlLiteral(pending) + " (FORMAT PARQUET, COMPRESSION ZSTD)";
     auto result = connection.Query(sql);
     if (result->HasError())
     {
         throw IOException("write root_index.snapshots part: " + result->GetError());
     }
+    fs::rename(pending, path);
 }
 
 void WriteCommitParquet(ClientContext& context, const std::string& path, const std::string& root_snapshot_id,
                         const std::string& manifest_fingerprint, const std::string& dictionary_fingerprint)
 {
     Connection connection(*context.db);
+    if (fs::is_regular_file(path))
+    {
+        auto saved = connection.Query("SELECT root_snapshot_id, state, manifest_fingerprint, dictionary_fingerprint "
+                                      "FROM read_parquet(" +
+                                      SqlLiteral(path) + ")");
+        if (!saved || saved->HasError() || saved->RowCount() != 1)
+        {
+            throw IOException("Invalid resumed Iceberg commit receipt");
+        }
+        auto row = saved->Fetch();
+        if (row->GetValue(0, 0).ToString() != root_snapshot_id || row->GetValue(1, 0).ToString() != "COMMITTED" ||
+            row->GetValue(2, 0).ToString() != manifest_fingerprint ||
+            row->GetValue(3, 0).ToString() != dictionary_fingerprint)
+        {
+            throw IOException("Iceberg commit receipt differs from original request");
+        }
+        return;
+    }
+    const auto pending = path + ".pending";
+    std::error_code clear_error;
+    fs::remove(pending, clear_error);
+    if (clear_error)
+    {
+        throw IOException("Cannot remove interrupted Iceberg commit part");
+    }
     const auto now_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
             .count();
@@ -272,13 +380,14 @@ void WriteCommitParquet(ClientContext& context, const std::string& path, const s
                      "'COMMITTED'::VARCHAR AS state, " +
                      SqlLiteral(manifest_fingerprint) + "::VARCHAR AS manifest_fingerprint, " +
                      SqlLiteral(dictionary_fingerprint) + "::VARCHAR AS dictionary_fingerprint, " +
-                     std::to_string(now_ns) + "::BIGINT AS committed_at_ns) TO " + SqlLiteral(path) +
+                     std::to_string(now_ns) + "::BIGINT AS committed_at_ns) TO " + SqlLiteral(pending) +
                      " (FORMAT PARQUET, COMPRESSION ZSTD)";
     auto result = connection.Query(sql);
     if (result->HasError())
     {
         throw IOException("write root_index.commits part: " + result->GetError());
     }
+    fs::rename(pending, path);
 }
 
 } // namespace
@@ -319,6 +428,17 @@ RootIcebergCommitResult PublishRootIndexStagingToIceberg(ClientContext& context,
     for (const auto& [table_name, parquet] : base_parts)
     {
         result.tables.push_back(AppendParquet(context, catalog, root.string(), root_snapshot_id, table_name, parquet));
+        const auto* failpoint = std::getenv("ROOT4DUCKDB_TEST_FAIL_AFTER_ICEBERG_TABLE");
+        if (failpoint && table_name == failpoint)
+        {
+            throw IOException("Test interruption after committed Iceberg table " + table_name);
+        }
+    }
+    const auto paths_part = staging / "root_path_sources.parquet";
+    if (fs::exists(paths_part))
+    {
+        result.tables.push_back(
+            AppendParquet(context, catalog, root.string(), root_snapshot_id, "path_sources", paths_part.string()));
     }
     const auto snapshots_part = (staging / "root_iceberg_snapshots.parquet").string();
     WriteSnapshotsParquet(context, snapshots_part, root_snapshot_id, result.tables);

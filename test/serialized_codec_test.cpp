@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 using duckdb::rootlake::DecodeSerializedNestedPrimitiveVectorColumn;
@@ -16,6 +17,7 @@ using duckdb::rootlake::EqualDecodedValues;
 using duckdb::rootlake::RootPrimitiveKind;
 using duckdb::rootlake::RootPrimitiveValue;
 using duckdb::rootlake::SerializedEntryLayout;
+using duckdb::rootlake::SerializedVectorPageCursor;
 using duckdb::rootlake::serialized_codec::CheckedByteCursor;
 
 static void PutBE32(std::vector<uint8_t>& bytes, size_t offset, uint32_t value)
@@ -141,6 +143,47 @@ int main()
     assert((values == std::vector<double>{12.0, 59.5}));
     assert(indices.empty());
 
+    // Check that the cursor resumes within the original ROOT byte buffer,
+    // without allocating an entry-wide decoded vector.
+    SerializedVectorPageCursor pager;
+    std::vector<RootPrimitiveValue> page_values;
+    std::vector<int32_t> page_indices;
+    assert(pager.Open(shifted_payload.data(), shifted_payload.size(), 16, 2, shifted_layout, reason));
+    assert(pager.ReadPage(1, page_values, page_indices, reason));
+    assert(page_values.size() == 1 && page_values[0].AsDouble() == 12.0);
+    assert((page_indices == std::vector<int32_t>{0}));
+    assert(pager.HasMore());
+    assert(pager.ReadPage(1, page_values, page_indices, reason));
+    assert(page_values.size() == 1 && page_values[0].AsDouble() == 59.5);
+    assert((page_indices == std::vector<int32_t>{1}));
+    assert(!pager.HasMore());
+    assert(!pager.ReadPage(1, page_values, page_indices, reason));
+    for (const uint32_t count : {99U, 100U, 101U, 4099U})
+    {
+        std::vector<float> source(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            source[i] = static_cast<float>(i);
+        }
+        const auto packed = FloatEntry(count, 0, source);
+        assert(pager.Open(packed.data(), packed.size(), 12, count, shifted_layout, reason));
+        uint64_t consumed = 0;
+        while (pager.ReadPage(113, page_values, page_indices, reason))
+        {
+            assert(page_values.size() <= 113 && page_indices.size() == page_values.size());
+            for (size_t i = 0; i < page_values.size(); ++i)
+            {
+                assert(page_values[i].AsDouble() == static_cast<double>(consumed + i));
+                assert(page_indices[i] == static_cast<int32_t>(consumed + i));
+            }
+            consumed += page_values.size();
+        }
+        assert(consumed == count);
+    }
+    assert(!pager.Open(shifted_payload.data(), 18, 16, 2, shifted_layout, reason));
+    assert(!reason.empty());
+    pager.Reset();
+
     auto empty_entry = FloatEntry(0, 10, {});
     observed_header = 0;
     assert(DecodeSerializedVectorEntry(empty_entry.data(), empty_entry.size(), scalar, 100, observed_header, values,
@@ -168,6 +211,15 @@ int main()
     assert(DecodeSerializedVectorEntry(array_entry.data(), array_entry.size(), fixed_array, 100, observed_header,
                                        values, indices, reason));
     assert((indices == std::vector<int32_t>{0, 0, 0, 1, 1, 0, 1, 1}));
+    // A page boundary can occur inside a fixed array or across objects.
+    assert(pager.Open(array_entry.data(), array_entry.size(), 12, 2, fixed_array, reason));
+    assert(pager.ReadPage(3, page_values, page_indices, reason));
+    assert(page_values.size() == 3 && page_values[2].AsDouble() == 2.0);
+    assert((page_indices == std::vector<int32_t>{0, 0, 0, 1, 1, 0}));
+    assert(pager.ReadPage(3, page_values, page_indices, reason));
+    assert(page_values.size() == 1 && page_values[0].AsDouble() == 2.5);
+    assert((page_indices == std::vector<int32_t>{1, 1}));
+    assert(!pager.HasMore());
     assert(!DecodeSerializedVectorEntry(array_entry.data(), array_entry.size(), fixed_array, 3, observed_header, values,
                                         indices, reason));
 
@@ -222,6 +274,10 @@ int main()
     assert(exact_values.size() == 1);
     assert(exact_values[0].kind == RootPrimitiveKind::SIGNED);
     assert(exact_values[0].signed_value == 9007199254740993LL);
+    assert(pager.Open(int64_entry.data(), int64_entry.size(), 12, 1, int64_layout, reason));
+    assert(pager.ReadPage(1, page_values, page_indices, reason));
+    assert(page_values[0].kind == RootPrimitiveKind::SIGNED);
+    assert(page_values[0].signed_value == 9007199254740993LL);
 
     auto uint64_layout = int64_layout;
     uint64_layout.value_type = "ULong64_t";
@@ -275,6 +331,75 @@ int main()
     wrong_nested_shape.index_depth = 1;
     assert(!DecodeSerializedNestedPrimitiveVectorColumn(nested_entry.data(), nested_entry.size(), nested_offset, 3,
                                                         wrong_nested_shape, 100, values, indices, reason));
+
+    // CERT: converting an out-of-range or non-finite floating value to an
+    // integer is undefined. An invalid ROOT value must fail predictably.
+    const auto rejects_integer_conversion = [](const RootPrimitiveValue& value, bool signed_target)
+    {
+        try
+        {
+            if (signed_target)
+            {
+                (void)value.AsSigned();
+            }
+            else
+            {
+                (void)value.AsUnsigned();
+            }
+        }
+        catch (const std::out_of_range&)
+        {
+            return true;
+        }
+        return false;
+    };
+    const auto infinity = std::numeric_limits<double>::infinity();
+    const auto nan_value = std::numeric_limits<double>::quiet_NaN();
+    assert(rejects_integer_conversion(RootPrimitiveValue::Floating(nan_value), true));
+    assert(rejects_integer_conversion(RootPrimitiveValue::Floating(infinity), false));
+    assert(rejects_integer_conversion(RootPrimitiveValue::Floating(-1.0), false));
+    assert(rejects_integer_conversion(RootPrimitiveValue::Floating(std::ldexp(1.0, 63)), true));
+    assert(rejects_integer_conversion(RootPrimitiveValue::Floating(std::ldexp(1.0, 64)), false));
+    assert(rejects_integer_conversion(RootPrimitiveValue::Unsigned(1ULL << 63), true));
+    assert(RootPrimitiveValue::Floating(-1.75).AsSigned() == -1);
+    assert(RootPrimitiveValue::Floating(42.75).AsUnsigned() == 42);
+    assert(RootPrimitiveValue::Unsigned(static_cast<uint64_t>(std::numeric_limits<int64_t>::max())).AsSigned() ==
+           std::numeric_limits<int64_t>::max());
+
+    // The direct reader and dataset reader must share exact narrowing rules.
+    assert(RootPrimitiveValue::Signed(127).AsInteger<int8_t>() == 127);
+    assert(RootPrimitiveValue::Unsigned(255).AsInteger<uint8_t>() == 255);
+    bool narrow_rejected = false;
+    try
+    {
+        (void)RootPrimitiveValue::Signed(128).AsInteger<int8_t>();
+    }
+    catch (const std::out_of_range&)
+    {
+        narrow_rejected = true;
+    }
+    assert(narrow_rejected);
+    narrow_rejected = false;
+    try
+    {
+        (void)RootPrimitiveValue::Unsigned(256).AsInteger<uint8_t>();
+    }
+    catch (const std::out_of_range&)
+    {
+        narrow_rejected = true;
+    }
+    assert(narrow_rejected);
+    assert(RootPrimitiveValue::Floating(1.25).AsFloat() == 1.25f);
+    bool float_rejected = false;
+    try
+    {
+        (void)RootPrimitiveValue::Floating(std::ldexp(1.0, 128)).AsFloat();
+    }
+    catch (const std::out_of_range&)
+    {
+        float_rejected = true;
+    }
+    assert(float_rejected);
 
     const double nan = std::numeric_limits<double>::quiet_NaN();
     assert(EqualDecodedValues({nan, 1.0}, {0, 1}, {nan, 1.0}, {0, 1}));

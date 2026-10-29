@@ -4,12 +4,9 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_DIR="$PROJECT_DIR/test/fixtures"
 WORK_DIR="${ROOT4DUCKDB_TEST_DIR:-$(mktemp -d /tmp/root4duckdb-it.XXXXXX)}"
-DUCKDB_BIN="${DUCKDB_BIN:-$PROJECT_DIR/build/release/duckdb}"
-
-if [[ ! -x "$DUCKDB_BIN" ]]; then
-    DISCOVERED_DUCKDB="$(find "$PROJECT_DIR/build/release" -type f -name duckdb -perm -111 2>/dev/null | head -n 1 || true)"
-    [[ -n "$DISCOVERED_DUCKDB" ]] && DUCKDB_BIN="$DISCOVERED_DUCKDB"
-fi
+# Use the environment-aware launcher so Iceberg and compiler runtimes
+# match the successful build. Explicit DUCKDB_BIN overrides remain supported.
+DUCKDB_BIN="${DUCKDB_BIN:-$PROJECT_DIR/run-duckdb.sh}"
 CMAKE_CACHE="$PROJECT_DIR/build/release/CMakeCache.txt"
 CACHED_ROOT_CONFIG=""
 if [[ -r "$CMAKE_CACHE" ]]; then
@@ -123,7 +120,15 @@ if [[ -e "$WORK_DIR" && ! -d "$WORK_DIR" ]] ||
 fi
 mkdir -p "$WORK_DIR/data" "$WORK_DIR/build" "$WORK_DIR/legacy"
 
-ROOT_REGISTERED="$("$DUCKDB_BIN" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")"
+ROOT_REGISTERED_STATUS=0
+ROOT_REGISTERED="$("$DUCKDB_BIN" -csv -noheader :memory: \
+    -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';" 2>&1)" ||
+    ROOT_REGISTERED_STATUS=$?
+if ((ROOT_REGISTERED_STATUS != 0)); then
+    echo "[ERROR] DuckDB CLI registration probe failed (exit=$ROOT_REGISTERED_STATUS): $DUCKDB_BIN" >&2
+    echo "$ROOT_REGISTERED" >&2
+    exit "$ROOT_REGISTERED_STATUS"
+fi
 DUCKDB_ARGS=(-bail)
 if [[ "$ROOT_REGISTERED" == "false" ]]; then
     ROOT_EXTENSION="$PROJECT_DIR/build/release/extension/root/root.duckdb_extension"
@@ -136,8 +141,17 @@ elif [[ "$ROOT_REGISTERED" != "true" ]]; then
     echo "unable to determine ROOT registration in $DUCKDB_BIN: $ROOT_REGISTERED" >&2
     exit 2
 fi
-if [[ "$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';")" != "true" ]]; then
-    echo "read_root was not registered in DuckDB CLI" >&2
+LOADED_REGISTERED_STATUS=0
+LOADED_REGISTERED="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    -c "SELECT count(*) > 0 FROM duckdb_functions() WHERE function_name = 'read_root';" 2>&1)" ||
+    LOADED_REGISTERED_STATUS=$?
+if ((LOADED_REGISTERED_STATUS != 0)); then
+    echo "[ERROR] DuckDB extension LOAD/registration probe failed (exit=$LOADED_REGISTERED_STATUS)" >&2
+    echo "$LOADED_REGISTERED" >&2
+    exit "$LOADED_REGISTERED_STATUS"
+fi
+if [[ "$LOADED_REGISTERED" != "true" ]]; then
+    echo "read_root was not registered in DuckDB CLI: $LOADED_REGISTERED" >&2
     exit 2
 fi
 
@@ -148,6 +162,97 @@ build_root_fixture "$FIXTURE_DIR" "$WORK_DIR/build" TestEvent make_fixture "$CXX
 validate_fixture_runtime "$WORK_DIR/build/make_fixture"
 echo "[ROOT] fixture dictionary=$WORK_DIR/build/libTestEvent_rdict.pcm" >&2
 "$WORK_DIR/build/make_fixture" "$WORK_DIR/data"
+
+# Stress fixtures must not contaminate the original '*.root' glob used
+# by the mixed-layout regression (a, b, c, packed, ancestor).
+mv "$WORK_DIR/data/cursor.root" "$WORK_DIR/cursor.root"
+mv "$WORK_DIR/data/serialized_page.root" "$WORK_DIR/serialized_page.root"
+if [[ "$(find "$WORK_DIR/data" -maxdepth 1 -type f -name '*.root' | wc -l)" -ne 5 ]]; then
+    echo "unexpected general ROOT fixture count after cursor isolation" >&2
+    find "$WORK_DIR/data" -maxdepth 1 -type f -name '*.root' -print >&2
+    exit 1
+fi
+
+# End-to-end regression: 99, 100, 101 and 4099 values per ROOT entry.
+# A 100-value serialized limit must never yield successful truncated scans.
+cat > "$WORK_DIR/cursor-regression.sql" <<SQL
+SELECT count(*) = 4399 AND sum(value) = 8413702 AND sum(header_idx) = 8413702
+FROM read_root(
+    '$WORK_DIR/cursor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/header',
+    reader_mode := 'object'
+);
+SELECT count(*) = 4099 AND min(header_idx) = 0 AND max(header_idx) = 4098
+       AND count(DISTINCT header_idx) = 4099
+FROM read_root(
+    '$WORK_DIR/cursor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/header',
+    reader_mode := 'object'
+) WHERE entry_id = 3;
+SELECT count(*) = 4399 AND sum(value) = 8413702
+       AND min(vecHit_idx) = 0 AND max(vecHit_idx) = 0
+       AND max(weights_idx) = 4098
+FROM read_root(
+    '$WORK_DIR/cursor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/weights',
+    reader_mode := 'object'
+);
+SELECT count(*) = 4399 AND sum(value) = 8413702
+FROM read_root(
+    '$WORK_DIR/cursor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/weights',
+    reader_mode := 'auto',
+    raw_max_values_per_entry := 100
+);
+SELECT count(*) = 100 AND min(header_idx) = 0 AND max(header_idx) = 99
+FROM read_root(
+    '$WORK_DIR/cursor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/header',
+    reader_mode := 'serialized',
+    raw_max_values_per_entry := 100
+) WHERE entry_id = 1;
+LOAD parquet;
+SELECT count(*) = 1 AND min(flattened_values) = 4399
+FROM root_build_index(
+    '$WORK_DIR/cursor.root',
+    'Events',
+    '/TestEvent/vecHit/weights/value',
+    '$WORK_DIR/index_cursor',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'object',
+    catalog_mode := 'sqlite',
+    index_threads := 1,
+    bloom_bytes := 64,
+    allow_partial := false
+) WHERE status = 'OK';
+SELECT count(*) = 4399 AND sum(value) = 8413702 AND max(weights_idx) = 4098
+FROM read_root_dataset(
+    '$WORK_DIR/index_cursor',
+    '/TestEvent/vecHit/weights/value',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'object'
+);
+SELECT count(*) = 8 AND sum(value) = 32756
+FROM read_root_dataset(
+    '$WORK_DIR/index_cursor',
+    '/TestEvent/vecHit/weights/value',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'object'
+) WHERE value > 4090;
+SQL
+CURSOR_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/cursor-regression.sql")"
+if [[ "$(printf '%s\n' "$CURSOR_RESULT" | grep -xc true)" -ne 8 ]] ||
+    printf '%s\n' "$CURSOR_RESULT" | grep -qv '^true$'; then
+    echo "ROOT cursor regression failed: $CURSOR_RESULT" >&2
+    exit 1
+fi
+echo "[OK] ROOT cursor regression: 99/100/101, 4099-row resume, dataset and index" >&2
 
 # In-process concurrency regression: independent DuckDB databases load ROOT
 # and scan real dictionary-backed ROOT events from eight native threads.
@@ -747,7 +852,91 @@ FROM read_root(
     reader_mode := 'serialized',
     raw_validation_entries := 2
 );
+-- Real nested vector<object>/vector<object>/fixed-array semantics. The
+-- serialized decoder must produce the same flattened values and three indexes
+-- as ROOT object traversal on an unsplit physical vecHit ancestor.
+SELECT count(*) = 9 AND sum(Cov) = 27 AND max(Cov_idx) = 2
+       AND min(params_idx) = 0 AND max(params_idx) = 0
+       AS nested_fixed_serialized_default_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/params/Cov',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SELECT count(*) = 9 AND sum(Cov) = 27 AND max(Cov_idx) = 2
+       AS nested_fixed_object_oracle_ok
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/params/Cov',
+    reader_mode := 'object'
+);
 SQL
+
+# Behavioral result alone cannot identify a selected-subtree fallback. Assert
+# the byte-offset decoder actually executes for the nested fixed-array fixture.
+ROOT4DUCKDB_DEBUG=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    > "$WORK_DIR/nested-fixed-path.csv" 2> "$WORK_DIR/nested-fixed-path.log" <<SQL
+LOAD '$ROOT_EXTENSION';
+SELECT sum(Cov)::BIGINT
+FROM read_root(
+    '$WORK_DIR/data/ancestor.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit/params/Cov',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2
+);
+SQL
+if ! grep -qx '27' "$WORK_DIR/nested-fixed-path.csv"; then
+    echo "nested fixed decoder failed its SQL value regression" >&2
+    cat "$WORK_DIR/nested-fixed-path.csv" >&2
+    exit 1
+fi
+if ! grep -Fq '[SERIALIZED.NESTED_FIXED_OFFSET] path=/TestEvent/vecHit/params/Cov' \
+        "$WORK_DIR/nested-fixed-path.log"; then
+    echo "nested fixed SQL passed but did not use the direct serialized offset decoder" >&2
+    grep -E 'SERIALIZED\\.|ROOT_OBJECT_FALLBACK' "$WORK_DIR/nested-fixed-path.log" >&2 || true
+    exit 1
+fi
+echo "[OK] nested fixed decoder selected byte-offset path, not ROOT scratch" >&2
+
+# Dense serialized Cov indexes must retain the same full coordinates as the
+# ROOT object oracle, including value and nested array index positions.
+cat > "$WORK_DIR/nested-cov-dense-indices.sql" <<SQL
+LOAD '$ROOT_EXTENSION';
+WITH
+object_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, params_idx, Cov_idx, Cov
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit/params/Cov',
+        reader_mode := 'object'
+    )
+),
+serialized_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, params_idx, Cov_idx, Cov
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit/params/Cov',
+        reader_mode := 'serialized',
+        raw_validation_entries := 0
+    )
+)
+SELECT (SELECT count(*) FROM serialized_rows) = 9
+       AND NOT EXISTS (SELECT * FROM object_rows EXCEPT ALL SELECT * FROM serialized_rows)
+       AND NOT EXISTS (SELECT * FROM serialized_rows EXCEPT ALL SELECT * FROM object_rows);
+SQL
+NESTED_COV_DENSE_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/nested-cov-dense-indices.sql")"
+if [[ "$NESTED_COV_DENSE_RESULT" != "true" ]]; then
+    echo "dense serialized nested Cov indexes differ from ROOT object oracle: $NESTED_COV_DENSE_RESULT" >&2
+    exit 1
+fi
+echo "[OK] dense nested Cov indexes match object oracle" >&2
 
 DIRECT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/direct-read.sql")"
 DIRECT_EXPECTED="$(grep -Ec '^SELECT([[:space:]]|$)' "$WORK_DIR/direct-read.sql")"
@@ -1259,6 +1448,93 @@ if [[ "$ANCESTOR_RESULT" != $'true\ntrue\ntrue\ntrue\ntrue\n1\ntrue' ]]; then
     exit 1
 fi
 
+# Explicit serialized mode must not be rejected merely because two indexed
+# columns share the same physical ROOT ancestor branch.
+cat > "$WORK_DIR/serialized-siblings.sql" <<SQL
+LOAD parquet;
+SELECT count(*) = 1
+       AND min(flattened_values) = 9
+       AND bool_and(contains(message, 'serialized=2, object_fallback=0'))
+       AND bool_and(CAST(split_part(message, 'shared_basket_loads=', 2) AS UBIGINT) > 0)
+       AND bool_and(CAST(split_part(message, 'shared_basket_loads=', 2) AS UBIGINT) <= baskets / 2)
+FROM root_build_index(
+    '$WORK_DIR/data/ancestor.root',
+    'Events',
+    '/TestEvent/vecHit/u,/TestEvent/vecHit/uv',
+    '$WORK_DIR/index_serialized_siblings',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized',
+    raw_validation_entries := 2,
+    index_threads := 1,
+    bloom_bytes := 64,
+    allow_partial := false
+)
+WHERE status = 'OK';
+SQL
+SERIALIZED_SIBLINGS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/serialized-siblings.sql")"
+if [[ "$SERIALIZED_SIBLINGS_RESULT" != "true" ]]; then
+    echo "explicit serialized sibling paths unexpectedly fell back: $SERIALIZED_SIBLINGS_RESULT" >&2
+    exit 1
+fi
+
+# AUTO and SERIALIZED must share ROOT basket access where supported.
+cat > "$WORK_DIR/auto-serialized-siblings.sql" <<SQL
+LOAD parquet;
+SELECT count(*) = 1 AND min(flattened_values) = 9
+       AND bool_and(contains(message, 'serialized=2, object_fallback=0'))
+       AND bool_and(CAST(split_part(message, 'shared_basket_loads=', 2) AS UBIGINT) > 0)
+FROM root_build_index(
+    '$WORK_DIR/data/ancestor.root', 'Events',
+    '/TestEvent/vecHit/u,/TestEvent/vecHit/uv',
+    '$WORK_DIR/index_auto_serialized_siblings',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'auto', raw_validation_entries := 2,
+    index_threads := 1, bloom_bytes := 64, allow_partial := false
+)
+WHERE status = 'OK';
+SQL
+AUTO_SIBLINGS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/auto-serialized-siblings.sql")"
+if [[ "$AUTO_SIBLINGS_RESULT" != "true" ]]; then
+    echo "automatic multi-path indexing unexpectedly fell back: $AUTO_SIBLINGS_RESULT" >&2
+    exit 1
+fi
+
+# One semantic relation may project multiple sibling columns irrespective of
+# the physical ROOT branch layout. The object oracle and strict serialized
+# route must return identical full row tuples, not just equal row counts.
+cat > "$WORK_DIR/semantic-relation-columns.sql" <<SQL
+WITH
+object_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u, kind, exact_id
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'object'
+    )
+),
+serialized_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u, kind, exact_id
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized',
+        raw_validation_entries := 0
+    )
+)
+SELECT (SELECT count(*) FROM object_rows) = 3
+       AND NOT EXISTS (SELECT * FROM object_rows EXCEPT ALL SELECT * FROM serialized_rows)
+       AND NOT EXISTS (SELECT * FROM serialized_rows EXCEPT ALL SELECT * FROM object_rows);
+SQL
+SEMANTIC_RELATION_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/semantic-relation-columns.sql")"
+if [[ "$SEMANTIC_RELATION_RESULT" != "true" ]]; then
+    echo "semantic relation columns diverged between object and serialized ROOT: $SEMANTIC_RELATION_RESULT" >&2
+    exit 1
+fi
+
 cat > "$WORK_DIR/mixed-layout.sql" <<SQL
 LOAD parquet;
 SELECT count(*)
@@ -1365,6 +1641,101 @@ if [[ "$(printf '%s\n' "$ENTRY_SELECTION_RESULT" | head -n 1)" != "true" ]] || \
     exit 1
 fi
 
+# The ROOT TTree cache is configured per file, never reset to a basket task range.
+# Compare complete indexed tuples with the cache enabled and disabled.
+cat > "$WORK_DIR/tree-cache-parity.sql" <<SQL
+LOAD parquet;
+SELECT source_id, entry_id, vecHit_idx, value
+FROM read_root_dataset(
+    '$WORK_DIR/index',
+    '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'auto',
+    tree_cache_bytes := 67108864
+)
+WHERE entry_id IN (0, 2)
+ORDER BY source_id, entry_id, vecHit_idx, value;
+SQL
+sed 's/tree_cache_bytes := 67108864/tree_cache_bytes := 0/' \
+    "$WORK_DIR/tree-cache-parity.sql" > "$WORK_DIR/tree-no-cache-parity.sql"
+
+MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/tree-cache-parity.sql" > "$WORK_DIR/tree-cache-parity.csv" \
+    2> "$WORK_DIR/tree-cache-parity.err"
+MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/tree-no-cache-parity.sql" > "$WORK_DIR/tree-no-cache-parity.csv" \
+    2> "$WORK_DIR/tree-no-cache-parity.err"
+if grep -q 'TTreeCache::FillBuffer.*Inconsistency' "$WORK_DIR/tree-cache-parity.err"; then
+    echo "ROOT TTreeCache cluster state inconsistent in indexed task scan" >&2
+    cat "$WORK_DIR/tree-cache-parity.err" >&2
+    exit 1
+fi
+if ! cmp -s "$WORK_DIR/tree-cache-parity.csv" "$WORK_DIR/tree-no-cache-parity.csv"; then
+    echo "indexed tuple values differ with ROOT TTree cache enabled versus disabled" >&2
+    diff -u "$WORK_DIR/tree-cache-parity.csv" "$WORK_DIR/tree-no-cache-parity.csv" >&2 || true
+    exit 1
+fi
+echo "[OK] indexed ROOT tree-cache on/off complete tuple parity" >&2
+
+
+# Adaptive cache must not let a sparse indexed query trigger a full-tree
+# TTreeCache read-ahead. Dense scans retain the native ROOT cache, while
+# explicit cache values override automatic admission in both directions.
+cat > "$WORK_DIR/tree-cache-adaptive.sql" <<SQL
+LOAD parquet;
+EXPLAIN ANALYZE
+SELECT sum(value)
+FROM read_root_dataset(
+    '$WORK_DIR/index', '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+EXPLAIN ANALYZE
+SELECT sum(value)
+FROM read_root_dataset(
+    '$WORK_DIR/index', '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so'
+)
+WHERE entry_id < 1;
+EXPLAIN ANALYZE
+SELECT sum(value)
+FROM read_root_dataset(
+    '$WORK_DIR/index', '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    tree_cache_bytes := 67108864
+)
+WHERE entry_id < 1;
+EXPLAIN ANALYZE
+SELECT sum(value)
+FROM read_root_dataset(
+    '$WORK_DIR/index', '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    tree_cache_bytes := 0
+);
+SQL
+CACHE_POLICY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/tree-cache-adaptive.sql")"
+if ! python3 -c '
+import re
+import sys
+
+profile = sys.stdin.read()
+enabled = [int(v) for v in re.findall(r"ROOT Cache Enabled Files:\s*(\d+)", profile)]
+disabled = [int(v) for v in re.findall(r"ROOT Cache Disabled Files:\s*(\d+)", profile)]
+if len(enabled) != 4 or len(disabled) != 4:
+    raise SystemExit("missing adaptive ROOT cache metrics")
+if not (enabled[0] > 0 and disabled[0] == 0):
+    raise SystemExit("dense default scan did not retain the ROOT cache")
+if not (enabled[1] == 0 and disabled[1] > 0):
+    raise SystemExit("sparse default scan did not disable the ROOT cache")
+if not (enabled[2] > 0 and disabled[2] == 0):
+    raise SystemExit("explicit ROOT cache size was not honored")
+if not (enabled[3] == 0 and disabled[3] > 0):
+    raise SystemExit("explicit ROOT cache disable was not honored")
+' <<< "$CACHE_POLICY_RESULT"; then
+    echo "unexpected indexed ROOT cache admission: $CACHE_POLICY_RESULT" >&2
+    exit 1
+fi
+echo "[OK] indexed ROOT adaptive cache admission and explicit overrides" >&2
+
 cat > "$WORK_DIR/entry-selection-delta.json" <<JSON
 {"$SOURCE_ID_A":{"ranges":[[0,1]],"entries_delta":{"base":2,"deltas":[]}}}
 JSON
@@ -1388,6 +1759,39 @@ SQL
 LIMITS_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/limits-and-aggregates.sql")"
 if [[ "$LIMITS_RESULT" != $'true\ntrue\ntrue\ntrue' ]]; then
     echo "unexpected row-limit/aggregate result: $LIMITS_RESULT" >&2
+    exit 1
+fi
+
+# File-local entry_id and global event_fk must remain distinct in indexed ROOT scans.
+cat > "$WORK_DIR/local-entry-pruning.sql" <<SQL
+LOAD parquet;
+WITH reference AS MATERIALIZED (
+    SELECT source_id, entry_id, vecHit_idx, value
+    FROM read_root_dataset('$WORK_DIR/index', '/TestEvent/vecHit/u', dictionary := '$WORK_DIR/build/libTestEvent.so')
+), filtered AS MATERIALIZED (
+    SELECT source_id, entry_id, vecHit_idx, value
+    FROM read_root_dataset('$WORK_DIR/index', '/TestEvent/vecHit/u', dictionary := '$WORK_DIR/build/libTestEvent.so')
+    WHERE entry_id = 0
+), expected AS MATERIALIZED (SELECT * FROM reference WHERE entry_id = 0)
+SELECT (SELECT count(*) FROM expected) > 0
+       AND (SELECT count(DISTINCT source_id) FROM expected) > 1
+       AND NOT EXISTS (SELECT * FROM expected EXCEPT ALL SELECT * FROM filtered)
+       AND NOT EXISTS (SELECT * FROM filtered EXCEPT ALL SELECT * FROM expected);
+WITH reference AS MATERIALIZED (
+    SELECT source_id, event_fk, entry_id, vecHit_idx, value
+    FROM read_root_dataset('$WORK_DIR/index', '/TestEvent/vecHit/u', dictionary := '$WORK_DIR/build/libTestEvent.so')
+), filtered AS MATERIALIZED (
+    SELECT source_id, event_fk, entry_id, vecHit_idx, value
+    FROM read_root_dataset('$WORK_DIR/index', '/TestEvent/vecHit/u', dictionary := '$WORK_DIR/build/libTestEvent.so')
+    WHERE entry_id = 0 AND event_fk >= 3 AND value > 0
+), expected AS MATERIALIZED (SELECT * FROM reference WHERE entry_id = 0 AND event_fk >= 3 AND value > 0)
+SELECT (SELECT count(*) FROM expected) > 0
+       AND NOT EXISTS (SELECT * FROM expected EXCEPT ALL SELECT * FROM filtered)
+       AND NOT EXISTS (SELECT * FROM filtered EXCEPT ALL SELECT * FROM expected);
+SQL
+LOCAL_ENTRY_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/local-entry-pruning.sql")"
+if [[ "$LOCAL_ENTRY_RESULT" != $'true\ntrue' ]]; then
+    echo "file-local entry_id pruning differs from its materialized oracle: $LOCAL_ENTRY_RESULT" >&2
     exit 1
 fi
 
@@ -1449,6 +1853,8 @@ IN_SELECTED_FILES="$(profile_metric 'Selected ROOT Files' <<<"$IN_BLOOM_RESULT" 
 IN_DECODED_VALUES="$(profile_metric 'Decoded Values' <<<"$IN_BLOOM_RESULT" || true)"
 if [[ "$IN_SELECTED_FILES" != "0" || "$IN_DECODED_VALUES" != "0" ]]; then
     echo "IN equality set should be rejected by basket Bloom filters" >&2
+    echo "[IN_BLOOM] selected_files=${IN_SELECTED_FILES:-missing} decoded_values=${IN_DECODED_VALUES:-missing}" >&2
+    printf '%s\n' "$IN_BLOOM_RESULT" >&2
     exit 1
 fi
 
@@ -1472,6 +1878,501 @@ if [[ "$METADATA_ONLY_ROWS" != "11" || "$METADATA_DECODED_VALUES" != "0" ||
     echo "COUNT(*) should use file cardinalities without task planning or ROOT decoding" >&2
     exit 1
 fi
+
+# Physical ancestor's fixed member must stream even with a small value limit.
+cat > "$WORK_DIR/serialized-fixed-pager.sql" <<SQL
+LOAD parquet;
+CREATE TEMP TABLE pager_index_status AS
+SELECT *
+FROM root_build_index(
+    '$WORK_DIR/serialized_page.root', 'Events', '/TestEvent/vecHit/u',
+    '$WORK_DIR/serialized_pager_index',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized', raw_max_values_per_entry := 1, index_threads := 1,
+    bloom_bytes := 64, allow_partial := false
+);
+SELECT count(*) = 1 FROM pager_index_status WHERE status = 'OK';
+SELECT count(*) = 4099 AND min(value) = 0 AND max(value) = 4098
+       AND abs(sum(value) - 8398851.0) < 0.00001
+FROM read_root_dataset(
+    '$WORK_DIR/serialized_pager_index', '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized', raw_max_values_per_entry := 1
+);
+EXPLAIN ANALYZE SELECT sum(value)
+FROM read_root_dataset(
+    '$WORK_DIR/serialized_pager_index', '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized', raw_max_values_per_entry := 1
+);
+SQL
+PAGER_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: < "$WORK_DIR/serialized-fixed-pager.sql")"
+if [[ "$(printf '%s\n' "$PAGER_RESULT" | grep -c '^true$')" != "2" ]]; then
+    echo "bounded serialized cursor regression failed: $PAGER_RESULT" >&2
+    exit 1
+fi
+PAGER_PAGES="$(profile_metric 'Serialized Page Calls' <<<"$PAGER_RESULT" || true)"
+PAGER_OBJECT="$(profile_metric 'GetEntry Calls' <<<"$PAGER_RESULT" || true)"
+if [[ -z "$PAGER_PAGES" || "$PAGER_PAGES" -lt 3 || "$PAGER_OBJECT" != "0" ]]; then
+    echo "serialized pager did not emit bounded pages without ROOT object reads" >&2
+    printf '%s\n' "$PAGER_RESULT" >&2
+    exit 1
+fi
+echo "[OK] serialized fixed-member cursor bypassed entry-wide value staging" >&2
+# A controlled interruption after completed checkpoint segments must not force
+# the indexed file to be processed again when resume := true is requested.
+cat > "$WORK_DIR/checkpoint-interrupt.sql" <<SQL
+LOAD parquet;
+SELECT count(*) FROM root_build_index(
+    '$WORK_DIR/serialized_page.root', 'Events', '/TestEvent/vecHit/u',
+    '$WORK_DIR/checkpoint-resume-index',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized', raw_validation_entries := 0,
+    index_threads := 1, bloom_bytes := 64, allow_partial := false
+);
+SQL
+if ROOT4DUCKDB_TEST_FAIL_AFTER_INDEX=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" \
+    -csv -noheader :memory: < "$WORK_DIR/checkpoint-interrupt.sql" \
+    >"$WORK_DIR/checkpoint-interrupt.out" 2>"$WORK_DIR/checkpoint-interrupt.err"; then
+    echo "interrupted index build unexpectedly succeeded" >&2
+    exit 1
+fi
+if ! grep -q 'ROOT index test interruption after durable checkpoints' "$WORK_DIR/checkpoint-interrupt.err" ||
+    [[ -z "$(find "$WORK_DIR/checkpoint-resume-index/failed" -name checkpoint.json -print -quit)" ]]; then
+    echo "failed to preserve complete ROOT index checkpoint" >&2
+    exit 1
+fi
+RESUME_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+WITH status AS MATERIALIZED (
+ SELECT * FROM root_build_index(
+    '$WORK_DIR/serialized_page.root', 'Events', '/TestEvent/vecHit/u',
+    '$WORK_DIR/checkpoint-resume-index',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized', raw_validation_entries := 0,
+    index_threads := 1, bloom_bytes := 64,
+    allow_partial := false, resume := true
+ )
+)
+SELECT count(*) = 1 AND bool_and(status = 'OK') AND
+       bool_and(message = 'recovered validated Parquet checkpoint') FROM status;
+SELECT count(*) = 4099 AND min(value) = 0 AND max(value) = 4098
+FROM read_root_dataset(
+    '$WORK_DIR/checkpoint-resume-index', '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized'
+);
+SQL
+)"
+if [[ "$(printf '%s\n' "$RESUME_RESULT" | grep -c '^true$')" != "2" ]]; then
+    echo "ROOT index checkpoint recovery failed: $RESUME_RESULT" >&2
+    exit 1
+fi
+echo "[OK] index checkpoint resumed without reindexing the completed source file" >&2
+# Corrupt a published checkpoint *before* recovery: checksum validation
+# must quarantine the segment and rebuild the original ROOT file.
+sed 's@checkpoint-resume-index@checkpoint-corrupt-index@g' \
+    "$WORK_DIR/checkpoint-interrupt.sql" > "$WORK_DIR/checkpoint-corrupt.sql"
+if ROOT4DUCKDB_TEST_FAIL_AFTER_INDEX=1 MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" \
+    -csv -noheader :memory: < "$WORK_DIR/checkpoint-corrupt.sql" \
+    >"$WORK_DIR/checkpoint-corrupt.out" 2>"$WORK_DIR/checkpoint-corrupt.err"; then
+    echo "controlled corrupted checkpoint interruption unexpectedly succeeded" >&2
+    exit 1
+fi
+CORRUPT_PARQUET="$(find "$WORK_DIR/checkpoint-corrupt-index/failed" -name root_baskets.parquet -print -quit)"
+if [[ -z "$CORRUPT_PARQUET" ]]; then
+    echo "missing committed checkpoint for corruption acceptance" >&2
+    exit 1
+fi
+printf 'truncated-by-interruption' > "$CORRUPT_PARQUET"
+CORRUPT_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+WITH rebuilt AS MATERIALIZED (
+ SELECT * FROM root_build_index(
+    '$WORK_DIR/serialized_page.root', 'Events', '/TestEvent/vecHit/u',
+    '$WORK_DIR/checkpoint-corrupt-index',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized', raw_validation_entries := 0,
+    index_threads := 1, bloom_bytes := 64,
+    allow_partial := false, resume := true
+ )
+)
+SELECT count(*) = 1 AND bool_and(status = 'OK') AND
+       bool_and(message != 'recovered validated Parquet checkpoint') FROM rebuilt;
+SELECT count(*) = 4099 FROM read_root_dataset(
+    '$WORK_DIR/checkpoint-corrupt-index', '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so', reader_mode := 'serialized'
+);
+SQL
+)"
+if [[ "$(printf '%s\n' "$CORRUPT_RESULT" | grep -c '^true$')" != "2" ]]; then
+    echo "corrupt checkpoint was reused or not rebuilt: $CORRUPT_RESULT" >&2
+    exit 1
+fi
+echo "[OK] incomplete/corrupted Parquet checkpoint quarantined and reindexed" >&2
+
+EVO_BASE="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+SELECT count(*) FROM root_build_index(
+    '$WORK_DIR/data/a.root', 'Events', '/TestEvent/run', '$WORK_DIR/index_evolve',
+    dictionary := '$WORK_DIR/build/libTestEvent.so', catalog_mode := 'sqlite',
+    index_threads := 1, allow_partial := false
+) WHERE status='OK';
+SELECT root_snapshot_id FROM read_parquet(
+    '$WORK_DIR/index_evolve/warehouse/root_index/commits/data/*.parquet'
+) WHERE state='COMMITTED' ORDER BY committed_at_ns DESC LIMIT 1;
+SQL
+)"
+EVO_FIRST="$(printf '%s\n' "$EVO_BASE" | head -n 1)"
+EVO_SNAPSHOT="$(printf '%s\n' "$EVO_BASE" | tail -n 1)"
+if [[ "$EVO_FIRST" != "1" || ! "$EVO_SNAPSHOT" =~ ^[0-9]+$ ]]; then
+    echo "invalid initial Iceberg index: $EVO_BASE" >&2
+    exit 1
+fi
+cat > "$WORK_DIR/index-evolve.sql" <<SQL
+LOAD parquet;
+SELECT count(*) FROM root_build_index(
+    '$WORK_DIR/data/a.root', 'Events', '/TestEvent/vecHit/u', '$WORK_DIR/index_evolve',
+    dictionary := '$WORK_DIR/build/libTestEvent.so', catalog_mode := 'sqlite',
+    update_mode := 'extend', resume := true, index_threads := 1, allow_partial := false
+) WHERE status='OK';
+SQL
+if ROOT4DUCKDB_TEST_FAIL_AFTER_INDEX=1 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" \
+    -csv -noheader :memory: < "$WORK_DIR/index-evolve.sql" \
+    >"$WORK_DIR/index-evolve-interrupted.log" 2>&1; then
+    echo "interrupted ROOT path extension unexpectedly succeeded" >&2
+    exit 1
+fi
+EVO_OLD="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+SELECT count(*)=3 AND sum(value)=303 FROM read_root_dataset(
+    '$WORK_DIR/index_evolve', '/TestEvent/run', dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+SQL
+)"
+if [[ "$EVO_OLD" != "true" ]]; then
+    echo "interrupted extension damaged original ROOT path" >&2
+    exit 1
+fi
+EVO_RESULT="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+WITH built AS MATERIALIZED (
+    SELECT * FROM root_build_index(
+        '$WORK_DIR/data/a.root', 'Events', '/TestEvent/vecHit/u', '$WORK_DIR/index_evolve',
+        dictionary := '$WORK_DIR/build/libTestEvent.so', catalog_mode := 'sqlite',
+        update_mode := 'extend', resume := true, index_threads := 1, allow_partial := false
+    )
+)
+SELECT count(*)=1 AND bool_and(status='OK')
+    AND bool_and(message='recovered validated Parquet checkpoint') FROM built;
+SELECT count(*)=3 AND sum(value)=303 FROM read_root_dataset(
+    '$WORK_DIR/index_evolve', '/TestEvent/run', dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+SELECT count(*)>0 FROM read_root_dataset(
+    '$WORK_DIR/index_evolve', '/TestEvent/vecHit/u', dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+SELECT count(*)=3 AND sum(value)=303 FROM read_root_dataset(
+    '$WORK_DIR/index_evolve', '/TestEvent/run',
+    dictionary := '$WORK_DIR/build/libTestEvent.so', snapshot_id := '$EVO_SNAPSHOT'
+);
+SELECT count(DISTINCT root_snapshot_id)=2 FROM read_parquet(
+    '$WORK_DIR/index_evolve/warehouse/root_index/commits/data/*.parquet'
+) WHERE state='COMMITTED';
+SQL
+)"
+if [[ "$(printf '%s\n' "$EVO_RESULT" | grep -c '^true$')" != "5" ]]; then
+    echo "ROOT index extension/recovery failed: $EVO_RESULT" >&2
+    exit 1
+fi
+if "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/index-evolve.sql" >"$WORK_DIR/index-evolve-duplicate.log" 2>&1; then
+    echo "duplicate indexed ROOT path unexpectedly succeeded" >&2
+    exit 1
+fi
+cat > "$WORK_DIR/index-evolve-publish.sql" <<SQL
+LOAD parquet;
+SELECT count(*) FROM root_build_index(
+    '$WORK_DIR/data/a.root', 'Events', '/TestEvent/flags', '$WORK_DIR/index_evolve',
+    dictionary := '$WORK_DIR/build/libTestEvent.so', catalog_mode := 'sqlite',
+    update_mode := 'extend', resume := true, index_threads := 1, allow_partial := false
+) WHERE status='OK';
+SQL
+if ROOT4DUCKDB_TEST_FAIL_AFTER_ICEBERG_TABLE=baskets "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" \
+    -csv -noheader :memory: < "$WORK_DIR/index-evolve-publish.sql" \
+    >"$WORK_DIR/index-evolve-publish-interrupted.log" 2>&1; then
+    echo "partial Iceberg publication unexpectedly succeeded" >&2
+    exit 1
+fi
+EVO_PARTIAL="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+SELECT count(*)=3 AND sum(value)=303 FROM read_root_dataset(
+    '$WORK_DIR/index_evolve', '/TestEvent/run', dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+SELECT count(DISTINCT root_snapshot_id)=2 FROM read_parquet(
+    '$WORK_DIR/index_evolve/warehouse/root_index/commits/data/*.parquet'
+) WHERE state='COMMITTED';
+SQL
+)"
+if [[ "$(printf '%s\n' "$EVO_PARTIAL" | grep -c '^true$')" != "2" ]]; then
+    echo "uncommitted Iceberg generation became visible: $EVO_PARTIAL" >&2
+    exit 1
+fi
+EVO_RECOVER="$("$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+WITH built AS MATERIALIZED (
+    SELECT * FROM root_build_index(
+        '$WORK_DIR/data/a.root', 'Events', '/TestEvent/flags', '$WORK_DIR/index_evolve',
+        dictionary := '$WORK_DIR/build/libTestEvent.so', catalog_mode := 'sqlite',
+        update_mode := 'extend', resume := true, index_threads := 1, allow_partial := false
+    )
+)
+SELECT count(*)=1 AND bool_and(status='OK')
+    AND bool_and(message='recovered validated Parquet checkpoint') FROM built;
+SELECT count(*)=3 FROM read_root_dataset(
+    '$WORK_DIR/index_evolve', '/TestEvent/flags', dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+SELECT count(*)=3 AND sum(value)=303 FROM read_root_dataset(
+    '$WORK_DIR/index_evolve', '/TestEvent/run', dictionary := '$WORK_DIR/build/libTestEvent.so'
+);
+SELECT count(DISTINCT root_snapshot_id)=3 FROM read_parquet(
+    '$WORK_DIR/index_evolve/warehouse/root_index/commits/data/*.parquet'
+) WHERE state='COMMITTED';
+SQL
+)"
+if [[ "$(printf '%s\n' "$EVO_RECOVER" | grep -c '^true$')" != "4" ]]; then
+    echo "Iceberg multi-table commit replay failed: $EVO_RECOVER" >&2
+    exit 1
+fi
+echo "[OK] Iceberg path evolution, previous snapshots and interrupted publication replay" >&2
+
+
+# The common RootPathReader object page uses reusable numeric scratch buffers.
+# Compare every indexed tuple across multiple 2048-row pages against serialized.
+OBJECT_NUMERIC_PAGE_PARITY="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD parquet;
+WITH object_rows AS MATERIALIZED (
+    SELECT event_fk, entry_id, vecHit_idx, value
+    FROM read_root_dataset(
+        '$WORK_DIR/serialized_pager_index', '/TestEvent/vecHit/u',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        reader_mode := 'object'
+    )
+), serialized_rows AS MATERIALIZED (
+    SELECT event_fk, entry_id, vecHit_idx, value
+    FROM read_root_dataset(
+        '$WORK_DIR/serialized_pager_index', '/TestEvent/vecHit/u',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        reader_mode := 'serialized', raw_max_values_per_entry := 1
+    )
+)
+SELECT (SELECT count(*) FROM object_rows) = 4099
+       AND NOT EXISTS (SELECT * FROM object_rows EXCEPT ALL SELECT * FROM serialized_rows)
+       AND NOT EXISTS (SELECT * FROM serialized_rows EXCEPT ALL SELECT * FROM object_rows);
+SQL
+)"
+if [[ "$OBJECT_NUMERIC_PAGE_PARITY" != "true" ]]; then
+    echo "common ROOT numeric object page differs from serialized tuple oracle: $OBJECT_NUMERIC_PAGE_PARITY" >&2
+    exit 1
+fi
+echo "[OK] common ROOT object numeric page matches 4099 serialized indexed tuples" >&2
+
+# Regression: virtual index columns must remain correct after a 4099-value
+# entry crosses multiple SQL chunks; compare strict serialized and object rows.
+cat > "$WORK_DIR/direct-large-index-projection.sql" <<SQL
+WITH
+object_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'object'
+    )
+),
+serialized_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized',
+        raw_validation_entries := 0
+    )
+)
+SELECT (SELECT count(*) FROM serialized_rows) = 4099
+       AND (SELECT sum(vecHit_idx) FROM serialized_rows) = 8398851
+       AND (SELECT sum(u) FROM serialized_rows) = 8398851
+       AND NOT EXISTS (SELECT * FROM object_rows EXCEPT ALL SELECT * FROM serialized_rows)
+       AND NOT EXISTS (SELECT * FROM serialized_rows EXCEPT ALL SELECT * FROM object_rows);
+SQL
+LARGE_INDEX_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/direct-large-index-projection.sql")"
+if [[ "$LARGE_INDEX_RESULT" != "true" ]]; then
+    echo "direct cached index lookup diverged across ROOT object/serialized chunks: $LARGE_INDEX_RESULT" >&2
+    exit 1
+fi
+echo "[OK] 4099-row direct virtual indexes match ROOT object and serialized readers" >&2
+
+# Single projected fixed-member relation must stream from the shared numeric
+# reader in at least three bounded pages, without ROOT object fallback.
+DIRECT_PAGED_PROFILE="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+LOAD '$ROOT_EXTENSION';
+EXPLAIN ANALYZE
+SELECT sum(u) FROM read_root(
+    '$WORK_DIR/serialized_page.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit',
+    reader_mode := 'serialized', raw_validation_entries := 0,
+    raw_max_values_per_entry := 1
+) WHERE entry_id = 0;
+SQL
+)"
+DIRECT_PAGED_CALLS="$(profile_metric 'Serialized Page Calls' <<<"$DIRECT_PAGED_PROFILE" || true)"
+DIRECT_PAGED_OBJECT="$(profile_metric 'Object Fallback Entries' <<<"$DIRECT_PAGED_PROFILE" || true)"
+if [[ -z "$DIRECT_PAGED_CALLS" || "$DIRECT_PAGED_CALLS" -lt 3 ||
+      "$DIRECT_PAGED_OBJECT" != "0" ]]; then
+    echo "direct relation bypassed shared serialized numeric pages: $DIRECT_PAGED_PROFILE" >&2
+    exit 1
+fi
+echo "[OK] direct single-field FIXED_MEMBER uses shared bounded numeric pages" >&2
+
+# The selected semantic relation has two scalar siblings with identical
+# vecHit_idx coordinates. Both must stream in lockstep across 4099 values,
+# preserving complete rows across SQL vector boundaries.
+DIRECT_MULTI_PAGED_PARITY="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+WITH object_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u, exact_id
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit', reader_mode := 'object'
+    )
+), serialized_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u, exact_id
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized', raw_validation_entries := 0
+    )
+), auto_rows AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u, exact_id
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'auto', raw_validation_entries := 0
+    )
+)
+SELECT (SELECT count(*) FROM serialized_rows) = 4099
+       AND (SELECT count(*) FROM auto_rows) = 4099
+       AND NOT EXISTS (SELECT * FROM object_rows EXCEPT ALL SELECT * FROM serialized_rows)
+       AND NOT EXISTS (SELECT * FROM serialized_rows EXCEPT ALL SELECT * FROM object_rows)
+       AND NOT EXISTS (SELECT * FROM object_rows EXCEPT ALL SELECT * FROM auto_rows)
+       AND NOT EXISTS (SELECT * FROM auto_rows EXCEPT ALL SELECT * FROM object_rows);
+SQL
+)"
+if [[ "$DIRECT_MULTI_PAGED_PARITY" != "true" ]]; then
+    echo "paged multi-column ROOT relation differs from object oracle: $DIRECT_MULTI_PAGED_PARITY" >&2
+    exit 1
+fi
+DIRECT_MULTI_PAGED_PROFILE="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: <<SQL
+EXPLAIN ANALYZE
+SELECT sum(u), min(exact_id)
+FROM read_root(
+    '$WORK_DIR/serialized_page.root',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_prefix := '/TestEvent/vecHit',
+    reader_mode := 'serialized', raw_validation_entries := 0
+)
+WHERE entry_id = 0;
+SQL
+)"
+DIRECT_MULTI_PAGES="$(profile_metric 'Serialized Multi-Column Pages' <<<"$DIRECT_MULTI_PAGED_PROFILE" || true)"
+DIRECT_MULTI_OBJECT="$(profile_metric 'Object Fallback Entries' <<<"$DIRECT_MULTI_PAGED_PROFILE" || true)"
+if [[ -z "$DIRECT_MULTI_PAGES" || "$DIRECT_MULTI_PAGES" -lt 3 ||
+      "$DIRECT_MULTI_OBJECT" != "0" ]]; then
+    echo "direct scalar siblings did not stream synchronized pages: $DIRECT_MULTI_PAGED_PROFILE" >&2
+    exit 1
+fi
+echo "[OK] direct two-column ROOT relation streams 4099 exact indexed tuples in common pages" >&2
+
+# Evaluate event-only predicates once per ROOT page; retain nested row semantics.
+cat > "$WORK_DIR/direct-entry-filter-partition.sql" <<SQL
+LOAD '$ROOT_EXTENSION';
+WITH oracle AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, params_idx, Cov_idx, Cov
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit/params/Cov',
+        reader_mode := 'object'
+    )
+    WHERE entry_id < 2 AND Cov_idx = 1 AND Cov > 0
+), actual AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, params_idx, Cov_idx, Cov
+    FROM read_root(
+        '$WORK_DIR/data/ancestor.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit/params/Cov',
+        reader_mode := 'serialized', raw_validation_entries := 0
+    )
+    WHERE entry_id < 2 AND Cov_idx = 1 AND Cov > 0
+)
+SELECT (SELECT count(*) FROM actual) > 0
+       AND NOT EXISTS (SELECT * FROM oracle EXCEPT ALL SELECT * FROM actual)
+       AND NOT EXISTS (SELECT * FROM actual EXCEPT ALL SELECT * FROM oracle);
+WITH oracle AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit', reader_mode := 'object'
+    )
+    WHERE entry_id = 0 AND vecHit_idx BETWEEN 1023 AND 3073 AND u > 1024
+), actual AS MATERIALIZED (
+    SELECT entry_id, vecHit_idx, u
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized', raw_validation_entries := 0
+    )
+    WHERE entry_id = 0 AND vecHit_idx BETWEEN 1023 AND 3073 AND u > 1024
+)
+SELECT (SELECT count(*) FROM actual) = 2049
+       AND NOT EXISTS (SELECT * FROM oracle EXCEPT ALL SELECT * FROM actual)
+       AND NOT EXISTS (SELECT * FROM actual EXCEPT ALL SELECT * FROM oracle);
+-- Filtering a virtual index must work even when the index is not projected.
+WITH oracle AS MATERIALIZED (
+    SELECT u
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit', reader_mode := 'object'
+    )
+    WHERE entry_id = 0 AND vecHit_idx BETWEEN 1023 AND 3073 AND u > 1024
+), actual AS MATERIALIZED (
+    SELECT u
+    FROM read_root(
+        '$WORK_DIR/serialized_page.root',
+        dictionary := '$WORK_DIR/build/libTestEvent.so',
+        path_prefix := '/TestEvent/vecHit',
+        reader_mode := 'serialized', raw_validation_entries := 0
+    )
+    WHERE entry_id = 0 AND vecHit_idx BETWEEN 1023 AND 3073 AND u > 1024
+)
+SELECT (SELECT count(*) FROM actual) = 2049
+       AND NOT EXISTS (SELECT * FROM oracle EXCEPT ALL SELECT * FROM actual)
+       AND NOT EXISTS (SELECT * FROM actual EXCEPT ALL SELECT * FROM oracle);
+SQL
+DIRECT_ENTRY_FILTER_RESULT="$(MALLOC_CHECK_=3 "$DUCKDB_BIN" "${DUCKDB_ARGS[@]}" -csv -noheader :memory: \
+    < "$WORK_DIR/direct-entry-filter-partition.sql")"
+if [[ $(grep -c '^true$' <<< "$DIRECT_ENTRY_FILTER_RESULT") -ne 3 ]]; then
+    echo "direct event/value filter parity failed: $DIRECT_ENTRY_FILTER_RESULT" >&2
+    exit 1
+fi
+echo "[OK] direct event-only and per-value filters preserve exact tuples" >&2
 
 cat > "$WORK_DIR/catalog-publication.sql" <<SQL
 LOAD parquet;
@@ -1515,6 +2416,16 @@ FROM read_root_dataset(
     'main.published_root',
     '/TestEvent/vecHit/u',
     dictionary := '$WORK_DIR/build/libTestEvent.so',
+    path_predicates := '[{"path":"/TestEvent/run","op":"=","value":102},{"path":"/TestEvent/vecHit/u","op":">","value":10,"quantifier":"any"}]'
+);
+-- Predicate and selected-value projections may share a physical ROOT basket.
+-- Strict serialized mode must preserve event-level ANY semantics without GetEntry.
+SELECT count(*) = 1 AND min(event_fk) = 2 AND max(event_fk) = 2 AND sum(value) = 11
+FROM read_root_dataset(
+    'main.published_root',
+    '/TestEvent/vecHit/u',
+    dictionary := '$WORK_DIR/build/libTestEvent.so',
+    reader_mode := 'serialized',
     path_predicates := '[{"path":"/TestEvent/run","op":"=","value":102},{"path":"/TestEvent/vecHit/u","op":">","value":10,"quantifier":"any"}]'
 );
 EXPLAIN ANALYZE

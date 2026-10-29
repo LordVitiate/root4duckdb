@@ -3,6 +3,8 @@
 #include "root4duckdb/core/root_headers.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace duckdb::rootlake
@@ -10,6 +12,25 @@ namespace duckdb::rootlake
 
 namespace
 {
+
+bool CheckedPrimitiveCount(double raw, int& count) noexcept
+{
+    if (!std::isfinite(raw) || raw < 0.0 || raw > static_cast<double>(std::numeric_limits<int32_t>::max()) ||
+        std::trunc(raw) != raw)
+    {
+        return false;
+    }
+    count = static_cast<int>(raw);
+    return true;
+}
+
+template <class T> T ReadLeafScratch(const std::max_align_t* scratch, uint64_t index) noexcept
+{
+    T value{};
+    const auto* bytes = reinterpret_cast<const unsigned char*>(scratch);
+    std::memcpy(&value, bytes + static_cast<size_t>(index) * sizeof(T), sizeof(T));
+    return value;
+}
 
 void AppendFixedCoordinates(uint64_t flat, const std::vector<uint32_t>& dimensions, std::vector<int32_t>& indices)
 {
@@ -63,6 +84,11 @@ bool SerializedBasketReader::DecodeLeafBranchEntry(uint64_t entry, std::vector<R
     if (branch_element && branch_element->GetBranchCount2())
     {
         failure_reason = "split variable-length primitive member has a second count branch";
+        return false;
+    }
+    if (entry > static_cast<uint64_t>(std::numeric_limits<Long64_t>::max()))
+    {
+        failure_reason = "ROOT primitive branch entry exceeds the supported entry range";
         return false;
     }
     const auto root_entry = static_cast<Long64_t>(entry);
@@ -158,12 +184,11 @@ bool SerializedBasketReader::DecodeLeafBranchEntry(uint64_t entry, std::vector<R
             // Counted primitive members instead point at a scalar counter;
             // its GetNdata() is one, while GetValue() is the actual length.
             const auto counted = count_read->value;
-            if (counted < 0.0 || counted > static_cast<double>(std::numeric_limits<int32_t>::max()))
+            if (!CheckedPrimitiveCount(counted, object_count))
             {
                 failure_reason = "primitive branch collection count is outside the supported range";
                 return false;
             }
-            object_count = static_cast<int>(counted);
         }
     }
     else if (count_leaf)
@@ -175,12 +200,11 @@ bool SerializedBasketReader::DecodeLeafBranchEntry(uint64_t entry, std::vector<R
             return false;
         }
         const auto counted = count_read->value;
-        if (counted < 0.0 || counted > static_cast<double>(std::numeric_limits<int32_t>::max()))
+        if (!CheckedPrimitiveCount(counted, object_count))
         {
             failure_reason = "primitive branch collection count is outside the supported range";
             return false;
         }
-        object_count = static_cast<int>(counted);
     }
     const auto logical_type = RootTypeToScanLogicalType(plan.value_type, false, true);
     uint64_t fixed_length = 1;
@@ -229,6 +253,11 @@ bool SerializedBasketReader::DecodeLeafBranchEntry(uint64_t entry, std::vector<R
     values.reserve(static_cast<size_t>(count));
     if (collect_indices)
     {
+        if (plan.index_depth && count > flat_indices.max_size() / plan.index_depth)
+        {
+            failure_reason = "primitive branch index dimensions exceed the host capacity";
+            return false;
+        }
         flat_indices.reserve(static_cast<size_t>(count * plan.index_depth));
     }
     const auto* scratch = leaf_scratch.data();
@@ -237,38 +266,37 @@ bool SerializedBasketReader::DecodeLeafBranchEntry(uint64_t entry, std::vector<R
         switch (logical_type.id())
         {
         case LogicalTypeId::BOOLEAN:
-            values.push_back(RootPrimitiveValue::Unsigned(reinterpret_cast<const bool*>(scratch)[index] ? 1U : 0U));
+            values.push_back(RootPrimitiveValue::Unsigned((ReadLeafScratch<uint8_t>(scratch, index) != 0) ? 1U : 0U));
             break;
         case LogicalTypeId::UTINYINT:
-            values.push_back(RootPrimitiveValue::Unsigned(reinterpret_cast<const uint8_t*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Unsigned(ReadLeafScratch<uint8_t>(scratch, index)));
             break;
         case LogicalTypeId::USMALLINT:
-            values.push_back(RootPrimitiveValue::Unsigned(reinterpret_cast<const uint16_t*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Unsigned(ReadLeafScratch<uint16_t>(scratch, index)));
             break;
         case LogicalTypeId::UINTEGER:
-            values.push_back(RootPrimitiveValue::Unsigned(reinterpret_cast<const uint32_t*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Unsigned(ReadLeafScratch<uint32_t>(scratch, index)));
             break;
         case LogicalTypeId::UBIGINT:
-            values.push_back(RootPrimitiveValue::Unsigned(reinterpret_cast<const uint64_t*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Unsigned(ReadLeafScratch<uint64_t>(scratch, index)));
             break;
         case LogicalTypeId::TINYINT:
-            values.push_back(RootPrimitiveValue::Signed(reinterpret_cast<const int8_t*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Signed(ReadLeafScratch<int8_t>(scratch, index)));
             break;
         case LogicalTypeId::SMALLINT:
-            values.push_back(RootPrimitiveValue::Signed(reinterpret_cast<const int16_t*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Signed(ReadLeafScratch<int16_t>(scratch, index)));
             break;
         case LogicalTypeId::INTEGER:
-            values.push_back(RootPrimitiveValue::Signed(reinterpret_cast<const int32_t*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Signed(ReadLeafScratch<int32_t>(scratch, index)));
             break;
         case LogicalTypeId::BIGINT:
-            values.push_back(RootPrimitiveValue::Signed(reinterpret_cast<const int64_t*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Signed(ReadLeafScratch<int64_t>(scratch, index)));
             break;
         case LogicalTypeId::FLOAT:
-            values.push_back(
-                RootPrimitiveValue::Floating(static_cast<double>(reinterpret_cast<const float*>(scratch)[index])));
+            values.push_back(RootPrimitiveValue::Floating(static_cast<double>(ReadLeafScratch<float>(scratch, index))));
             break;
         case LogicalTypeId::DOUBLE:
-            values.push_back(RootPrimitiveValue::Floating(reinterpret_cast<const double*>(scratch)[index]));
+            values.push_back(RootPrimitiveValue::Floating(ReadLeafScratch<double>(scratch, index)));
             break;
         default:
             failure_reason = "primitive physical branch has an unsupported logical type";

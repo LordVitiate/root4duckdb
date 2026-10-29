@@ -8,5 +8,6 @@ list(APPEND ROOT4DUCKDB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/root_index_publish.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_index_bind.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/root_index_coordinator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/root_index_evolution.cpp
 )
 set(ROOT4DUCKDB_SOURCES ${ROOT4DUCKDB_SOURCES} PARENT_SCOPE)

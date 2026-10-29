@@ -28,13 +28,13 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
         bool passes = true;
         if (gstate.filters)
         {
-            for (const auto& filter : gstate.filters->filters)
+            for (const auto& filter : *gstate.filters)
             {
-                if (filter.first >= gstate.scan_column_ids.size())
+                if (filter.GetIndex().GetIndex() >= gstate.scan_column_ids.size())
                 {
                     continue;
                 }
-                const auto column = gstate.scan_column_ids[filter.first];
+                const auto column = gstate.scan_column_ids[filter.GetIndex().GetIndex()];
                 rootlake::RootScalarActual actual;
                 if (column == COLUMN_IDENTIFIER_ROW_ID)
                 {
@@ -48,7 +48,7 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
                 {
                     actual = rootlake::RootScalarActual ::Null(LogicalType::SQLNULL);
                 }
-                if (!lstate.filter_evaluator.Evaluate(context, *filter.second, actual))
+                if (!lstate.filter_evaluator.Evaluate(context, filter.Filter(), actual))
                 {
                     passes = false;
                     break;
@@ -65,8 +65,8 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
             auto& vector = output.data[output_index];
             if (column == COLUMN_IDENTIFIER_ROW_ID)
             {
-                FlatVector::GetData<int64_t>(vector)[output_count] = static_cast<int64_t>(row);
-                FlatVector::Validity(vector).SetValid(output_count);
+                FlatVector::GetDataMutable<int64_t>(vector)[output_count] = static_cast<int64_t>(row);
+                FlatVector::ValidityMutable(vector).SetValid(output_count);
             }
             else if (column < row_values.size())
             {
@@ -74,12 +74,12 @@ void RootScanExecutor::ProcessHistogramMode(ClientContext& context, const RootSc
             }
             else
             {
-                FlatVector::Validity(vector).SetInvalid(output_count);
+                FlatVector::ValidityMutable(vector).SetInvalid(output_count);
             }
         }
         ++output_count;
     }
-    output.SetCardinality(output_count);
+    output.SetCardinalityUnsafe(output_count);
 }
 
 void RootScanExecutor::ProcessBrowseMode(ClientContext& context, const RootScanBindData& bind_data,
@@ -96,7 +96,7 @@ void RootScanExecutor::ProcessBrowseMode(ClientContext& context, const RootScanB
     const size_t start = gstate.browse_offset;
     if (start >= children.size())
     {
-        output.SetCardinality(0);
+        output.SetCardinalityUnsafe(0);
         return;
     }
     size_t count = 0;
@@ -106,18 +106,18 @@ void RootScanExecutor::ProcessBrowseMode(ClientContext& context, const RootScanB
         bool passes = true;
         if (gstate.filters)
         {
-            for (const auto& filter : gstate.filters->filters)
+            for (const auto& filter : *gstate.filters)
             {
-                if (filter.first >= gstate.scan_column_ids.size())
+                if (filter.GetIndex().GetIndex() >= gstate.scan_column_ids.size())
                 {
                     continue;
                 }
-                const auto column = gstate.scan_column_ids[filter.first];
+                const auto column = gstate.scan_column_ids[filter.GetIndex().GetIndex()];
                 const auto actual = column == COLUMN_IDENTIFIER_ROW_ID
                                         ? rootlake::RootScalarActual::Event(i)
                                         : (column == 0 ? rootlake::RootScalarActual::String(children[i])
                                                        : rootlake::RootScalarActual::Null(LogicalType::SQLNULL));
-                if (!lstate.filter_evaluator.Evaluate(context, *filter.second, actual))
+                if (!lstate.filter_evaluator.Evaluate(context, filter.Filter(), actual))
                 {
                     passes = false;
                     break;
@@ -134,23 +134,23 @@ void RootScanExecutor::ProcessBrowseMode(ClientContext& context, const RootScanB
             const auto column = gstate.output_column_ids[output_index];
             if (column == 0)
             {
-                FlatVector::GetData<string_t>(vector)[count] = StringVector::AddString(vector, children[i]);
-                FlatVector::Validity(vector).SetValid(count);
+                FlatVector::GetDataMutable<string_t>(vector)[count] = StringVector::AddString(vector, children[i]);
+                FlatVector::ValidityMutable(vector).SetValid(count);
             }
             else if (column == COLUMN_IDENTIFIER_ROW_ID)
             {
-                FlatVector::GetData<int64_t>(vector)[count] = static_cast<int64_t>(i);
-                FlatVector::Validity(vector).SetValid(count);
+                FlatVector::GetDataMutable<int64_t>(vector)[count] = static_cast<int64_t>(i);
+                FlatVector::ValidityMutable(vector).SetValid(count);
             }
             else
             {
-                FlatVector::Validity(vector).SetInvalid(count);
+                FlatVector::ValidityMutable(vector).SetInvalid(count);
             }
         }
         ++count;
     }
     gstate.browse_offset = i;
-    output.SetCardinality(count);
+    output.SetCardinalityUnsafe(count);
 }
 
 rootlake::RootScalarActual PrimitiveScalarActual(const LogicalType& logical_type,

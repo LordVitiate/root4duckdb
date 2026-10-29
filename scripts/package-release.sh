@@ -268,7 +268,7 @@ fi
     printf 'DUCKDB_C_API_VERSION=%s\n' \
         "$duckdb_version"
     printf 'DUCKDB_BUILD_VERSION=%s\n' \
-        "${DUCKDB_VERSION:-v1.5.6}"
+        "${DUCKDB_VERSION:-v2.0.0}"
     printf 'DUCKDB_PLATFORM=%s\n' \
         "$platform"
     printf 'DUCKDB_EXTENSION_ABI=%s\n' \

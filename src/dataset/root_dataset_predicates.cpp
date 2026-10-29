@@ -1,12 +1,18 @@
 #include "root4duckdb/dataset/root_dataset_pruning.hpp"
 
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+
 namespace duckdb::rootlake
 {
 
 static std::optional<double> FilterConstantAsPhysicalDouble(const Value& value, const LogicalType& physical_type)
 {
-    if (value.IsNull())
+    if (value.IsNull() || value.type() != physical_type)
     {
+        // Metadata pruning may not cast away fractional or out-of-range constants.
         return std::nullopt;
     }
     try
@@ -66,7 +72,7 @@ static std::string NumberSQL(double value)
 
 static std::optional<std::string> FilterConstantSQL(const Value& value, const LogicalType& physical_type)
 {
-    if (value.IsNull())
+    if (value.IsNull() || value.type() != physical_type)
     {
         return std::nullopt;
     }
@@ -121,155 +127,30 @@ static std::optional<std::string> FilterConstantSQL(const Value& value, const Lo
     }
 }
 
-std::string ZonemapClause(const TableFilter& filter, const std::string& min_expr, const std::string& max_expr,
-                          const LogicalType& physical_type)
-{
-    switch (filter.filter_type)
-    {
-    case TableFilterType::CONSTANT_COMPARISON:
-    {
-        const auto& constant = filter.Cast<ConstantFilter>();
-        auto literal = FilterConstantSQL(constant.constant, physical_type);
-        if (!literal)
-        {
-            return {};
-        }
-        switch (constant.comparison_type)
-        {
-        case ExpressionType::COMPARE_EQUAL:
-            return min_expr + " <= " + *literal + " AND " + max_expr + " >= " + *literal;
-        case ExpressionType::COMPARE_LESSTHAN:
-            return min_expr + " < " + *literal;
-        case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-            return min_expr + " <= " + *literal;
-        case ExpressionType::COMPARE_GREATERTHAN:
-            return max_expr + " > " + *literal;
-        case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-            return max_expr + " >= " + *literal;
-        default:
-            return {};
-        }
-    }
-    case TableFilterType::IN_FILTER:
-    {
-        const auto& in_filter = filter.Cast<InFilter>();
-        std::vector<std::string> clauses;
-        for (const auto& constant : in_filter.values)
-        {
-            auto literal = FilterConstantSQL(constant, physical_type);
-            if (!literal)
-            {
-                return {};
-            }
-            clauses.push_back("(" + min_expr + " <= " + *literal + " AND " + max_expr + " >= " + *literal + ")");
-        }
-        std::string out;
-        for (idx_t i = 0; i < clauses.size(); ++i)
-        {
-            if (i)
-            {
-                out += " OR ";
-            }
-            out += clauses[i];
-        }
-        return out;
-    }
-    case TableFilterType::OPTIONAL_FILTER:
-    {
-        const auto& optional = filter.Cast<OptionalFilter>();
-        return optional.child_filter ? ZonemapClause(*optional.child_filter, min_expr, max_expr, physical_type)
-                                     : std::string();
-    }
-    case TableFilterType::DYNAMIC_FILTER:
-    {
-        const auto& dynamic = filter.Cast<DynamicFilter>();
-        if (!dynamic.filter_data)
-        {
-            return {};
-        }
-        const lock_guard<mutex> guard(dynamic.filter_data->lock);
-        if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
-        {
-            return {};
-        }
-        return ZonemapClause(*dynamic.filter_data->filter, min_expr, max_expr, physical_type);
-    }
-    case TableFilterType::CONJUNCTION_AND:
-    {
-        const auto& conjunction = filter.Cast<ConjunctionAndFilter>();
-        std::vector<std::string> clauses;
-        for (const auto& child : conjunction.child_filters)
-        {
-            auto clause = ZonemapClause(*child, min_expr, max_expr, physical_type);
-            if (!clause.empty())
-            {
-                clauses.push_back("(" + clause + ")");
-            }
-        }
-        std::string out;
-        for (idx_t i = 0; i < clauses.size(); ++i)
-        {
-            if (i)
-            {
-                out += " AND ";
-            }
-            out += clauses[i];
-        }
-        return out;
-    }
-    case TableFilterType::CONJUNCTION_OR:
-    {
-        const auto& conjunction = filter.Cast<ConjunctionOrFilter>();
-        std::vector<std::string> clauses;
-        for (const auto& child : conjunction.child_filters)
-        {
-            auto clause = ZonemapClause(*child, min_expr, max_expr, physical_type);
-            if (clause.empty())
-            {
-                return {};
-            }
-            clauses.push_back("(" + clause + ")");
-        }
-        std::string out;
-        for (idx_t i = 0; i < clauses.size(); ++i)
-        {
-            if (i)
-            {
-                out += " OR ";
-            }
-            out += clauses[i];
-        }
-        return out;
-    }
-    default:
-        return {};
-    }
-}
-
-static bool BloomMayContain(const string& bytes, double value)
-{
-    return RootBloomFilter::MayContain(bytes, value);
-}
-
 static std::optional<Value> ConstantExpressionValue(const Expression& expression)
 {
-    if (expression.expression_class == ExpressionClass::BOUND_CONSTANT)
+    if (expression.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT)
     {
-        return expression.Cast<BoundConstantExpression>().value;
+        return expression.Cast<BoundConstantExpression>().GetValue();
     }
-    if (expression.expression_class == ExpressionClass::BOUND_CAST)
+    if (expression.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION &&
+        expression.GetExpressionType() == ExpressionType::OPERATOR_CAST)
     {
-        const auto& cast = expression.Cast<BoundCastExpression>();
-        auto child = ConstantExpressionValue(*cast.child);
-        if (!child)
+        const auto& cast = expression.Cast<BoundFunctionExpression>();
+        if (cast.GetChildren().size() != 1)
+        {
+            return std::nullopt;
+        }
+        const auto value = ConstantExpressionValue(*cast.GetChildren()[0]);
+        if (!value)
         {
             return std::nullopt;
         }
         try
         {
-            return child->DefaultCastAs(expression.return_type);
+            return value->DefaultCastAs(expression.GetReturnType());
         }
-        catch (...)
+        catch (const Exception&)
         {
             return std::nullopt;
         }
@@ -277,17 +158,217 @@ static std::optional<Value> ConstantExpressionValue(const Expression& expression
     return std::nullopt;
 }
 
-static bool ExtractEqualityConstants(const Expression& expression, std::vector<Value>& values)
+static bool ColumnComparison(const Expression& expression, ExpressionType& type, Value& constant)
 {
-    if (expression.expression_class == ExpressionClass::BOUND_CONJUNCTION &&
-        expression.type == ExpressionType::CONJUNCTION_OR)
+    if (expression.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION ||
+        !RootIsComparison(expression.GetExpressionType()))
     {
-        const auto& conjunction = expression.Cast<BoundConjunctionExpression>();
-        if (conjunction.children.empty())
+        return false;
+    }
+    const auto& args = expression.Cast<BoundFunctionExpression>().GetChildren();
+    if (args.size() != 2)
+    {
+        return false;
+    }
+    type = expression.GetExpressionType();
+    if (RootIsColumnReference(*args[0]))
+    {
+        const auto value = ConstantExpressionValue(*args[1]);
+        if (!value || value->IsNull())
         {
             return false;
         }
-        for (const auto& child : conjunction.children)
+        constant = *value;
+        return true;
+    }
+    if (RootIsColumnReference(*args[1]))
+    {
+        const auto value = ConstantExpressionValue(*args[0]);
+        if (!value || value->IsNull())
+        {
+            return false;
+        }
+        type = RootReverseComparison(type);
+        constant = *value;
+        return true;
+    }
+    return false;
+}
+
+static bool InConstants(const Expression& expression, std::vector<Value>& values)
+{
+    if (expression.GetExpressionClass() != ExpressionClass::BOUND_OPERATOR ||
+        expression.GetExpressionType() != ExpressionType::COMPARE_IN)
+    {
+        return false;
+    }
+    const auto& children = expression.Cast<BoundOperatorExpression>().GetChildren();
+    if (children.size() < 2 || !RootIsColumnReference(*children[0]))
+    {
+        return false;
+    }
+    for (idx_t i = 1; i < children.size(); ++i)
+    {
+        auto constant = ConstantExpressionValue(*children[i]);
+        if (!constant)
+        {
+            return false;
+        }
+        if (!constant->IsNull())
+        {
+            values.push_back(std::move(*constant));
+        }
+    }
+    return true;
+}
+
+static std::string ComparisonZonemapClause(ExpressionType type, const Value& value, const std::string& min_expr,
+                                           const std::string& max_expr, const LogicalType& physical_type)
+{
+    auto literal = FilterConstantSQL(value, physical_type);
+    if (!literal)
+    {
+        return {};
+    }
+    switch (type)
+    {
+    case ExpressionType::COMPARE_EQUAL:
+        return min_expr + " <= " + *literal + " AND " + max_expr + " >= " + *literal;
+    case ExpressionType::COMPARE_LESSTHAN:
+        return min_expr + " < " + *literal;
+    case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+        return min_expr + " <= " + *literal;
+    case ExpressionType::COMPARE_GREATERTHAN:
+        return max_expr + " > " + *literal;
+    case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+        return max_expr + " >= " + *literal;
+    default:
+        return {};
+    }
+}
+
+static std::string JoinClauses(const std::vector<std::string>& clauses, const std::string& op)
+{
+    std::string result;
+    for (const auto& clause : clauses)
+    {
+        if (!result.empty())
+        {
+            result += op;
+        }
+        result += "(" + clause + ")";
+    }
+    return result;
+}
+
+static std::string ZonemapExpressionClause(const Expression& expr, const std::string& min_expr,
+                                           const std::string& max_expr, const LogicalType& physical_type)
+{
+    ExpressionType type;
+    Value constant;
+    if (ColumnComparison(expr, type, constant))
+    {
+        return ComparisonZonemapClause(type, constant, min_expr, max_expr, physical_type);
+    }
+    if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION &&
+        expr.GetExpressionType() == ExpressionType::COMPARE_BETWEEN)
+    {
+        const auto& between = expr.Cast<BoundFunctionExpression>();
+        const auto& args = between.GetChildren();
+        if (args.size() != 3 || !RootIsColumnReference(*args[0]))
+        {
+            return {};
+        }
+        const auto lower = ConstantExpressionValue(*args[1]);
+        const auto upper = ConstantExpressionValue(*args[2]);
+        if (!lower || !upper)
+        {
+            return {};
+        }
+        const auto first = ComparisonZonemapClause(ExpressionType::COMPARE_GREATERTHANOREQUALTO, *lower, min_expr,
+                                                   max_expr, physical_type);
+        const auto second = ComparisonZonemapClause(ExpressionType::COMPARE_LESSTHANOREQUALTO, *upper, min_expr,
+                                                    max_expr, physical_type);
+        return first.empty() || second.empty() ? std::string() : "(" + first + ") AND (" + second + ")";
+    }
+    std::vector<Value> values;
+    if (InConstants(expr, values))
+    {
+        std::vector<std::string> clauses;
+        for (const auto& value : values)
+        {
+            auto clause =
+                ComparisonZonemapClause(ExpressionType::COMPARE_EQUAL, value, min_expr, max_expr, physical_type);
+            if (clause.empty())
+            {
+                return {};
+            }
+            clauses.push_back(std::move(clause));
+        }
+        return clauses.empty() ? "FALSE" : JoinClauses(clauses, " OR ");
+    }
+    if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION)
+    {
+        const auto& conjunction = expr.Cast<BoundConjunctionExpression>();
+        const auto is_and = expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND;
+        const auto is_or = expr.GetExpressionType() == ExpressionType::CONJUNCTION_OR;
+        if (!is_and && !is_or)
+        {
+            return {};
+        }
+        std::vector<std::string> clauses;
+        for (const auto& child : conjunction.GetChildren())
+        {
+            const auto clause = ZonemapExpressionClause(*child, min_expr, max_expr, physical_type);
+            if (clause.empty())
+            {
+                if (is_or)
+                {
+                    return {};
+                }
+                continue;
+            }
+            clauses.push_back(clause);
+        }
+        return JoinClauses(clauses, is_and ? " AND " : " OR ");
+    }
+    return {};
+}
+
+std::string ZonemapClause(const TableFilter& filter, const std::string& min_expr, const std::string& max_expr,
+                          const LogicalType& physical_type)
+{
+    const auto* expression = RootFilterMetadataExpression(filter);
+    return expression ? ZonemapExpressionClause(*expression, min_expr, max_expr, physical_type) : std::string{};
+}
+
+static bool BloomMayContain(const string& bytes, double value)
+{
+    return RootBloomFilter::MayContain(bytes, value);
+}
+
+static bool ExtractEqualityConstants(const Expression& expr, std::vector<Value>& values)
+{
+    ExpressionType type;
+    Value constant;
+    if (ColumnComparison(expr, type, constant) && type == ExpressionType::COMPARE_EQUAL)
+    {
+        values.push_back(std::move(constant));
+        return true;
+    }
+    if (InConstants(expr, values))
+    {
+        return true;
+    }
+    if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+        expr.GetExpressionType() == ExpressionType::CONJUNCTION_OR)
+    {
+        const auto& conjunction = expr.Cast<BoundConjunctionExpression>();
+        if (conjunction.GetChildren().empty())
+        {
+            return false;
+        }
+        for (const auto& child : conjunction.GetChildren())
         {
             if (!ExtractEqualityConstants(*child, values))
             {
@@ -295,42 +376,6 @@ static bool ExtractEqualityConstants(const Expression& expression, std::vector<V
             }
         }
         return true;
-    }
-    if (expression.expression_class == ExpressionClass::BOUND_COMPARISON &&
-        expression.type == ExpressionType::COMPARE_EQUAL)
-    {
-        const auto& comparison = expression.Cast<BoundComparisonExpression>();
-        auto left = ConstantExpressionValue(*comparison.left);
-        auto right = ConstantExpressionValue(*comparison.right);
-        if (left && !right)
-        {
-            values.push_back(*left);
-            return true;
-        }
-        if (right && !left)
-        {
-            values.push_back(*right);
-            return true;
-        }
-        return false;
-    }
-    if (expression.expression_class == ExpressionClass::BOUND_OPERATOR && expression.type == ExpressionType::COMPARE_IN)
-    {
-        const auto& op = expression.Cast<BoundOperatorExpression>();
-        if (op.children.size() < 2)
-        {
-            return false;
-        }
-        for (idx_t i = 1; i < op.children.size(); ++i)
-        {
-            auto value = ConstantExpressionValue(*op.children[i]);
-            if (!value)
-            {
-                return false;
-            }
-            values.push_back(*value);
-        }
-        return !values.empty();
     }
     return false;
 }
@@ -341,156 +386,36 @@ bool BloomMayContainFilter(const TableFilter& filter, const string& bytes, const
     {
         return true;
     }
-    switch (filter.filter_type)
+    const auto* expression = RootFilterMetadataExpression(filter);
+    if (!expression)
     {
-    case TableFilterType::CONSTANT_COMPARISON:
-    {
-        const auto& constant = filter.Cast<ConstantFilter>();
-        if (constant.comparison_type != ExpressionType::COMPARE_EQUAL)
-        {
-            return true;
-        }
-        auto value = FilterConstantAsPhysicalDouble(constant.constant, physical_type);
-        return !value || BloomMayContain(bytes, *value);
-    }
-    case TableFilterType::IN_FILTER:
-    {
-        const auto& in_filter = filter.Cast<InFilter>();
-        for (const auto& constant : in_filter.values)
-        {
-            auto value = FilterConstantAsPhysicalDouble(constant, physical_type);
-            if (!value)
-            {
-                return true;
-            }
-            if (BloomMayContain(bytes, *value))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-    case TableFilterType::OPTIONAL_FILTER:
-    {
-        const auto& optional = filter.Cast<OptionalFilter>();
-        return !optional.child_filter || BloomMayContainFilter(*optional.child_filter, bytes, physical_type);
-    }
-    case TableFilterType::DYNAMIC_FILTER:
-    {
-        const auto& dynamic = filter.Cast<DynamicFilter>();
-        if (!dynamic.filter_data)
-        {
-            return true;
-        }
-        const lock_guard<mutex> guard(dynamic.filter_data->lock);
-        if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
-        {
-            return true;
-        }
-        return BloomMayContainFilter(*dynamic.filter_data->filter, bytes, physical_type);
-    }
-    case TableFilterType::CONJUNCTION_AND:
-    {
-        const auto& conjunction = filter.Cast<ConjunctionAndFilter>();
-        for (const auto& child : conjunction.child_filters)
-        {
-            if (!BloomMayContainFilter(*child, bytes, physical_type))
-            {
-                return false;
-            }
-        }
         return true;
     }
-    case TableFilterType::CONJUNCTION_OR:
+    std::vector<Value> constants;
+    if (!ExtractEqualityConstants(*expression, constants))
     {
-        const auto& conjunction = filter.Cast<ConjunctionOrFilter>();
-        for (const auto& child : conjunction.child_filters)
-        {
-            if (BloomMayContainFilter(*child, bytes, physical_type))
-            {
-                return true;
-            }
-        }
-        return false;
+        return true;
     }
-    case TableFilterType::EXPRESSION_FILTER:
+    for (const auto& constant : constants)
     {
-        const auto& expression = filter.Cast<ExpressionFilter>();
-        std::vector<Value> constants;
-        if (!expression.expr || !ExtractEqualityConstants(*expression.expr, constants))
+        const auto value = FilterConstantAsPhysicalDouble(constant, physical_type);
+        if (!value || BloomMayContain(bytes, *value))
         {
             return true;
         }
-        for (const auto& constant : constants)
-        {
-            auto value = FilterConstantAsPhysicalDouble(constant, physical_type);
-            if (!value || BloomMayContain(bytes, *value))
-            {
-                return true;
-            }
-        }
-        return false;
     }
-    default:
-        return true;
-    }
+    return false;
 }
 
 bool FilterNeedsBloom(const TableFilter& filter)
 {
-    switch (filter.filter_type)
+    const auto* expression = RootFilterMetadataExpression(filter);
+    if (!expression)
     {
-    case TableFilterType::CONSTANT_COMPARISON:
-        return filter.Cast<ConstantFilter>().comparison_type == ExpressionType::COMPARE_EQUAL;
-    case TableFilterType::IN_FILTER:
-        return true;
-    case TableFilterType::OPTIONAL_FILTER:
-    {
-        const auto& optional = filter.Cast<OptionalFilter>();
-        return optional.child_filter && FilterNeedsBloom(*optional.child_filter);
-    }
-    case TableFilterType::DYNAMIC_FILTER:
-    {
-        const auto& dynamic = filter.Cast<DynamicFilter>();
-        if (!dynamic.filter_data)
-        {
-            return false;
-        }
-        const lock_guard<mutex> guard(dynamic.filter_data->lock);
-        return dynamic.filter_data->initialized && dynamic.filter_data->filter &&
-               FilterNeedsBloom(*dynamic.filter_data->filter);
-    }
-    case TableFilterType::CONJUNCTION_AND:
-    {
-        for (const auto& child : filter.Cast<ConjunctionAndFilter>().child_filters)
-        {
-            if (FilterNeedsBloom(*child))
-            {
-                return true;
-            }
-        }
         return false;
     }
-    case TableFilterType::CONJUNCTION_OR:
-    {
-        for (const auto& child : filter.Cast<ConjunctionOrFilter>().child_filters)
-        {
-            if (FilterNeedsBloom(*child))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-    case TableFilterType::EXPRESSION_FILTER:
-    {
-        const auto& expression = filter.Cast<ExpressionFilter>();
-        std::vector<Value> constants;
-        return expression.expr && ExtractEqualityConstants(*expression.expr, constants);
-    }
-    default:
-        return false;
-    }
+    std::vector<Value> constants;
+    return ExtractEqualityConstants(*expression, constants) && !constants.empty();
 }
 
 void MergeEventRangeIntoGlobal(DatasetGlobalState& global, const RootUnsignedFilterRange& range)
@@ -517,187 +442,71 @@ void MergeEventRangeIntoGlobal(DatasetGlobalState& global, const RootUnsignedFil
     global.event_range_impossible = global.event_lower > global.event_upper;
 }
 
-std::string ExactStringFilterClause(const TableFilter& filter, const std::string& column_sql)
+static std::string ExactStringExpressionClause(const Expression& expr, const std::string& column_sql)
 {
-    switch (filter.filter_type)
+    ExpressionType type;
+    Value constant;
+    if (ColumnComparison(expr, type, constant) && type == ExpressionType::COMPARE_EQUAL)
     {
-    case TableFilterType::CONSTANT_COMPARISON:
-    {
-        const auto& constant = filter.Cast<ConstantFilter>();
-        if (constant.comparison_type != ExpressionType::COMPARE_EQUAL || constant.constant.IsNull())
-        {
-            return {};
-        }
-        return column_sql + " = " + SqlLiteral(constant.constant.ToString());
+        return column_sql + " = " + SqlLiteral(constant.ToString());
     }
-    case TableFilterType::IN_FILTER:
+    std::vector<Value> values;
+    if (InConstants(expr, values))
     {
-        const auto& in_filter = filter.Cast<InFilter>();
-        if (in_filter.values.empty())
+        if (values.empty())
         {
             return "FALSE";
         }
-        std::string clause = column_sql + " IN (";
-        bool first = true;
-        for (const auto& constant : in_filter.values)
-        {
-            if (constant.IsNull())
-            {
-                continue;
-            }
-            if (!first)
-            {
-                clause += ", ";
-            }
-            clause += SqlLiteral(constant.ToString());
-            first = false;
-        }
-        if (first)
-        {
-            return "FALSE";
-        }
-        clause += ")";
-        return clause;
-    }
-    case TableFilterType::OPTIONAL_FILTER:
-    {
-        const auto& optional = filter.Cast<OptionalFilter>();
-        return optional.child_filter ? ExactStringFilterClause(*optional.child_filter, column_sql) : std::string();
-    }
-    case TableFilterType::DYNAMIC_FILTER:
-    {
-        const auto& dynamic = filter.Cast<DynamicFilter>();
-        if (!dynamic.filter_data)
-        {
-            return {};
-        }
-        const lock_guard<mutex> guard(dynamic.filter_data->lock);
-        if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
-        {
-            return {};
-        }
-        return ExactStringFilterClause(*dynamic.filter_data->filter, column_sql);
-    }
-    case TableFilterType::CONJUNCTION_AND:
-    {
-        const auto& conjunction = filter.Cast<ConjunctionAndFilter>();
-        std::vector<std::string> clauses;
-        for (const auto& child : conjunction.child_filters)
-        {
-            auto clause = ExactStringFilterClause(*child, column_sql);
-            if (!clause.empty())
-            {
-                clauses.push_back(std::move(clause));
-            }
-        }
-        if (clauses.empty())
-        {
-            return {};
-        }
-        std::string result = "(";
-        for (idx_t i = 0; i < clauses.size(); ++i)
+        std::string result = column_sql + " IN (";
+        for (idx_t i = 0; i < values.size(); ++i)
         {
             if (i)
             {
-                result += " AND ";
+                result += ", ";
             }
-            result += clauses[i];
+            result += SqlLiteral(values[i].ToString());
         }
-        result += ")";
-        return result;
+        return result + ")";
     }
-    case TableFilterType::CONJUNCTION_OR:
+    if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION)
     {
-        const auto& conjunction = filter.Cast<ConjunctionOrFilter>();
-        if (conjunction.child_filters.empty())
+        const auto& conjunction = expr.Cast<BoundConjunctionExpression>();
+        const auto is_and = expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND;
+        const auto is_or = expr.GetExpressionType() == ExpressionType::CONJUNCTION_OR;
+        if (!is_and && !is_or)
         {
             return {};
         }
         std::vector<std::string> clauses;
-        for (const auto& child : conjunction.child_filters)
+        for (const auto& child : conjunction.GetChildren())
         {
-            auto clause = ExactStringFilterClause(*child, column_sql);
+            auto clause = ExactStringExpressionClause(*child, column_sql);
             if (clause.empty())
             {
-                return {};
+                if (is_or)
+                {
+                    return {};
+                }
+                continue;
             }
             clauses.push_back(std::move(clause));
         }
-        std::string result = "(";
-        for (idx_t i = 0; i < clauses.size(); ++i)
-        {
-            if (i)
-            {
-                result += " OR ";
-            }
-            result += clauses[i];
-        }
-        result += ")";
-        return result;
+        return JoinClauses(clauses, is_and ? " AND " : " OR ");
     }
-    default:
-        return {};
-    }
+    return {};
 }
 
-bool RejectsAllMaterializedRows(const TableFilter& filter)
+std::string ExactStringFilterClause(const TableFilter& filter, const std::string& column_sql)
 {
-    switch (filter.filter_type)
-    {
-    case TableFilterType::IS_NULL:
-        // read_root_dataset emits only materialized numeric rows. Empty containers
-        // emit zero rows rather than a row containing SQL NULL.
-        return true;
-    case TableFilterType::CONJUNCTION_AND:
-    {
-        const auto& conjunction = filter.Cast<ConjunctionAndFilter>();
-        for (const auto& child : conjunction.child_filters)
-        {
-            if (RejectsAllMaterializedRows(*child))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-    case TableFilterType::CONJUNCTION_OR:
-    {
-        const auto& conjunction = filter.Cast<ConjunctionOrFilter>();
-        if (conjunction.child_filters.empty())
-        {
-            return false;
-        }
-        for (const auto& child : conjunction.child_filters)
-        {
-            if (!RejectsAllMaterializedRows(*child))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-    case TableFilterType::OPTIONAL_FILTER:
-    {
-        const auto& optional = filter.Cast<OptionalFilter>();
-        return optional.child_filter && RejectsAllMaterializedRows(*optional.child_filter);
-    }
-    case TableFilterType::DYNAMIC_FILTER:
-    {
-        const auto& dynamic = filter.Cast<DynamicFilter>();
-        if (!dynamic.filter_data)
-        {
-            return false;
-        }
-        const lock_guard<mutex> guard(dynamic.filter_data->lock);
-        if (!dynamic.filter_data->initialized || !dynamic.filter_data->filter)
-        {
-            return false;
-        }
-        return RejectsAllMaterializedRows(*dynamic.filter_data->filter);
-    }
-    default:
-        return false;
-    }
+    const auto* expression = RootFilterMetadataExpression(filter);
+    return expression ? ExactStringExpressionClause(*expression, column_sql) : std::string{};
+}
+
+bool RejectsAllMaterializedRows(const TableFilter&)
+{
+    // A filter's column is not available here; nullability varies by ROOT column.
+    // Do not reject rows on an IS NULL expression without proving the column non-nullable.
+    return false;
 }
 
 std::string IdListSQL(const std::vector<SchemaBinding>& schemas, bool column_ids)

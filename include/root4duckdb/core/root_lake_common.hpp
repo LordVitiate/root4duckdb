@@ -22,8 +22,8 @@ uint64_t FNV1a64(const std::string& value, uint64_t seed = 14695981039346656037U
 std::string FileId(const std::string& uri, uint64_t size, int64_t mtime);
 /// Derives a logical column identifier within one schema.
 std::string ColumnId(const std::string& schema_id, const std::string& logical_path);
-/// Converts an unsuccessful materialized query into a typed error.
-void EnsureQueryOK(MaterializedQueryResult& result, const std::string& label);
+/// Converts an unsuccessful query into a typed error.
+void EnsureQueryOK(QueryResult& result, const std::string& label);
 
 } // namespace duckdb::rootlake
 
