@@ -19,7 +19,7 @@
 
 ## Latest news 🎃
 
-- **2026-10-27 — DuckDB 2.0 migration.** The development branch builds against DuckDB 2.0.0 (Cyanoptera). Native integration tests and ten ROOT SQL checks with an independent DuckDB CLI passed. Loading on hosts with older libstdc++ still needs runtime work.
+- **2026-10-27 — DuckDB 2.0 migration.** The development branch builds against DuckDB 2.0.0 (Cyanoptera).
 - **2026-10-09 — Fixes driven by real analysis.** Production ROOT data exposed schema-evolution and projection issues; fixes were checked against the object reader. EOS/FUSE cache range pruning and physical I/O diagnostics were also improved.
 - **2026-10-09 — DuckDB 1.5.6 migration.** The development source tree and build scripts now target DuckDB 1.5.6; published release binaries retain their own version requirements.
 - **2026-08-25 — Relation-level ROOT queries and parallel decoding.** `read_root()` now selects objects and collections as SQL relations, exposes their immediate fields as columns. Both object and serialized readers now parallelize single-file scans, while multi-column serialized reads share basket decoding work across sibling fields. Exact remote [ROOT URIs](https://root.cern/doc/master/classTS3WebFile.html), including `s3://` and `davix://`, use the common ROOT input layer.
