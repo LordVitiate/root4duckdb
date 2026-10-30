@@ -446,7 +446,7 @@ int main() {
 }
 CPP
 
-ROOT_CONFIG_REAL="$(readlink -f "$(command -v root-config)")"
+ROOT_CONFIG_REAL="$(command -v root-config)"
 ROOT_INCDIR="$("$ROOT_CONFIG_REAL" --incdir)"
 ROOT_LIBDIR="$("$ROOT_CONFIG_REAL" --libdir)"
 ROOT_VERSION="$("$ROOT_CONFIG_REAL" --version)"
@@ -531,9 +531,6 @@ if ((CLEAN == 0)) && [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
 
     if [[ -n "$cached_root_config" ]]; then
         cached_root_config_real="$cached_root_config"
-        if [[ -e "$cached_root_config" ]]; then
-            cached_root_config_real="$(readlink -f "$cached_root_config")"
-        fi
 
         if [[ "$cached_root_config_real" != "$ROOT_CONFIG_REAL" ]]; then
             echo "[INFO] ROOT changed since the previous CMake configure."

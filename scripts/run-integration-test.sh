@@ -30,7 +30,7 @@ if [[ -z "$ROOT_CONFIG_BIN" || ! -x "$ROOT_CONFIG_BIN" ]]; then
     echo "missing required ROOT configuration executable: $ROOT_CONFIG_BIN" >&2
     exit 2
 fi
-ROOT_CONFIG_BIN="$(readlink -f "$ROOT_CONFIG_BIN")"
+
 ROOT_LIBDIR="$(readlink -f "$("$ROOT_CONFIG_BIN" --libdir)")"
 ROOT_BINDIR="$("$ROOT_CONFIG_BIN" --bindir)"
 ROOT_INCDIR="$("$ROOT_CONFIG_BIN" --incdir)"
