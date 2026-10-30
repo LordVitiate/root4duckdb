@@ -680,6 +680,17 @@ fi
 if ((PACKAGE_RELEASE)); then
     echo "[release] Building isolated loadable extension"
 
+    PACKAGE_BUILD_DIR="$PROJECT_DIR/build/release-package"
+    if ((CLEAN)); then
+        cmake -E remove_directory "$PACKAGE_BUILD_DIR"
+    elif [[ -f "$PACKAGE_BUILD_DIR/CMakeCache.txt" ]]; then
+        package_standard="$(sed -nE "s/^CMAKE_CXX_STANDARD:[^=]*=([0-9]+)$/\1/p" "$PACKAGE_BUILD_DIR/CMakeCache.txt")"
+        if [[ "$package_standard" =~ ^[0-9]+$ ]] && ((package_standard < 17)); then
+            echo "[INFO] Removing stale release-package cache: C++$package_standard"
+            cmake -E remove_directory "$PACKAGE_BUILD_DIR"
+        fi
+    fi
+
     make -C "$PROJECT_DIR" \
         release-package \
         OVERRIDE_GIT_DESCRIBE="$DUCKDB_VERSION"
