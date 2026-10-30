@@ -50,6 +50,13 @@ export LD_LIBRARY_PATH := $(COMMUNITY_PREFIX)/lib$(if $(LD_LIBRARY_PATH),:$(LD_L
 EXT_RELEASE_FLAGS += -DROOT4DUCKDB_RUNTIME_BOOTSTRAP=ON -DROOT4DUCKDB_LOADABLE_ONLY=ON
 EXT_DEBUG_FLAGS += -DROOT4DUCKDB_RUNTIME_BOOTSTRAP=ON -DROOT4DUCKDB_LOADABLE_ONLY=ON
 
+ifeq ($(LINUX_CI_IN_DOCKER),1)
+ifeq ($(SUBSET_EXTENSIONS_TESTS),regular)
+TESTS_BASE_DIRECTORY := test/sql/root_
+endif
+TEST_RUNNER := timeout -v --signal=TERM --kill-after=30s 20m python3 -u $(TEST_RUNNER_SCRIPT)
+endif
+
 .PHONY: community-prepare
 community-prepare:
 	bash scripts/prepare-community-deps.sh
