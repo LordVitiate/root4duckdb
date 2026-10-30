@@ -195,6 +195,10 @@ ROOT4DuckDB is a research prototype.
 
 Correctness takes priority over forcing an optimization. When a narrow reader cannot prove that it preserves the result, ROOT4DuckDB falls back to the universal ROOT reader or fails explicitly.
 
+## SAST Tools
+
+[PVS-Studio](https://pvs-studio.com/pvs-studio/?utm_source=website&utm_medium=github&utm_campaign=open_source) - static code analyzer for Enterprise (C, C++, C#, Go, and Java) and Web (JS and TS) development.
+
 ## License
 
 ROOT4DuckDB is distributed under the [MIT License](LICENSE).
