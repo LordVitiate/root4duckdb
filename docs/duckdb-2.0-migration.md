@@ -97,3 +97,25 @@ ROOT4DUCKDB_INDEPENDENT_DUCKDB=.deps/vanilla-duckdb-2.0/duckdb \
 
 Keep the build tree for incremental rebuilds; `--clean` is not needed
 for ordinary source or CMake changes.
+
+## Community CI glibc sysroot and release publishing
+
+The DuckDB 2.0 Linux AMD64 prebuilt static archive references `explicit_bzero`.
+The conda-forge GCC toolchain may otherwise select its default glibc 2.17
+sysroot, where the symbol is unavailable. The Community CI preparation now
+pins `sysroot_linux-64=2.28` and links a minimal `explicit_bzero`
+probe before building Iceberg. This resolves the observed linker mismatch;
+the complete GitHub Actions run must still pass to validate the fix.
+
+The main distribution workflow builds on `main`, pull requests to `main`,
+manual dispatch, and version tags. On a version tag it uploads each successfully
+tested Linux AMD64 extension artifact into the matching GitHub Release without
+replacing existing filenames for manually packaged ROOT variants. Published
+assets require the matched CERN ROOT 6.40.04 runtime; distribution on ARM64,
+macOS, Windows, or musl remains unsupported until a compatible ROOT/toolchain
+and loader are verified. Do not equate the DuckDB host platform list with
+ROOT4DuckDB-supported platforms.
+
+Release tags are immutable once published: a new fix needs a new version tag.
+The official community-extensions PR references its own source ref and must
+be updated separately after the corrected source has passed CI.

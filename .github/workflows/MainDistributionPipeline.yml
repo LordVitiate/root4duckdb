@@ -1,6 +1,16 @@
 name: DuckDB Community Extension
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: root4duckdb-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   linux:
@@ -13,3 +23,39 @@ jobs:
       exclude_archs: 'linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
       reduced_ci_mode: disabled
       test_config: '{"test_env_variables":{"ROOT4DUCKDB_ROOT_CONFIG":"/duckdb_build_dir/.deps/community-root/bin/root-config","LD_LIBRARY_PATH":"/duckdb_build_dir/.deps/community-root/lib"}}'
+
+  publish:
+    name: Publish successful release artifacts
+    needs: linux
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && needs.linux.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: root-v2.0.0-extension-*
+          path: ${{ runner.temp }}/root4duckdb-artifacts
+      - name: Publish tested binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          ARTIFACT_DIR: ${{ runner.temp }}/root4duckdb-artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/root4duckdb-release"
+          count=0
+          while IFS= read -r -d '' file; do
+            artifact=$(basename "$(dirname "$file")")
+            arch=${artifact#root-v2.0.0-extension-}
+            [[ "$arch" != "$artifact" ]] || exit 1
+            cp "$file" "${RUNNER_TEMP}/root4duckdb-release/root4duckdb-${TAG}-duckdb-v2.0.0-${arch}-root-6.40.04.duckdb_extension"
+            count=$((count+1))
+          done < <(find "$ARTIFACT_DIR" -type f -name root.duckdb_extension -print0)
+          ((count > 0)) || { echo "[ERROR] No tested extensions available for release" >&2; exit 1; }
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --verify-tag --title "ROOT4DuckDB $TAG" --generate-notes
+          gh release upload "$TAG" "${RUNNER_TEMP}"/root4duckdb-release/*.duckdb_extension --clobber
