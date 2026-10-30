@@ -7,7 +7,12 @@ root_prefix="$deps_dir/community-root"
 mamba_bin="$deps_dir/micromamba/bin/micromamba"
 export MAMBA_ROOT_PREFIX="$deps_dir/mamba-root"
 
-[[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { echo "Community build supports Linux x86_64 only" >&2; exit 2; }
+[[ "$(uname -s)" == Linux ]] || { echo "Community build requires Linux" >&2; exit 2; }
+case "$(uname -m)" in
+    x86_64) conda_arch=linux-64; compiler_triplet=x86_64-conda-linux-gnu ;;
+    aarch64) conda_arch=linux-aarch64; compiler_triplet=aarch64-conda-linux-gnu ;;
+    *) echo "[ERROR] Unsupported Linux architecture: $(uname -m)" >&2; exit 2 ;;
+esac
 # The DuckDB manylinux CI image ships a working HTTPS curl. Keep it
 # isolated from conda's libcurl: vcpkg invokes curl after LD_LIBRARY_PATH
 # has been extended with the conda environment, which otherwise breaks
@@ -31,20 +36,20 @@ if ! /usr/bin/env -u LD_LIBRARY_PATH "$system_curl" --version |
 fi
 
 if [[ ! -x "$mamba_bin" ]]; then
-    curl -fsSL https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C "$deps_dir/micromamba" bin/micromamba
+    curl -fsSL "https://micro.mamba.pm/api/micromamba/$conda_arch/latest" | tar -xj -C "$deps_dir/micromamba" bin/micromamba
 fi
 
-if [[ ! -x "$root_prefix/bin/root-config" || ! -x "$root_prefix/bin/x86_64-conda-linux-gnu-g++" ]]; then
+if [[ ! -x "$root_prefix/bin/root-config" || ! -x "$root_prefix/bin/$compiler_triplet-g++" ]]; then
     "$mamba_bin" create -y -p "$root_prefix" -c conda-forge --strict-channel-priority \
-        'root=6.40.04' 'gcc_linux-64=14' 'gxx_linux-64=14' 'sysroot_linux-64=2.28' 'cmake>=3.28' ninja nlohmann_json sqlite pkg-config
-elif ! "$mamba_bin" list -p "$root_prefix" | grep -Eq '^sysroot_linux-64[[:space:]]+2\.28([[:space:]]|$)'; then
-    "$mamba_bin" install -y -p "$root_prefix" -c conda-forge --strict-channel-priority 'sysroot_linux-64=2.28'
+        'root=6.40.04' "gcc_$conda_arch=14" "gxx_$conda_arch=14" "sysroot_$conda_arch=2.28" 'cmake>=3.28' ninja nlohmann_json sqlite pkg-config
+elif ! "$mamba_bin" list -p "$root_prefix" | grep -Eq "^sysroot_$conda_arch[[:space:]]+2\\.28([[:space:]]|$)"; then
+    "$mamba_bin" install -y -p "$root_prefix" -c conda-forge --strict-channel-priority "sysroot_$conda_arch=2.28"
 fi
 
 export ROOT4DUCKDB_DISABLE_PINNED_LCG=1
 export ROOT4DUCKDB_ROOT_CONFIG="$root_prefix/bin/root-config"
-export CC="$root_prefix/bin/x86_64-conda-linux-gnu-gcc"
-export CXX="$root_prefix/bin/x86_64-conda-linux-gnu-g++"
+export CC="$root_prefix/bin/$compiler_triplet-gcc"
+export CXX="$root_prefix/bin/$compiler_triplet-g++"
 export PATH="$community_tools:$root_prefix/bin:$PATH"
 if [[ "$(command -v curl)" != "$community_tools/curl" ]]; then
     echo "[ERROR] vcpkg would not use the isolated HTTPS curl" >&2

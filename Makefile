@@ -35,11 +35,12 @@ release-package: ${EXTENSION_CONFIG_STEP}
 ifneq ($(filter 1,$(ROOT4DUCKDB_COMMUNITY_BUILD) $(LINUX_CI_IN_DOCKER)),)
 COMMUNITY_PREFIX := $(PROJ_DIR).deps/community-root
 COMMUNITY_TOOLS := $(PROJ_DIR).deps/community-tools
+COMMUNITY_COMPILER_TRIPLET := $(if $(filter aarch64,$(shell uname -m)),aarch64-conda-linux-gnu,x86_64-conda-linux-gnu)
 export ROOT4DUCKDB_DISABLE_PINNED_LCG := 1
 export ROOT4DUCKDB_ROOT_CONFIG := $(COMMUNITY_PREFIX)/bin/root-config
 export ROOT4DUCKDB_ICEBERG_PREFIX := $(PROJ_DIR).deps/iceberg-cpp
-export CC := $(COMMUNITY_PREFIX)/bin/x86_64-conda-linux-gnu-gcc
-export CXX := $(COMMUNITY_PREFIX)/bin/x86_64-conda-linux-gnu-g++
+export CC := $(COMMUNITY_PREFIX)/bin/$(COMMUNITY_COMPILER_TRIPLET)-gcc
+export CXX := $(COMMUNITY_PREFIX)/bin/$(COMMUNITY_COMPILER_TRIPLET)-g++
 export PATH := $(COMMUNITY_TOOLS):$(COMMUNITY_PREFIX)/bin:$(PATH)
 export CMAKE_PREFIX_PATH := $(COMMUNITY_PREFIX)$(if $(CMAKE_PREFIX_PATH),:$(CMAKE_PREFIX_PATH))
 export LD_LIBRARY_PATH := $(COMMUNITY_PREFIX)/lib$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH))
