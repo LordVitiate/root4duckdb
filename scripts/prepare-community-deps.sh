@@ -41,9 +41,7 @@ fi
 
 if [[ ! -x "$root_prefix/bin/root-config" || ! -x "$root_prefix/bin/$compiler_triplet-g++" ]]; then
     "$mamba_bin" create -y -p "$root_prefix" -c conda-forge --strict-channel-priority \
-        'root=6.40.04' "gcc_$conda_arch=14" "gxx_$conda_arch=14" "sysroot_$conda_arch=2.28" 'cmake>=3.28' ninja nlohmann_json sqlite pkg-config
-elif ! "$mamba_bin" list -p "$root_prefix" | grep -Eq "^sysroot_$conda_arch[[:space:]]+2\\.28([[:space:]]|$)"; then
-    "$mamba_bin" install -y -p "$root_prefix" -c conda-forge --strict-channel-priority "sysroot_$conda_arch=2.28"
+        'root=6.40.04' "gcc_$conda_arch=14" "gxx_$conda_arch=14" 'cmake>=3.28' ninja nlohmann_json sqlite pkg-config
 fi
 
 export ROOT4DUCKDB_DISABLE_PINNED_LCG=1
@@ -59,8 +57,8 @@ export CMAKE_PREFIX_PATH="$root_prefix${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export LD_LIBRARY_PATH="$root_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 if ! printf '#include <string.h>\nint main(void) { char key[1] = {0}; explicit_bzero(key, sizeof(key)); return 0; }\n' |
-        "$CC" -std=gnu11 -Werror=implicit-function-declaration -x c - -o /dev/null; then
-    echo "[ERROR] DuckDB 2.0 requires a glibc sysroot providing explicit_bzero" >&2
+        "$CC" --sysroot=/ -std=gnu11 -Werror=implicit-function-declaration -x c - -o /dev/null; then
+    echo "[ERROR] DuckDB 2.0 requires host glibc providing explicit_bzero" >&2
     exit 1
 fi
 
