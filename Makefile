@@ -54,10 +54,10 @@ ifeq ($(LINUX_CI_IN_DOCKER),1)
 ifeq ($(SUBSET_EXTENSIONS_TESTS),regular)
 define RUN_TEST
 	@set -eu; for test in test/sql/root_*.test; do \
-		echo "[ROOT CI] START $test"; \
+		echo "[ROOT CI] START $$test"; \
 		timeout -v --signal=TERM --kill-after=10s 120s \
-			stdbuf -oL -eL ./build/$1/test/unittest --emit-test-events --use-colour no "$test" || { code=$?; echo "[ROOT CI] FAIL $test (exit $code)"; exit $code; }; \
-		echo "[ROOT CI] PASS $test"; \
+			stdbuf -oL -eL ./build/$1/test/unittest --emit-test-events --use-colour no "$$test" || { code=$$?; echo "[ROOT CI] FAIL $$test (exit $$code)"; exit $$code; }; \
+		echo "[ROOT CI] PASS $$test"; \
 	done
 endef
 endif
