@@ -59,6 +59,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # DuckDB 2.0's static archive includes its linked extension registry.
     # The smoke host explicitly LOADs the release artifact.
     target_link_libraries(root_loadable_extension_smoke PRIVATE
+        duckdb_loadable_extensions
         duckdb_static
     )
     target_compile_features(root_loadable_extension_smoke PRIVATE cxx_std_17)

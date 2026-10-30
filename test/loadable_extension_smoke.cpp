@@ -1,8 +1,11 @@
 #include "duckdb.h"
+#include "duckdb_static_extension.h"
 
 #include <cstdint>
 #include <iostream>
 #include <string>
+
+extern "C" int32_t duckdb_extension_loadable_extensions_describe(duckdb_extension_descriptor *);
 
 namespace
 {
@@ -60,6 +63,12 @@ int main(int argc, char** argv)
     {
         std::cerr << "Usage: root_loadable_extension_smoke EXTENSION\n";
         return 2;
+    }
+
+    if (duckdb_register_static_extension(duckdb_extension_loadable_extensions_describe) != 0)
+    {
+        std::cerr << "[ERROR] Cannot register DuckDB extension loader\n";
+        return 1;
     }
 
     duckdb_config config = nullptr;
