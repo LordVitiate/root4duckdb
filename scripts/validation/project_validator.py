@@ -55,6 +55,6 @@ class ProjectValidator:
 
         print("VALIDATION OK")
         print(f"Project: {self.root}")
-        print("Version: 3.10.0")
+        print(f"Version: {(self.root / 'VERSION').read_text().strip()}")
         print("Index format: 12")
         print("Iceberg linkage: shared CLI runtime + static loadable extension")

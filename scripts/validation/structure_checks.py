@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from validation.project_validator import ProjectValidator
 
 
-EXPECTED_VERSION = "3.10.0"
 INDEX_VERSION = 12
 
 
 def check_structure(validator: ProjectValidator) -> None:
     """Validate files, CMake source coverage, and dependency boundaries."""
     validator.require_files(_required_files())
-    if validator.read("VERSION").strip() != EXPECTED_VERSION:
-        validator.errors.append(f"VERSION is not {EXPECTED_VERSION}")
+    version = validator.read("VERSION").strip()
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        validator.errors.append("VERSION must use major.minor.patch")
+    try:
+        manifest_version = json.loads(validator.read("vcpkg.json"))["version-string"]
+        if manifest_version != version:
+            validator.errors.append(f"VERSION {version} differs from vcpkg.json {manifest_version}")
+    except (ValueError, KeyError, TypeError):
+        validator.errors.append("invalid vcpkg.json version-string")
 
     _check_obsolete_files(validator)
     _check_cmake_sources(validator)
