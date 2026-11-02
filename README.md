@@ -18,7 +18,7 @@
 </div>
 
 ## Latest news 🎃
-
+- **2026-11-02** — 🎉 We [joined](https://duckdb.org/community_extensions/extensions/root) the community!
 - **2026-10-27 — DuckDB 2.0 migration.** The development branch builds against DuckDB 2.0.0 (Cyanoptera).
 - **2026-10-09 — Fixes driven by real analysis.** Production ROOT data exposed schema-evolution and projection issues; fixes were checked against the object reader. EOS/FUSE cache range pruning and physical I/O diagnostics were also improved.
 - **2026-10-09 — DuckDB 1.5.6 migration.** The development source tree and build scripts now target DuckDB 1.5.6; published release binaries retain their own version requirements.
