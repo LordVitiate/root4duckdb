@@ -27,6 +27,19 @@ root4duckdb_embed_static_iceberg(
     ALLOW_HOST_DUCKDB_SYMBOLS
 )
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(ROOT4DUCKDB_NORMALIZE_ROOT_NEEDED
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/normalize-root-needed.py")
+set_property(TARGET ${ROOT4DUCKDB_PAYLOAD_TARGET} APPEND PROPERTY LINK_DEPENDS
+    "${ROOT4DUCKDB_NORMALIZE_ROOT_NEEDED}")
+add_custom_command(TARGET ${ROOT4DUCKDB_PAYLOAD_TARGET} POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${ROOT4DUCKDB_NORMALIZE_ROOT_NEEDED}"
+        "$<TARGET_FILE:${ROOT4DUCKDB_PAYLOAD_TARGET}>"
+        "${ROOT4DUCKDB_ROOT_LIBDIR}"
+    VERBATIM
+)
+
+
 set(EXTENSION_STATIC_BUILD "${_root4duckdb_saved_payload_static_build}")
 unset(_root4duckdb_saved_payload_static_build)
 

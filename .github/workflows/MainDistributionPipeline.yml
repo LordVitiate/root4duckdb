@@ -20,15 +20,15 @@ jobs:
       duckdb_version: v2.0.0
       duckdb_commit: d54cbbe3df17e8e5ce68312f483b4155836112aa
       ci_tools_version: v2.0-cyanoptera
-      exclude_archs: 'linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
-      allow_failure_archs: 'linux_arm64'
+      # ARM64 container image currently fails on AlmaLinux 8 BaseOS metadata (run 41468081627).
+      exclude_archs: 'linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_amd64;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
       reduced_ci_mode: disabled
       test_config: '{"test_env_variables":{"ROOT4DUCKDB_ROOT_CONFIG":"/duckdb_build_dir/.deps/community-root/bin/root-config","LD_LIBRARY_PATH":"/duckdb_build_dir/.deps/community-root/lib"}}'
 
   publish:
     name: Publish successful release artifacts
     needs: linux
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && needs.linux.result != 'cancelled' }}
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read

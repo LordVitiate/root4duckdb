@@ -79,66 +79,99 @@ RootBloomBuilder::RootBloomBuilder(uint32_t max_payload_bytes_p, double false_po
 {
 }
 
+static void SetBloomBits(std::string& payload, uint64_t hash, uint8_t hash_count)
+{
+    const auto bit_count = static_cast<uint64_t>(payload.size()) * 8ULL;
+    const auto second_hash = Mix64(hash ^ 0x9E3779B97F4A7C15ULL) | 1ULL;
+    for (uint8_t i = 0; i < hash_count; ++i)
+    {
+        const auto bit = (hash + static_cast<uint64_t>(i) * second_hash) % bit_count;
+        auto& byte = payload[static_cast<size_t>(bit / 8)];
+        byte = static_cast<char>(static_cast<uint8_t>(byte) | static_cast<uint8_t>(1U << (bit % 8)));
+    }
+}
+
 void RootBloomBuilder::Add(double value)
 {
     if (max_payload_bytes == 0 || !std::isfinite(value))
     {
         return;
     }
-    hashes.push_back(CanonicalDoubleHash(value));
+    const auto hash = CanonicalDoubleHash(value);
+    if (streaming_bits.empty())
+    {
+        const auto hash_limit = std::max<uint64_t>(1, max_payload_bytes / sizeof(uint64_t));
+        if (hashes.size() < hash_limit)
+        {
+            hashes.push_back(hash);
+            ++value_count;
+            return;
+        }
+        streaming_bits.assign(max_payload_bytes, '\0');
+        const auto ideal_hashes = std::llround(-std::log(false_positive_rate) / std::log(2.0));
+        streaming_hash_count = static_cast<uint8_t>(std::clamp<long long>(ideal_hashes, 1, 16));
+        for (const auto buffered_hash : hashes)
+        {
+            SetBloomBits(streaming_bits, buffered_hash, streaming_hash_count);
+        }
+        std::vector<uint64_t>().swap(hashes);
+    }
+    SetBloomBits(streaming_bits, hash, streaming_hash_count);
+    ++value_count;
 }
 
 uint64_t RootBloomBuilder::MemoryUsage() const
 {
-    return static_cast<uint64_t>(hashes.capacity()) * sizeof(uint64_t);
+    return static_cast<uint64_t>(hashes.capacity()) * sizeof(uint64_t) +
+           (streaming_bits.empty() ? 0ULL : static_cast<uint64_t>(streaming_bits.capacity()));
 }
 
 std::string RootBloomBuilder::SerializeAndRelease()
 {
-    if (max_payload_bytes == 0 || hashes.empty())
+    if (value_count == 0)
     {
         return {};
     }
-    const auto count = static_cast<double>(hashes.size());
-    const auto denominator = std::log(2.0) * std::log(2.0);
-    const auto ideal_bits = static_cast<uint64_t>(std::ceil(-count * std::log(false_positive_rate) / denominator));
-    const auto maximum_bits = static_cast<uint64_t>(max_payload_bytes) * 8ULL;
-    const auto bit_count = std::max<uint64_t>(8, std::min<uint64_t>(ideal_bits, maximum_bits));
-    const auto payload_bytes = static_cast<size_t>((bit_count + 7) / 8);
-    const auto effective_bits = static_cast<uint64_t>(payload_bytes) * 8ULL;
-    const auto ideal_hashes =
-        static_cast<uint32_t>(std::llround((static_cast<double>(effective_bits) / count) * std::log(2.0)));
-    const auto hash_count = static_cast<uint8_t>(std::clamp<uint32_t>(ideal_hashes, 1, 16));
+    std::string payload;
+    uint8_t hash_count = streaming_hash_count;
+    if (!streaming_bits.empty())
+    {
+        payload.swap(streaming_bits);
+    }
+    else
+    {
+        const auto count = static_cast<double>(value_count);
+        const auto denominator = std::log(2.0) * std::log(2.0);
+        const auto ideal_bits = static_cast<uint64_t>(std::ceil(-count * std::log(false_positive_rate) / denominator));
+        const auto maximum_bits = static_cast<uint64_t>(max_payload_bytes) * 8ULL;
+        const auto bit_count = std::max<uint64_t>(8, std::min<uint64_t>(ideal_bits, maximum_bits));
+        const auto payload_bytes = static_cast<size_t>((bit_count + 7) / 8);
+        const auto ideal_hashes =
+            static_cast<uint32_t>(std::llround((static_cast<double>(payload_bytes * 8ULL) / count) * std::log(2.0)));
+        hash_count = static_cast<uint8_t>(std::clamp<uint32_t>(ideal_hashes, 1, 16));
+        payload.assign(payload_bytes, '\0');
+        for (const auto hash : hashes)
+        {
+            SetBloomBits(payload, hash, hash_count);
+        }
+    }
+    std::vector<uint64_t>().swap(hashes);
     std::string out;
-    out.reserve(BLOOM_HEADER_SIZE + payload_bytes);
+    out.reserve(BLOOM_HEADER_SIZE + payload.size());
     out.append(BLOOM_MAGIC, sizeof(BLOOM_MAGIC));
     out.push_back(static_cast<char>(BLOOM_VERSION));
     out.push_back(static_cast<char>(hash_count));
     AppendUInt16(out, BLOOM_HEADER_SIZE);
-    AppendUInt64(out, effective_bits);
-    AppendUInt64(out, hashes.size());
-    out.resize(BLOOM_HEADER_SIZE + payload_bytes, '\0');
-    auto set_bit = [&](uint64_t bit)
-    {
-        const auto byte_offset = BLOOM_HEADER_SIZE + static_cast<size_t>(bit / 8);
-        out[byte_offset] =
-            static_cast<char>(static_cast<uint8_t>(out[byte_offset]) | static_cast<uint8_t>(1U << (bit % 8)));
-    };
-    for (const auto h1 : hashes)
-    {
-        const auto h2 = Mix64(h1 ^ 0x9E3779B97F4A7C15ULL) | 1ULL;
-        for (uint8_t i = 0; i < hash_count; ++i)
-        {
-            set_bit((h1 + static_cast<uint64_t>(i) * h2) % effective_bits);
-        }
-    }
-    std::vector<uint64_t>().swap(hashes);
+    AppendUInt64(out, static_cast<uint64_t>(payload.size()) * 8ULL);
+    AppendUInt64(out, value_count);
+    out.append(payload);
+    value_count = 0;
     return out;
 }
 
 bool RootBloomFilter::MayContain(const std::string& bytes, double value)
 {
-    if (bytes.empty())
+    if (bytes.empty() || !std::isfinite(value))
     {
         return true;
     }
