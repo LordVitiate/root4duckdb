@@ -726,7 +726,7 @@ void RootIndexCoordinator::PreserveFailedStaging(const BuildIndexBindData& bind,
 void RootIndexCoordinator::Run(ClientContext& context, TableFunctionInput& input) const
 {
     auto& bind = const_cast<BuildIndexBindData&>(input.bind_data->Cast<BuildIndexBindData>());
-    auto& state = input.global_state.Cast<BuildIndexGlobalState>();
+    auto& state = input.global_state->Cast<BuildIndexGlobalState>();
     state.snapshot_id = TimestampId();
     state.publish_mode = bind.catalog_mode == "tables" ? bind.publish_mode : bind.catalog_mode;
     state.chunk_id = bind.chunk_id;
