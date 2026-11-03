@@ -402,6 +402,33 @@ idx_t BuildIndexGlobalState::MaxThreads() const
     return 1;
 }
 
+double BuildIndexGlobalState::Progress() const
+{
+    constexpr double inspect_weight = 10.0;
+    constexpr double index_weight = 85.0;
+    const auto total = total_files.load(std::memory_order_relaxed);
+    const auto inspected = inspected_files.load(std::memory_order_relaxed);
+    const auto indexed = indexed_files.load(std::memory_order_relaxed);
+    switch (phase.load(std::memory_order_relaxed))
+    {
+    case IndexBuildPhase::PREPARING:
+        return 0.0;
+    case IndexBuildPhase::INSPECTING:
+        return total ? inspect_weight * std::min(inspected, total) / total : 0.0;
+    case IndexBuildPhase::RESTORING:
+        return inspect_weight;
+    case IndexBuildPhase::INDEXING:
+        return inspect_weight + (total ? index_weight * std::min(indexed, total) / total : 0.0);
+    case IndexBuildPhase::COMPACTING:
+        return 95.0;
+    case IndexBuildPhase::PUBLISHING:
+        return 98.0;
+    case IndexBuildPhase::COMPLETED:
+        return 100.0;
+    }
+    return 0.0;
+}
+
 RootIndexBuildOptions RootIndexCoordinator::ConfigureRuntime(ClientContext& context, BuildIndexBindData& bind,
                                                              BuildIndexGlobalState& state,
                                                              const std::vector<std::string>& files) const
@@ -506,6 +533,7 @@ std::vector<RootIndexFilePlan> RootIndexCoordinator::InspectFiles(const RootInde
                         break;
                     }
                     plans[index] = InspectRootIndexFile(options, files[index]);
+                    state.inspected_files.fetch_add(1, std::memory_order_relaxed);
                 }
             });
     }
@@ -598,6 +626,10 @@ void RootIndexCoordinator::BuildFiles(ClientContext& context, const RootIndexBui
                             staged_indices.push_back(index);
                         }
                         state.statuses[index] = std::move(status);
+                        if (state.statuses[index].status == "OK")
+                        {
+                            state.indexed_files.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
                     catch (const std::exception& exception)
                     {
@@ -691,19 +723,20 @@ void RootIndexCoordinator::PreserveFailedStaging(const BuildIndexBindData& bind,
     fs::remove_all(staging, error);
 }
 
-unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& context,
-                                                               TableFunctionInitInput& input) const
+void RootIndexCoordinator::Run(ClientContext& context, TableFunctionInput& input) const
 {
     auto& bind = const_cast<BuildIndexBindData&>(input.bind_data->Cast<BuildIndexBindData>());
-    auto state = make_uniq<BuildIndexGlobalState>();
-    state->snapshot_id = TimestampId();
-    state->publish_mode = bind.catalog_mode == "tables" ? bind.publish_mode : bind.catalog_mode;
-    state->chunk_id = bind.chunk_id;
-    state->manifest_fingerprint = bind.manifest_fingerprint;
-    state->dictionary_fingerprint = bind.dictionary_fingerprint;
+    auto& state = input.global_state.Cast<BuildIndexGlobalState>();
+    state.snapshot_id = TimestampId();
+    state.publish_mode = bind.catalog_mode == "tables" ? bind.publish_mode : bind.catalog_mode;
+    state.chunk_id = bind.chunk_id;
+    state.manifest_fingerprint = bind.manifest_fingerprint;
+    state.dictionary_fingerprint = bind.dictionary_fingerprint;
     LoadRootDictionary(bind.dictionary);
     const auto files = RootInputResolver(context).Resolve(bind.root_glob);
-    const auto index_options = ConfigureRuntime(context, bind, *state, files);
+    state.total_files.store(files.size(), std::memory_order_relaxed);
+    state.phase.store(IndexBuildPhase::INSPECTING, std::memory_order_relaxed);
+    const auto index_options = ConfigureRuntime(context, bind, state, files);
     const auto dataset_id = DatasetId(bind, files);
     fs::path staging_root;
     if (!bind.output_dir.empty())
@@ -724,14 +757,14 @@ unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& co
         build_lock = std::make_unique<IndexBuildLock>(staging_root);
     }
     const auto identity = IndexBuildIdentity(bind, index_options, files, dataset_id);
-    fs::path staging = staging_root / (".staging-" + state->snapshot_id);
+    fs::path staging = staging_root / (".staging-" + state.snapshot_id);
     if (bind.resume)
     {
         std::string recovered_id;
         const auto recoverable = FindResumeCandidate(staging_root, identity, recovered_id);
         if (!recoverable.empty())
         {
-            state->snapshot_id = recovered_id;
+            state.snapshot_id = recovered_id;
             staging = staging_root / (".staging-" + recovered_id);
             if (recoverable != staging)
             {
@@ -746,7 +779,7 @@ unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& co
     if (fs::exists(staging))
     {
         std::string checked_id;
-        if (!bind.resume || !ReadMatchingRequest(staging, identity, checked_id) || checked_id != state->snapshot_id)
+        if (!bind.resume || !ReadMatchingRequest(staging, identity, checked_id) || checked_id != state.snapshot_id)
         {
             throw IOException("ROOT index staging exists but cannot be safely resumed: " + staging.string());
         }
@@ -754,19 +787,24 @@ unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& co
     else
     {
         fs::create_directories(staging / "parts");
-        WriteResumeRequest(staging, identity, state->snapshot_id);
+        WriteResumeRequest(staging, identity, state.snapshot_id);
     }
     try
     {
-        const auto thread_count = WorkerCount(bind, *state, files.size());
-        const auto plans = InspectFiles(index_options, files, thread_count, bind, *state, staging_root);
+        const auto thread_count = WorkerCount(bind, state, files.size());
+        const auto plans = InspectFiles(index_options, files, thread_count, bind, state, staging_root);
+        state.phase.store(IndexBuildPhase::RESTORING, std::memory_order_relaxed);
         if (bind.resume)
         {
-            RestoreCheckpoints(*context.db, staging, dataset_id, state->snapshot_id, plans, *state);
+            RestoreCheckpoints(*context.db, staging, dataset_id, state.snapshot_id, plans, state);
         }
-        PrepareRootIcebergPathSources(context, bind, *state, dataset_id, plans, staging);
-        BuildFiles(context, index_options, dataset_id, staging, plans, thread_count, bind, *state);
-        ValidateBuild(bind, staging_root, *state);
+        state.indexed_files.store(std::count_if(state.statuses.begin(), state.statuses.end(),
+                                               [](const auto& status) { return status.status == "OK"; }),
+                                  std::memory_order_relaxed);
+        state.phase.store(IndexBuildPhase::INDEXING, std::memory_order_relaxed);
+        PrepareRootIcebergPathSources(context, bind, state, dataset_id, plans, staging);
+        BuildFiles(context, index_options, dataset_id, staging, plans, thread_count, bind, state);
+        ValidateBuild(bind, staging_root, state);
         if (const char* failpoint = std::getenv("ROOT4DUCKDB_TEST_FAIL_AFTER_INDEX"))
         {
             if (std::string(failpoint) == "1")
@@ -774,22 +812,24 @@ unique_ptr<GlobalTableFunctionState> RootIndexCoordinator::Run(ClientContext& co
                 throw IOException("ROOT index test interruption after durable checkpoints");
             }
         }
+        state.phase.store(IndexBuildPhase::COMPACTING, std::memory_order_relaxed);
         CompactRootIndexParquet(*context.db, staging.string());
         // Retain committed parts until current.json/Iceberg publication is
         // complete; a crash during publication must remain resumable.
-        RootIndexPublisher().Publish(context, bind, *state, dataset_id, staging);
+        state.phase.store(IndexBuildPhase::PUBLISHING, std::memory_order_relaxed);
+        RootIndexPublisher().Publish(context, bind, state, dataset_id, staging);
         if (bind.catalog_mode == "local" || bind.catalog_mode == "external")
         {
             std::error_code cleanup_error;
-            fs::remove_all(fs::path(state->snapshot_dir) / "parts", cleanup_error);
+            fs::remove_all(fs::path(state.snapshot_dir) / "parts", cleanup_error);
         }
+        state.phase.store(IndexBuildPhase::COMPLETED, std::memory_order_relaxed);
     }
     catch (...)
     {
-        PreserveFailedStaging(bind, staging_root, staging, state->snapshot_id);
+        PreserveFailedStaging(bind, staging_root, staging, state.snapshot_id);
         throw;
     }
-    return state;
 }
 
 } // namespace duckdb::rootlake
