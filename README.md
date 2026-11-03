@@ -18,6 +18,7 @@
 </div>
 
 ## Latest news 🎃
+- **2026-11-03 — One TRILLION indexed ROOT values!** ROOT4DuckDB indexed **1.08 trillion values** across **1,396 ROOT files with real experimental data** (5.14 TB) on a single node (16 vCPU, 30 GB RAM) in approximately 95 minutes, averaging **189 million indexed values/s**. The resulting Apache Iceberg metadata index occupies just 138 MiB. 
 - **2026-11-02** — 🎉 We [joined](https://duckdb.org/community_extensions/extensions/root) the community!
 - **2026-10-27 — DuckDB 2.0 migration.** The development branch builds against DuckDB 2.0.0 (Cyanoptera).
 - **2026-10-09 — Fixes driven by real analysis.** Production ROOT data exposed schema-evolution and projection issues; fixes were checked against the object reader. EOS/FUSE cache range pruning and physical I/O diagnostics were also improved.
