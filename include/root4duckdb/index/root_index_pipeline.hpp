@@ -80,11 +80,18 @@ struct BuildIndexBindData final : public TableFunctionData
     bool has_catalog_mode = false;
 };
 
+enum class IndexBuildPhase : uint8_t { PREPARING, INSPECTING, RESTORING, INDEXING, COMPACTING, PUBLISHING, COMPLETED };
+
 /// Materialized index build result returned by the table function.
 struct BuildIndexGlobalState final : public GlobalTableFunctionState
 {
     std::vector<RootIndexBuildStatus> statuses;
+    std::atomic<IndexBuildPhase> phase{IndexBuildPhase::PREPARING};
+    std::atomic<idx_t> total_files{0};
+    std::atomic<idx_t> inspected_files{0};
+    std::atomic<idx_t> indexed_files{0};
     idx_t offset = 0;
+    bool built = false;
     std::string snapshot_id;
     std::string snapshot_dir;
     uint32_t requested_threads = 0;
@@ -96,6 +103,7 @@ struct BuildIndexGlobalState final : public GlobalTableFunctionState
     std::string dictionary_fingerprint;
 
     idx_t MaxThreads() const override;
+    double Progress() const;
 };
 
 /// Validates SQL parameters and creates the immutable build request.
@@ -130,7 +138,7 @@ void PrepareRootIcebergPathSources(ClientContext& context, const BuildIndexBindD
 class RootIndexCoordinator final
 {
   public:
-    unique_ptr<GlobalTableFunctionState> Run(ClientContext& context, TableFunctionInitInput& input) const;
+    void Run(ClientContext& context, TableFunctionInput& input) const;
 
   private:
     RootIndexBuildOptions ConfigureRuntime(ClientContext& context, BuildIndexBindData& bind,
