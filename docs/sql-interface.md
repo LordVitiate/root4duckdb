@@ -448,6 +448,20 @@ FROM root_build_dataset_index(
 
 The function returns one status row per ROOT file and includes publication identity and execution counters.
 
+### Index build progress
+
+DuckDB's progress bar advances during index construction, including the preflight inspection that opens and inspects **every** input ROOT file before scanning values. The displayed percentage is **phase-weighted, not elapsed-time-weighted**:
+
+| Display | Work represented |
+|---|---|
+| 0–10% | ROOT file inspection, counted as inspected files / all resolved files |
+| 10–95% | Successful file indexing, including verified checkpoints restored with `resume := true` |
+| 95% | Metadata compaction in progress |
+| 98% | Snapshot publication in progress |
+| 100% | Publication completed successfully |
+
+The phase weights are fixed display weights, **not estimates of time or bytes**. A file increments the indexing counter after its metadata has been appended to its worker's in-memory buffer; its checkpoint may not be durable until a later flush. Therefore the progress bar is not a substitute for checkpoint monitoring or a guarantee that interrupted work can be resumed up to the displayed percentage. On errors, the operation fails without reaching 100%. Only a committed snapshot and `published = true` confirm successful publication.
+
 The generated metadata contain:
 
 - source-file identity and freshness data;

@@ -1,0 +1,143 @@
+name: ROOT4DuckDB Linux distribution
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux_amd64
+            runner: ubuntu-24.04
+            triplet: x64-linux-release
+          - arch: linux_arm64
+            runner: ubuntu-24.04-arm
+            triplet: arm64-linux-release
+    runs-on: ${{ matrix.runner }}
+    env:
+      CI_PLATFORM: linux
+      DUCKDB_PLATFORM: ${{ matrix.arch }}
+      CI_MATRIX_RUNNER: ${{ matrix.runner }}
+      CI_EXTENSION_NAME: root
+      DUCKDB_VERSION: v2.0.0
+      DUCKDB_COMMIT: d54cbbe3df17e8e5ce68312f483b4155836112aa
+      CI_BUILD_TYPE: release
+      CI_BUILD_DUCKDB_SHELL: 'true'
+      CI_EXTENSIONS_TEST_SELECTION: regular
+      CI_VCPKG_URL: https://github.com/microsoft/vcpkg.git
+      CI_VCPKG_COMMIT: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
+      CI_VCPKG_OVERLAY_PORTS: extension-ci-tools/vcpkg_ports
+      CI_VCPKG_OVERLAY_TRIPLETS: extension-ci-tools/toolchains
+      VCPKG_TARGET_TRIPLET: ${{ matrix.triplet }}
+      VCPKG_HOST_TRIPLET: ${{ matrix.triplet }}
+      VCPKG_BINARY_SOURCES: clear;http,https://vcpkg-cache.duckdb.org,read
+      CI_USE_DEFAULT_RUNNERS: 'true'
+      CI_RUN_DISK_CLEAN_STEP: 'true'
+      CI_FETCH_PREBUILT_DUCKDB: ${{ matrix.arch == 'linux_amd64' && 'true' || 'false' }}
+      GEN: ninja
+      CI_TEST_CONFIG: '{"test_env_variables":{"ROOT4DUCKDB_ROOT_CONFIG":"/duckdb_build_dir/.deps/community-root/bin/root-config","LD_LIBRARY_PATH":"/duckdb_build_dir/.deps/community-root/lib"}}'
+    steps:
+      - name: Sources / ROOT4DuckDB
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Sources / DuckDB CI tools
+        uses: actions/checkout@v4
+        with:
+          repository: duckdb/extension-ci-tools
+          ref: v2.0-cyanoptera
+          path: extension-ci-tools
+      - name: Sources / DuckDB 2.0
+        run: python3 -u extension-ci-tools/scripts/ci_phase.py checkout
+      - name: Preflight / C bootstrap syntax
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Werror=implicit-function-declaration \
+            -fsyntax-only -DROOT4DUCKDB_BUILD_DUCKDB_VERSION="\"${DUCKDB_VERSION#v}\"" \
+            -I duckdb/src/include -I include src/core/root_bootstrap.c
+      - name: Cache / C++ objects
+        uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03
+        continue-on-error: true
+        with:
+          key: root4duckdb-${{ matrix.arch }}-duckdb-2.0
+          max-size: 5GB
+      - name: Cache / ROOT and C++ toolchain
+        id: root_toolchain_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .deps/community-root
+            .deps/micromamba/bin/micromamba
+          key: root4duckdb-toolchain-${{ matrix.arch }}-root64004-gcc14-${{ hashFiles('scripts/prepare-community-deps.sh') }}
+      - name: Cache / Apache Iceberg C++
+        id: iceberg_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .deps/iceberg-cpp
+          key: root4duckdb-iceberg-${{ matrix.arch }}-v0.3.0-0284683-gcc14-root64004-${{ hashFiles('build-iceberg.sh', 'scripts/check-iceberg.sh', 'scripts/detect-build-environment.sh') }}
+      - name: Container / configure
+        run: python3 -u extension-ci-tools/scripts/ci_phase.py setup
+      - name: Container / ARM64 repository fix
+        if: matrix.arch == 'linux_arm64'
+        run: |
+          cp .github/scripts/fix-arm64-repos.py extension-ci-tools/docker/linux_arm64/
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('extension-ci-tools/docker/linux_arm64/Dockerfile')
+          content = path.read_text()
+          marker = 'RUN yum groupinstall -y "Development Tools"'
+          assert content.count(marker) == 1
+          replacement = 'COPY fix-arm64-repos.py /tmp/fix-arm64-repos.py\nRUN python3 /tmp/fix-arm64-repos.py && yum clean all && yum groupinstall -y "Development Tools"'
+          path.write_text(content.replace(marker, replacement, 1))
+          PY
+      - name: Dependencies / ROOT and C++ toolchain
+        env:
+          CI_BUILD_TYPE: community-toolchain
+        run: python3 -u extension-ci-tools/scripts/ci_phase.py build
+      - name: Cache / save ROOT and C++ toolchain
+        if: steps.root_toolchain_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .deps/community-root
+            .deps/micromamba/bin/micromamba
+          key: ${{ steps.root_toolchain_cache.outputs.cache-primary-key }}
+      - name: Dependencies / Apache Iceberg C++
+        env:
+          CI_BUILD_TYPE: community-iceberg
+        run: python3 -u extension-ci-tools/scripts/ci_phase.py build
+      - name: Cache / save Apache Iceberg C++
+        if: steps.iceberg_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .deps/iceberg-cpp
+          key: ${{ steps.iceberg_cache.outputs.cache-primary-key }}
+      - name: Build / DuckDB and ROOT4DuckDB
+        run: python3 -u extension-ci-tools/scripts/ci_phase.py build
+      - name: Test / SQL registration
+        run: docker run --env-file=docker_env.txt -v "$PWD:/duckdb_build_dir" -v "$PWD/.ccache:/ccache_dir" "duckdb/${{ matrix.arch }}" make test_release ROOT4DUCKDB_TEST_FILE=test/sql/root_lakehouse.test
+      - name: Test / Iceberg catalog
+        run: docker run --env-file=docker_env.txt -v "$PWD:/duckdb_build_dir" -v "$PWD/.ccache:/ccache_dir" "duckdb/${{ matrix.arch }}" make test_release ROOT4DUCKDB_TEST_FILE=test/sql/root_real_iceberg.test
+      - name: Test / Loadable extension smoke
+        run: |
+          docker run --env-file=docker_env.txt -v "$PWD:/duckdb_build_dir" -v "$PWD/.ccache:/ccache_dir" "duckdb/${{ matrix.arch }}" sh -c '
+            set -eu
+            cmake --build build/release --target root_loadable_extension_smoke --parallel 2
+            build/release/extension/root/root_loadable_extension_smoke build/release/extension/root/root.duckdb_extension
+          '
+      - name: Artifact / prepare
+        id: artifacts
+        run: python3 -u extension-ci-tools/scripts/ci_phase.py upload
+      - name: Artifact / upload
+        uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: ${{ steps.artifacts.outputs.artifact_name }}
+          path: ${{ steps.artifacts.outputs.artifact_path }}

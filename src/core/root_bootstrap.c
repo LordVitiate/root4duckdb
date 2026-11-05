@@ -3,10 +3,14 @@
 #endif
 
 #include "duckdb.h"
+#include "duckdb_extension.h"
+#undef duckdb_library_version
 
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <elf.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <link.h>
 #include <pthread.h>
@@ -29,6 +33,10 @@
 
 #ifndef ROOT4DUCKDB_BUILD_ROOT_VERSION
 #define ROOT4DUCKDB_BUILD_ROOT_VERSION ""
+#endif
+
+#ifndef ROOT4DUCKDB_BUILD_DUCKDB_VERSION
+#error "ROOT4DUCKDB_BUILD_DUCKDB_VERSION must be defined"
 #endif
 
 /*
@@ -95,6 +103,17 @@ static void bootstrap_trace(const char* stage)
     }
     (void)fprintf(stderr, "[ROOT4DUCKDB][BOOTSTRAP] %s\n", stage);
     (void)fflush(stderr);
+}
+
+static void load_notice(const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    (void)fprintf(stderr, "[ROOT4DUCKDB][LOAD] ");
+    (void)vfprintf(stderr, fmt, args);
+    (void)fprintf(stderr, "\n");
+    (void)fflush(stderr);
+    va_end(args);
 }
 
 static void set_message(char* dst, size_t dst_size, const char* fmt, ...)
@@ -774,6 +793,116 @@ static int prepend_root_search_path(const char* variable, const char* directory,
     return 1;
 }
 
+static int elf_range(size_t size, uint64_t offset, uint64_t length)
+{
+    return offset <= size && length <= size - offset;
+}
+
+static int read_elf_soname(const char* path, char* soname, size_t capacity, char* error, size_t error_size)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        set_message(error, error_size, "cannot open ROOT Core ELF %s: %s", path, strerror(errno));
+        return 0;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(Elf64_Ehdr) || (uintmax_t)st.st_size > SIZE_MAX)
+    {
+        set_message(error, error_size, "cannot inspect ROOT Core ELF %s", path);
+        close(fd);
+        return 0;
+    }
+
+    const size_t size = (size_t)st.st_size;
+    const unsigned char* data = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (data == MAP_FAILED)
+    {
+        set_message(error, error_size, "cannot map ROOT Core ELF %s: %s", path, strerror(errno));
+        return 0;
+    }
+
+    int ok = 0;
+    soname[0] = '\0';
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)data;
+    if (memcmp(header->e_ident, ELFMAG, SELFMAG) != 0 ||
+        header->e_ident[EI_CLASS] != ELFCLASS64 || header->e_ident[EI_DATA] != ELFDATA2LSB ||
+        header->e_type != ET_DYN || header->e_phentsize != sizeof(Elf64_Phdr) ||
+        !header->e_phnum ||
+        !elf_range(size, header->e_phoff, (uint64_t)header->e_phnum * sizeof(Elf64_Phdr)))
+        goto done;
+
+    const Elf64_Phdr* segments = (const Elf64_Phdr*)(data + header->e_phoff);
+    const Elf64_Dyn* dynamic = NULL;
+    size_t count = 0;
+    for (size_t i = 0; i < header->e_phnum; ++i)
+    {
+        if (segments[i].p_type != PT_DYNAMIC)
+            continue;
+        if (!elf_range(size, segments[i].p_offset, segments[i].p_filesz) ||
+            segments[i].p_filesz % sizeof(Elf64_Dyn) != 0)
+            goto done;
+        dynamic = (const Elf64_Dyn*)(data + segments[i].p_offset);
+        count = (size_t)(segments[i].p_filesz / sizeof(Elf64_Dyn));
+        break;
+    }
+    if (!dynamic)
+        goto done;
+
+    uint64_t string_address = 0, string_size = 0, name_offset = 0;
+    int has_name = 0;
+    for (size_t i = 0; i < count && dynamic[i].d_tag != DT_NULL; ++i)
+    {
+        if (dynamic[i].d_tag == DT_STRTAB)
+            string_address = dynamic[i].d_un.d_ptr;
+        else if (dynamic[i].d_tag == DT_STRSZ)
+            string_size = dynamic[i].d_un.d_val;
+        else if (dynamic[i].d_tag == DT_SONAME)
+        {
+            name_offset = dynamic[i].d_un.d_val;
+            has_name = 1;
+        }
+    }
+
+    if (!has_name)
+    {
+        ok = 1;
+        goto done;
+    }
+    if (!string_address || !string_size || name_offset >= string_size)
+        goto done;
+
+    for (size_t i = 0; i < header->e_phnum; ++i)
+    {
+        const Elf64_Phdr* segment = &segments[i];
+        if (segment->p_type != PT_LOAD || string_address < segment->p_vaddr)
+            continue;
+        uint64_t displacement = string_address - segment->p_vaddr;
+        if (displacement > segment->p_filesz || string_size > segment->p_filesz - displacement)
+            continue;
+        uint64_t offset = segment->p_offset + displacement;
+        if (!elf_range(size, offset, string_size))
+            continue;
+        const char* name = (const char*)(data + offset + name_offset);
+        const char* terminator = memchr(name, '\0', (size_t)(string_size - name_offset));
+        if (!terminator || terminator == name || memchr(name, '/', (size_t)(terminator - name)) ||
+            (size_t)(terminator - name) >= capacity)
+            goto done;
+        memcpy(soname, name, (size_t)(terminator - name));
+        soname[terminator - name] = '\0';
+        ok = 1;
+        break;
+    }
+
+done:
+    (void)munmap((void*)data, size);
+    if (!ok)
+        set_message(error, error_size, "invalid or unreadable ROOT Core ELF SONAME: %s", path);
+    return ok;
+}
+
 static int load_root_runtime(char* error, size_t error_size)
 {
 
@@ -793,6 +922,7 @@ static int load_root_runtime(char* error, size_t error_size)
     size_t i;
 
     memset(&runtime, 0, sizeof(runtime));
+    load_notice("ROOT: discovering loaded libraries and installed runtime");
     bootstrap_trace("before discover_runtime");
 
     if (!discover_runtime(&runtime, error, error_size))
@@ -801,6 +931,8 @@ static int load_root_runtime(char* error, size_t error_size)
     }
 
     bootstrap_trace("after discover_runtime");
+    load_notice("ROOT: version=%s, prefix=%s", runtime.version, runtime.prefix);
+    load_notice("ROOT: libraries=%s, headers=%s", runtime.libdir, runtime.incdir);
     if (!verify_loaded_root(&runtime, error, error_size))
     {
         return 0;
@@ -822,24 +954,53 @@ static int load_root_runtime(char* error, size_t error_size)
     {
         char path[PATH_MAX];
 
-        if (snprintf(path, sizeof(path), "%s/%s", runtime.libdir, libraries[i].name) >= (int)sizeof(path))
+        int length = snprintf(path, sizeof(path), "%s/%s", runtime.libdir, libraries[i].name);
+        if (length < 0 || length >= (int)sizeof(path))
         {
             set_message(error, error_size, "ROOT library path is too long");
             return 0;
         }
 
+        if (i == 0)
+        {
+            char soname[PATH_MAX];
+            if (!read_elf_soname(path, soname, sizeof(soname), error, error_size))
+                return 0;
+            if (soname[0])
+            {
+                length = snprintf(path, sizeof(path), "%s/%s", runtime.libdir, soname);
+                if (length < 0 || length >= (int)sizeof(path))
+                {
+                    set_message(error, error_size, "ROOT Core SONAME path is too long");
+                    return 0;
+                }
+                char resolved[PATH_MAX], resolved_dir[PATH_MAX];
+                if (!canonical_path(path, resolved, sizeof(resolved), error, error_size) ||
+                    !directory_name(resolved, resolved_dir, sizeof(resolved_dir)) || strcmp(resolved_dir, runtime.libdir) != 0)
+                {
+                    set_message(error, error_size, "ROOT Core SONAME escapes selected installation: %s", soname);
+                    return 0;
+                }
+            }
+            load_notice("ROOT Core: %s (ELF SONAME: %s)", path, soname[0] ? soname : "none");
+        }
+
+        load_notice("ROOT library: loading %s", path);
         char stage[128];
-        (void)snprintf(stage, sizeof(stage), "before dlopen %s", libraries[i].name);
+        (void)snprintf(stage, sizeof(stage), "before dlopen %s", base_name(path));
         bootstrap_trace(stage);
         if (!dlopen_checked(path, libraries[i].flags, error, error_size))
         {
             return 0;
         }
-        (void)snprintf(stage, sizeof(stage), "after dlopen %s", libraries[i].name);
+        (void)snprintf(stage, sizeof(stage), "after dlopen %s", base_name(path));
         bootstrap_trace(stage);
     }
 
-    return verify_loaded_root(&runtime, error, error_size);
+    if (!verify_loaded_root(&runtime, error, error_size))
+        return 0;
+    load_notice("ROOT: %zu libraries loaded", sizeof(libraries) / sizeof(libraries[0]));
+    return 1;
 }
 
 static int write_all(int fd, const unsigned char* data, size_t size, char* error, size_t error_size)
@@ -910,6 +1071,7 @@ static int load_embedded_payload(char* error, size_t error_size)
         return 0;
     }
 
+    load_notice("C++ payload: loading embedded module");
     bootstrap_trace("before dlopen embedded payload");
     g_payload_handle = dlopen_checked(fd_path, RTLD_NOW | RTLD_LOCAL, error, error_size);
     bootstrap_trace("after dlopen embedded payload");
@@ -944,6 +1106,7 @@ static int load_embedded_payload(char* error, size_t error_size)
      */
     memcpy(&g_payload_init, &symbol, sizeof(g_payload_init));
     bootstrap_trace("embedded payload entry resolved");
+    load_notice("C++ payload: module loaded, entry point resolved");
 
     return 1;
 }
@@ -1020,10 +1183,26 @@ bool root_init_c_api(duckdb_extension_info info, struct duckdb_extension_access*
     }
 
     error[0] = '\0';
+    load_notice("START: initializing extension");
     bootstrap_trace("root_init_c_api entered");
+
+    const duckdb_ext_api_v1* api = access->get_api ?
+        (const duckdb_ext_api_v1*)access->get_api(info, DUCKDB_EXTENSION_API_VERSION_STRING) : NULL;
+    const char* host_version = api && api->duckdb_library_version ? api->duckdb_library_version() : NULL;
+    load_notice("DuckDB: host=%s, required=%s", host_version ? host_version : "unknown",
+                ROOT4DUCKDB_BUILD_DUCKDB_VERSION);
+    if (!host_version || strcmp(host_version, ROOT4DUCKDB_BUILD_DUCKDB_VERSION) != 0)
+    {
+        set_message(error, sizeof(error), "ROOT4DuckDB C++ payload requires DuckDB %s; host is %s",
+                    ROOT4DUCKDB_BUILD_DUCKDB_VERSION, host_version ? host_version : "unavailable");
+        load_notice("FAILED: %s", error);
+        access->set_error(info, error);
+        return false;
+    }
 
     if (!ensure_runtime(error, sizeof(error)))
     {
+        load_notice("FAILED: %s", error);
         access->set_error(info, error[0] ? error : "ROOT4DuckDB runtime initialization failed");
         return false;
     }
@@ -1044,9 +1223,11 @@ bool root_init_c_api(duckdb_extension_info info, struct duckdb_extension_access*
         return false;
     }
 
+    load_notice("Functions: registering ROOT4DuckDB interface");
     bootstrap_trace("before payload init");
     result = g_payload_init(info, access);
     bootstrap_trace("after payload init");
+    load_notice("COMPLETE: %s", result ? "extension ready" : "registration failed");
 
     (void)pthread_mutex_unlock(&g_registration_mutex);
 

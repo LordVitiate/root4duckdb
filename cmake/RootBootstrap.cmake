@@ -95,6 +95,7 @@ target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE
 # Embed compatibility metadata only. Never embed an installation path.
 target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE
     ROOT4DUCKDB_BUILD_ROOT_VERSION="${ROOT4DUCKDB_ROOT_VERSION}"
+    ROOT4DUCKDB_BUILD_DUCKDB_VERSION="${DUCKDB_NORMALIZED_VERSION}"
 )
 # DuckDB's extension macro uses the plain target_link_libraries signature.
 target_link_libraries(${LOADABLE_EXTENSION_NAME}

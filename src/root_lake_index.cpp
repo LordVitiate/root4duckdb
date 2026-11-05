@@ -42,14 +42,25 @@ unique_ptr<FunctionData> BuildIndexBindCallback(ClientContext&, TableFunctionBin
     return result;
 }
 
-unique_ptr<GlobalTableFunctionState> BuildIndexInitCallback(ClientContext& context, TableFunctionInitInput& input)
+unique_ptr<GlobalTableFunctionState> BuildIndexInitCallback(ClientContext&, TableFunctionInitInput&)
 {
-    return RootIndexCoordinator().Run(context, input);
+    return make_uniq<BuildIndexGlobalState>();
 }
 
-void BuildIndexCallback(ClientContext&, TableFunctionInput& input, DataChunk& output)
+void BuildIndexCallback(ClientContext& context, TableFunctionInput& input, DataChunk& output)
 {
+    auto& state = input.global_state->Cast<BuildIndexGlobalState>();
+    if (!state.built)
+    {
+        RootIndexCoordinator().Run(context, input);
+        state.built = true;
+    }
     RootIndexResultWriter().Write(input, output);
+}
+
+double BuildIndexProgressCallback(ClientContext&, const FunctionData*, const GlobalTableFunctionState* state)
+{
+    return state ? static_cast<const BuildIndexGlobalState*>(state)->Progress() : 0.0;
 }
 
 static TableFunction MakeBuildIndexFunction(const std::string& name)
@@ -90,6 +101,7 @@ static TableFunction MakeBuildIndexFunction(const std::string& name)
                                                 options.Add("publish_mode", LogicalType::VARCHAR);
                                                 options.Add("catalog_mode", LogicalType::VARCHAR);
                                             });
+    function.table_scan_progress = BuildIndexProgressCallback;
     return function;
 }
 

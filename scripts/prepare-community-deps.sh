@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+[[ $# -eq 0 || ( $# -eq 1 && "$1" == "--toolchain-only" ) ]] || { echo "Usage: $0 [--toolchain-only]" >&2; exit 2; }
+toolchain_only=0
+[[ ${1:-} != --toolchain-only ]] || toolchain_only=1
+
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 deps_dir="$project_dir/.deps"
 root_prefix="$deps_dir/community-root"
@@ -65,11 +69,14 @@ fi
 # Fail on bootstrap/sysroot C API incompatibilities before the expensive Iceberg build.
 if [[ -f "$project_dir/duckdb/src/include/duckdb.h" ]]; then
     echo "[PRECHECK] Compile ROOT bootstrap against the Community toolchain"
+    precheck_duckdb_version="${DUCKDB_VERSION:?DUCKDB_VERSION is required for the Community precheck}"
+    precheck_duckdb_version="${precheck_duckdb_version#v}"
     "$CC" -std=gnu11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion \
-        -fsyntax-only \
+        -fsyntax-only -DROOT4DUCKDB_BUILD_DUCKDB_VERSION="\"$precheck_duckdb_version\"" \
         -I"$project_dir/duckdb/src/include" \
         -I"$project_dir/include" \
         "$project_dir/src/core/root_bootstrap.c"
 fi
 
+((toolchain_only == 0)) || exit 0
 "$project_dir/build-iceberg.sh" --jobs "${ROOT4DUCKDB_COMMUNITY_JOBS:-2}"
