@@ -4,13 +4,13 @@
 
 <p>
   <a href="https://github.com/LordVitiate/root4duckdb/releases/latest">
-    <img alt="Latest release" src="https://img.shields.io/github/v/release/LordVitiate/root4duckdb?sort=semver&display_name=release&style=flat">
+    <img alt="Latest release" src="https://img.shields.io/github/v/release/LordVitiate/root4duckdb?sort=semver&style=flat">
   </a>
   <a href="https://deepwiki.com/LordVitiate/root4duckdb/">
     <img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-brightgreen">
   </a>
   <a href="https://duckdb.org/community_extensions/extensions/root">
-    <img alt="DuckDB Community Extension" src="https://img.shields.io/badge/Community-root-B255FF">
+    <img alt="DuckDB Community Extension" src="https://img.shields.io/badge/DuckDB%20Community-root-B255FF">
   </a>
   <img alt="DuckDB dev" src="https://img.shields.io/badge/DuckDB-dev%20v2.0.0-FFF000">
   <img alt="CERN ROOT" src="https://img.shields.io/badge/CERN%20ROOT-6.40-2c6aa6">
