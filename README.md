@@ -1,23 +1,26 @@
 <div align="center">
 
-<img src="assets/images/Halloween Root4DuckDB Infographic.png" alt="ROOT to SQL" width="100%">
+<img src="assets/images/NewBanner.png" alt="ROOT to SQL" width="100%">
 
 <p>
   <a href="https://github.com/LordVitiate/root4duckdb/releases/latest">
     <img alt="Latest release" src="https://img.shields.io/github/v/release/LordVitiate/root4duckdb?sort=semver&display_name=release&style=flat">
-  </a><a href="https://deepwiki.com/LordVitiate/root4duckdb/">
-  <img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-6E56CF">
-</a>
-
-<img alt="DuckDB dev" src="https://img.shields.io/badge/DuckDB-dev%20v2.0.0-FFF000">
+  </a>
+  <a href="https://deepwiki.com/LordVitiate/root4duckdb/">
+    <img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-brightgreen">
+  </a>
+  <a href="https://duckdb.org/community_extensions/extensions/root">
+    <img alt="DuckDB Community Extension" src="https://img.shields.io/badge/Community-root-B255FF">
+  </a>
+  <img alt="DuckDB dev" src="https://img.shields.io/badge/DuckDB-dev%20v2.0.0-FFF000">
   <img alt="CERN ROOT" src="https://img.shields.io/badge/CERN%20ROOT-6.40-2c6aa6">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey">
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-orange">
 </p>
 
 </div>
 
-## Latest news 🎃
+## Latest news 🍂
 - **2026-11-03 — One TRILLION indexed ROOT values!** ROOT4DuckDB indexed **1.08 trillion values** across **1,396 ROOT files with real experimental data** (5.14 TB) on a single node (16 vCPU, 30 GB RAM) in approximately 95 minutes, averaging **189 million indexed values/s**. The resulting Apache Iceberg metadata index occupies just 138 MiB. 🏆 **The 2026 Ig-Nobel-eynik Prize for outstanding achievements in unfounded skepticism** has officially been awarded to its one and only nominee. Congratulations to the laureate!
 - **2026-11-02** — 🎉 We [joined](https://duckdb.org/community_extensions/extensions/root) the community!
 - **2026-10-27 — DuckDB 2.0 migration.** The development branch builds against DuckDB 2.0.0 (Cyanoptera).
